@@ -20,7 +20,7 @@ public:
 class AnaIosHostApplication final : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "ana"; }
+    const juce::String getApplicationName() override { return "ANA"; }
     const juce::String getApplicationVersion() override { return ProjectInfo::versionString; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
