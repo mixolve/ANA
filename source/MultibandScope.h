@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace ana
@@ -15,7 +16,61 @@ enum class ScopeChannelMode
     left,
     right,
     mid,
-    side
+    side,
+    lr,
+    ms
+};
+
+struct ScopeEnvelope
+{
+    std::vector<float> minimums;
+    std::vector<float> maximums;
+};
+
+struct OfflineScopeSnapshot
+{
+    static constexpr size_t numChannelModes = 4;
+    using BandEnvelopes = std::array<ScopeEnvelope, numChannelModes>;
+
+    std::array<BandEnvelopes, dsp::Crossover::numRanges> bands;
+    size_t activeBandCount = 0;
+    double startTimeSeconds = 0.0;
+    double durationSeconds = 0.0;
+    uint64_t revision = 0;
+};
+
+struct OfflineSourceTakeChoice
+{
+    juce::String sourceId;
+    juce::String sourceName;
+    juce::String takeId;
+    juce::String takeName;
+    int takeNumber = 1;
+    juce::String audioSourceName;
+    juce::String audioSourcePersistentId;
+    double playbackStartSeconds = 0.0;
+    double playbackDurationSeconds = 0.0;
+    double sourceStartSeconds = 0.0;
+    double playRate = 1.0;
+    bool hostEnumerated = false;
+    bool activeTake = false;
+
+    bool operator==(const OfflineSourceTakeChoice& other) const
+    {
+        return sourceId == other.sourceId
+            && sourceName == other.sourceName
+            && takeId == other.takeId
+            && takeName == other.takeName
+            && takeNumber == other.takeNumber
+            && audioSourceName == other.audioSourceName
+            && audioSourcePersistentId == other.audioSourcePersistentId
+            && juce::approximatelyEqual(playbackStartSeconds, other.playbackStartSeconds)
+            && juce::approximatelyEqual(playbackDurationSeconds, other.playbackDurationSeconds)
+            && juce::approximatelyEqual(sourceStartSeconds, other.sourceStartSeconds)
+            && juce::approximatelyEqual(playRate, other.playRate)
+            && hostEnumerated == other.hostEnumerated
+            && activeTake == other.activeTake;
+    }
 };
 
 class MultibandScope
