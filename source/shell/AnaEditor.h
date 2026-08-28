@@ -1,6 +1,6 @@
 #pragma once
 
-#include "MultibandScope.h"
+#include "../scope/MultibandWaveformProcessor.h"
 
 #include <JuceHeader.h>
 #include <array>
@@ -65,6 +65,7 @@ public:
     juce::Rectangle<int> getValueBounds() const noexcept { return valueBounds; }
     void commitPendingEditor();
     void setSelected(bool shouldSelect);
+    void setCompact(bool shouldUseCompactLayout);
     void paint(juce::Graphics& graphics) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
@@ -161,8 +162,14 @@ private:
 class AnaRangeSlider final : public juce::Component
 {
 public:
+    enum class Orientation { horizontal, vertical };
+
+    explicit AnaRangeSlider(Orientation newOrientation = Orientation::horizontal)
+        : orientation(newOrientation) {}
+
     float getRangeStart() const noexcept { return rangeStart; }
     float getRangeEnd() const noexcept { return rangeEnd; }
+    void setRange(float newStart, float newEnd);
 
     void paint(juce::Graphics& graphics) override;
     void mouseDown(const juce::MouseEvent& event) override;
@@ -180,7 +187,107 @@ private:
     float dragStartRangeStart = 0.0f;
     float dragStartRangeEnd = 1.0f;
     DragMode dragMode = DragMode::none;
+    Orientation orientation;
 };
+
+class AnaFrequencyDisplayComponent final : public juce::Component, private juce::Timer
+{
+public:
+    explicit AnaFrequencyDisplayComponent(AnaAudioProcessor& processorRef);
+
+    void paint(juce::Graphics& graphics) override;
+    void resized() override;
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseMove(const juce::MouseEvent& event) override;
+    void mouseExit(const juce::MouseEvent& event) override;
+
+private:
+    void timerCallback() override;
+    void syncRangeSliders();
+    void updateFrequencyRangeFromSlider();
+    void updateMagnitudeRangeFromSlider();
+    void refreshMonitorControls();
+    juce::Rectangle<float> getPlotBounds() const noexcept;
+    void drawSpectrum(juce::Graphics& graphics, const std::vector<float>& spectrum,
+                      int fftSize, double sampleRate, juce::Rectangle<float> plotBounds,
+                      juce::Colour colour) const;
+    static float frequencyToNormalised(float frequency) noexcept;
+    static float normalisedToFrequency(float normalised) noexcept;
+
+    AnaAudioProcessor& processor;
+    AnaParameterControl frequencyLowControl;
+    AnaParameterControl frequencyHighControl;
+    AnaParameterControl rangeLowControl;
+    AnaParameterControl rangeHighControl;
+    juce::Label cursorReadoutLabel;
+    juce::Label cursorNoteReadoutLabel;
+    juce::Label cursorVerticalReadoutLabel;
+    std::array<std::unique_ptr<AnaScopeButton>, 7> monitorButtons;
+    AnaScopeButton splitButton { "SPLIT" };
+    AnaRangeSlider frequencyRangeSlider;
+    AnaRangeSlider magnitudeRangeSlider { AnaRangeSlider::Orientation::vertical };
+    std::vector<float> primarySpectrum;
+    std::vector<float> secondarySpectrum;
+    uint64_t displayedRevision = 0;
+    uint64_t displayedOfflineRevision = 0;
+    bool synchronisingRanges = false;
+    juce::Point<float> cursorPosition;
+    bool cursorInside = false;
+    float lastCursorFrequency = 0.0f;
+};
+
+class AnaCorrelationDisplayComponent final : public juce::Component, private juce::Timer
+{
+public:
+    explicit AnaCorrelationDisplayComponent(AnaAudioProcessor& processorRef);
+
+    void paint(juce::Graphics& graphics) override;
+    void resized() override;
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseMove(const juce::MouseEvent& event) override;
+    void mouseExit(const juce::MouseEvent& event) override;
+    std::function<void(const juce::String&)> onOfflineUpdateStatus;
+
+private:
+    void timerCallback() override;
+    void syncRangeSliders();
+    void updateFrequencyRangeFromSlider();
+    void updateCorrelationRangeFromSlider();
+    void refreshControls();
+    void setCorrelationMode(int mode);
+    void drawCorrelation(juce::Graphics& graphics, const std::vector<float>& values,
+                         const juce::Rectangle<float> plotBounds, float lowFrequency,
+                         float highFrequency, float lowRange, float highRange,
+                         double sampleRate, int fftSize, juce::Colour colour);
+    juce::Rectangle<float> getPlotBounds() const noexcept;
+    static float frequencyToNormalised(float frequency) noexcept;
+    static float normalisedToFrequency(float normalised) noexcept;
+
+    AnaAudioProcessor& processor;
+    AnaParameterControl frequencyLowControl;
+    AnaParameterControl frequencyHighControl;
+    AnaParameterControl rangeLowControl;
+    AnaParameterControl rangeHighControl;
+    juce::Label cursorReadoutLabel;
+    juce::Label cursorVerticalReadoutLabel;
+    AnaScopeButton phaseModeButton { "PHASE" };
+    AnaScopeButton amplitudeModeButton { "AMPLITUDE" };
+    AnaRangeSlider frequencyRangeSlider;
+    AnaRangeSlider correlationRangeSlider { AnaRangeSlider::Orientation::vertical };
+    std::vector<float> primaryCorrelation;
+    std::vector<float> secondaryCorrelation;
+    std::vector<float> correlationColumns;
+    std::vector<int> correlationColumnCounts;
+    uint64_t displayedRevision = 0;
+    uint64_t displayedOfflineRevision = 0;
+    bool synchronisingRanges = false;
+    juce::Point<float> cursorPosition;
+    bool cursorInside = false;
+    float lastCursorFrequency = 0.0f;
+    bool offlineRenderPending = false;
+};
+
+enum class AnaAnalyzerPage { scope, frequency, correlation };
 
 class AnaMultibandScopeComponent final : public juce::Component, private juce::Timer
 {
@@ -192,6 +299,7 @@ public:
     void refreshWaveform();
     void equalizeBandHeights();
     void refreshDisplaySettings();
+    void setFullSourceView(bool shouldShowFullSource);
     void paint(juce::Graphics& graphics) override;
     void resized() override;
     void mouseMove(const juce::MouseEvent& event) override;
@@ -213,7 +321,11 @@ private:
     void normalizeBandWithZoom(size_t bandIndex);
     std::array<float, ana::OfflineScopeSnapshot::numChannelModes> getRealtimeModeSamples(
         size_t bandIndex, size_t sampleIndex) const noexcept;
+    std::array<float, ana::OfflineScopeSnapshot::numChannelModes> getRealtimeWidebandModeSamples(
+        size_t sampleIndex) const noexcept;
     juce::Rectangle<float> getBandBounds(size_t bandIndex, size_t activeBandCount) const noexcept;
+    bool shouldShowZoomSliders(size_t bandIndex, size_t activeBandCount) const noexcept;
+    bool hasVisibleZoomSliders() const noexcept;
     int findBandSeparator(int y, size_t activeBandCount) const noexcept;
     size_t getWaveformColumnCount() const noexcept;
 
@@ -229,10 +341,14 @@ private:
     std::array<std::unique_ptr<AnaRangeSlider>, ana::MultibandScope::numBands> bandRangeSliders;
     std::array<ana::ScopeChannelMode, ana::MultibandScope::numBands> historyChannelModes {};
     std::array<ana::OfflineScopeSnapshot::BandEnvelopes, ana::MultibandScope::numBands> historyEnvelopes;
+    ana::OfflineScopeSnapshot::BandEnvelopes widebandHistoryEnvelopes;
     std::array<std::array<float, ana::OfflineScopeSnapshot::numChannelModes>, ana::MultibandScope::numBands> columnMinimums;
     std::array<std::array<float, ana::OfflineScopeSnapshot::numChannelModes>, ana::MultibandScope::numBands> columnMaximums;
+    std::array<float, ana::OfflineScopeSnapshot::numChannelModes> widebandColumnMinimums;
+    std::array<float, ana::OfflineScopeSnapshot::numChannelModes> widebandColumnMaximums;
     std::array<float, ana::MultibandScope::numBands> bandHeightWeights;
     std::array<bool, ana::MultibandScope::numBands> clearedBands {};
+    bool widebandCleared = false;
     std::shared_ptr<const ana::OfflineScopeSnapshot> displayedOfflineSnapshot;
     uint64_t readCursor = 0;
     double columnSampleProgress = 0.0;
@@ -245,6 +361,7 @@ private:
     bool historyContainsRecordedData = false;
     bool frozen = false;
     bool updatingBandControls = false;
+    bool fullSourceView = false;
     int lastComponentWidth = 0;
     int lastComponentHeight = 0;
     int singleViewBand = -1;
@@ -257,12 +374,12 @@ public:
     explicit AnaCrossoverSettingsComponent(AnaAudioProcessor& processorRef);
     ~AnaCrossoverSettingsComponent() override;
 
+    void setAnalyzerPage(AnaAnalyzerPage page);
     void paint(juce::Graphics& graphics) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
     std::function<void()> onDisplaySettingsChanged;
     std::function<void()> onEqualBandHeights;
-    std::function<void(bool)> onOfflineSelectionChanged;
     std::function<void(AnaParameterControl&)> onChoiceRequested;
 
 private:
@@ -279,17 +396,57 @@ private:
     AnaParameterControl styleControl;
     AnaParameterControl opacityControl;
     AnaParameterControl timeControl;
+    AnaParameterControl timeNoteControl;
+    AnaParameterControl timeBaseControl;
+    AnaParameterControl frequencyBlockSizeControl;
+    AnaParameterControl frequencyOverlapControl;
+    AnaParameterControl frequencyAverageTimeControl;
+    AnaParameterControl frequencyFirstSpectrumTypeControl;
+    AnaParameterControl frequencySecondSpectrumTypeControl;
+    AnaParameterControl frequencySlopeControl;
+    AnaParameterControl correlationBlockSizeControl;
+    AnaParameterControl correlationOverlapControl;
+    AnaParameterControl correlationAverageTimeControl;
+    AnaParameterControl correlationSmoothingControl;
+    AnaParameterControl correlationFirstSpectrumTypeControl;
+    AnaParameterControl correlationSecondSpectrumTypeControl;
     AnaScopeButton addCrossoverButton { "XOV-ADD" };
     AnaScopeButton removeCrossoverButton { "XOV-DEL" };
     AnaScopeButton equalHeightButton { "EQUAL-HEIGHT" };
     AnaScopeButton zoomControlsButton { "ZOOM" };
     AnaScopeButton monitorControlsButton { "MONITOR" };
     AnaScopeButton otherControlsButton { "OTHERS" };
-    AnaScopeButton alwaysSecondTakeButton { "ALWAYS-2ND-TAKE" };
+    AnaScopeButton frequencyFilledDisplayButton { "FILLED-DISPLAY" };
+    AnaScopeButton frequencySecondSpectrumButton { "2ND-SPECTRUM" };
+    AnaScopeButton frequencyAntiAliasButton { "ANTI-ALIAS" };
+    AnaScopeButton frequencyRangesButton { "RANGES" };
+    AnaScopeButton frequencyHostClearButton { "HOST-CLEAR" };
+    AnaScopeButton frequencyCursorButton { "CURSOR" };
+    AnaScopeButton frequencyMonitorControlsButton { "MONITOR" };
+    AnaScopeButton frequencyZoomControlsButton { "ZOOM" };
+    AnaScopeButton correlationFilledDisplayButton { "FILLED-DISPLAY" };
+    AnaScopeButton correlationSecondSpectrumButton { "2ND-SPECTRUM" };
+    AnaScopeButton correlationHostClearButton { "HOST-CLEAR" };
+    AnaScopeButton correlationRangesButton { "RANGES" };
+    AnaScopeButton correlationCursorButton { "CURSOR" };
+    AnaScopeButton correlationZoomControlsButton { "ZOOM" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> zoomControlsAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> monitorControlsAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> otherControlsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> alwaysSecondTakeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencyFilledDisplayAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencySecondSpectrumAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencyAntiAliasAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencyRangesAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencyHostClearAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencyCursorAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencyMonitorControlsAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> frequencyZoomControlsAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> correlationFilledDisplayAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> correlationSecondSpectrumAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> correlationHostClearAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> correlationRangesAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> correlationCursorAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> correlationZoomControlsAttachment;
     std::array<std::unique_ptr<AnaParameterControl>, ana::dsp::Crossover::numSplits> crossoverControls;
     AnaSliderLookAndFeel focusedControlLookAndFeel;
     juce::Slider focusedParameterControl;
@@ -300,7 +457,7 @@ private:
     juce::Label generalHeadingLabel;
     juce::Label controlsVisibilityHeadingLabel;
     juce::Label realtimeHeadingLabel;
-    juce::Label offlineHeadingLabel;
+    AnaAnalyzerPage analyzerPage = AnaAnalyzerPage::scope;
     bool constrainingFrequency = false;
     bool updatingFocusedParameterControl = false;
 };
@@ -319,7 +476,8 @@ public:
     void resized() override;
 
 private:
-    void showCrossoverSettings(bool shouldShowSettings);
+    void showAnalyzerSettings(bool shouldShowSettings);
+    void showAnalyzerPage(AnaAnalyzerPage page, bool shouldShowSettings);
     void showChoicePrompt(AnaParameterControl& control);
     void showChoicePrompt(juce::Rectangle<int> anchorBounds,
                           juce::StringArray choices,
@@ -334,11 +492,13 @@ private:
     AnaAudioProcessor& audioProcessor;
     AnaMultibandScopeComponent scopeDisplay;
     AnaCrossoverSettingsComponent crossoverSettings;
+    AnaFrequencyDisplayComponent frequencyDisplay;
+    AnaCorrelationDisplayComponent correlationDisplay;
     juce::Label offlineUpdateLabel;
     std::unique_ptr<AnaChoicePrompt> choicePrompt;
 
-    AnaScopeButton frequencyButton { "FREQUENCY" };
-    AnaScopeButton phaseButton { "PHASE" };
+    AnaScopeButton frequencyButton { "FREQ" };
+    AnaScopeButton phaseButton { "CORR" };
     AnaScopeButton scopeButton { "SCOPE" };
     AnaScopeButton settingsButton { "SETTINGS" };
     AnaScopeButton realtimeButton { "REALTIME" };
@@ -346,12 +506,15 @@ private:
     AnaScopeButton sourceButton { "SOURCE" };
     AnaScopeButton takeButton { "TAKE" };
     AnaScopeButton refreshButton { "REFRESH" };
+    AnaScopeButton fullSourceButton { "FSCR" };
     AnaScopeButton clearButton { "CLEAR" };
     AnaScopeButton freezeButton { "FREEZE" };
     juce::Point<int> pendingEditorSize;
     double editorSizeSaveDeadlineMilliseconds = 0.0;
     bool editorSizeSavePending = false;
-    bool showingCrossoverSettings = false;
+    AnaAnalyzerPage activePage = AnaAnalyzerPage::scope;
+    bool showingAnalyzerSettings = false;
+    bool scopeFrozen = false;
     std::vector<ana::OfflineSourceTakeChoice> offlineSourceTakeChoices;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AnaAudioProcessorEditor)

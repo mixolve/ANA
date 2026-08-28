@@ -1,10 +1,11 @@
-#include "PluginProcessor.h"
-#include "PluginEditor.h"
-#include "ara/AraEditorRenderer.h"
-#include "ara/AraPlaybackRenderer.h"
+#include "AnaProcessor.h"
+#include "AnaEditor.h"
+#include "../ara/AraEditorRenderer.h"
+#include "../ara/AraPlaybackRenderer.h"
 
 #include <algorithm>
 #include <cmath>
+#include <tuple>
 
 #if JucePlugin_Build_VST3
 #pragma clang diagnostic push
@@ -255,12 +256,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout AnaAudioProcessor::createPar
         juce::ParameterID { scopeTimeParameterId, 1 },
         "SCOPE / TIME",
         timeRange,
-        1000.0f,
+        10000.0f,
         juce::AudioParameterFloatAttributes()
             .withStringFromValueFunction([] (const float value, int)
             {
                 return formatScopeTime(value);
             })));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { scopeTimeBaseParameterId, 1 },
+        "SCOPE / TIME BASE",
+        juce::StringArray { "MS", "NOTE" },
+        0,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { scopeNoteLengthParameterId, 1 },
+        "SCOPE / NOTE LENGTH",
+        juce::StringArray { "1/16", "1/8", "1/4", "1/2", "1/1",
+                            "2/1", "4/1", "8/1", "16/1" },
+        4,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
 
     layout.add(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID { scopeStyleParameterId, 1 },
@@ -300,11 +316,140 @@ juce::AudioProcessorValueTreeState::ParameterLayout AnaAudioProcessor::createPar
         true,
         juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
 
-    layout.add(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID { alwaysSecondTakeParameterId, 1 },
-        "SCOPE / ALWAYS SECOND TAKE",
-        false,
-        juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { frequencyBlockSizeParameterId, 1 },
+        "FREQ / BLOCK SIZE",
+        juce::StringArray { "512", "1024", "2048", "4096", "8192", "16384" },
+        2,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { frequencyOverlapParameterId, 1 },
+        "FREQ / OVERLAP",
+        juce::NormalisableRange<float> { 0.0f, 0.95f, 0.01f },
+        0.75f,
+        juce::AudioParameterFloatAttributes()
+            .withAutomatable(false)
+            .withMeta(true)
+            .withStringFromValueFunction([] (const float value, int)
+            {
+                return juce::String(juce::roundToInt(value * 100.0f));
+            })));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { frequencyAverageTimeParameterId, 1 },
+        "FREQ / AVG TIME",
+        juce::NormalisableRange<float> { 20.0f, 5000.0f, 1.0f },
+        500.0f,
+        juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name, defaultValue] : std::array {
+             std::tuple { frequencyFilledDisplayParameterId, "FREQ / FILLED DISPLAY", true },
+             std::tuple { frequencySecondSpectrumParameterId, "FREQ / 2ND SPECTRUM", false },
+             std::tuple { frequencyAntiAliasParameterId, "FREQ / ANTI ALIAS", true },
+             std::tuple { frequencyRangesVisibleParameterId, "FREQ / RANGES", true },
+             std::tuple { frequencyHostClearParameterId, "FREQ / HOST CLEAR", false },
+             std::tuple { frequencyCursorReadoutParameterId, "FREQ / CURSOR", true },
+             std::tuple { frequencyMonitorControlsParameterId, "FREQ / MONITOR", true },
+             std::tuple { frequencyZoomControlsParameterId, "FREQ / ZOOM", true },
+             std::tuple { frequencySplitViewParameterId, "FREQ / SPLIT", false } })
+        layout.add(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { id, 1 }, name, defaultValue,
+            juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { frequencyChannelModeParameterId, 1 },
+        "FREQ / MONITOR MODE", juce::StringArray { "ST", "LR", "L", "R", "MS", "M", "S" }, 0,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name] : std::array {
+             std::pair { frequencyFirstSpectrumTypeParameterId, "FREQ / 1ST SPEC TYPE" },
+             std::pair { frequencySecondSpectrumTypeParameterId, "FREQ / 2ND SPEC TYPE" } })
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { id, 1 }, name,
+            juce::StringArray { "RTAVG", "MAX" }, 0,
+            juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { frequencySlopeParameterId, 1 },
+        "FREQ / SLOPE",
+        juce::NormalisableRange<float> { -12.0f, 12.0f, 0.1f }, 4.5f,
+        juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
+
+    const auto addFrequencyRangeParameter = [&layout] (const char* id, const juce::String& name,
+                                                         const float minimum, const float maximum,
+                                                         const float defaultValue)
+    {
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { id, 1 }, name,
+            juce::NormalisableRange<float> { minimum, maximum, 0.01f }, defaultValue,
+            juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
+    };
+    addFrequencyRangeParameter(frequencyLowParameterId, "FREQ / LOW", 20.0f, 20000.0f, 20.0f);
+    addFrequencyRangeParameter(frequencyHighParameterId, "FREQ / HIGH", 20.0f, 20000.0f, 20000.0f);
+    addFrequencyRangeParameter(frequencyRangeLowParameterId, "FREQ / RANGE LOW", -120.0f, 24.0f, -96.0f);
+    addFrequencyRangeParameter(frequencyRangeHighParameterId, "FREQ / RANGE HIGH", -120.0f, 24.0f, 0.0f);
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { correlationBlockSizeParameterId, 1 },
+        "CORR / BLOCK SIZE",
+        juce::StringArray { "512", "1024", "2048", "4096", "8192", "16384" },
+        2,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { correlationOverlapParameterId, 1 },
+        "CORR / OVERLAP",
+        juce::NormalisableRange<float> { 0.0f, 0.95f, 0.01f },
+        0.75f,
+        juce::AudioParameterFloatAttributes()
+            .withAutomatable(false)
+            .withMeta(true)
+            .withStringFromValueFunction([] (const float value, int)
+            {
+                return juce::String(juce::roundToInt(value * 100.0f));
+            })));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { correlationSmoothingParameterId, 1 }, "CORR / SMOOTHING",
+        juce::NormalisableRange<float> { 0.0f, 100.0f, 1.0f }, 30.0f,
+        juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name, minimum, maximum, defaultValue] : std::array {
+             std::tuple { correlationAverageTimeParameterId, "CORR / AVG TIME", 20.0f, 5000.0f, 500.0f } })
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { id, 1 }, name,
+            juce::NormalisableRange<float> { minimum, maximum, 1.0f },
+            defaultValue,
+            juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name, defaultValue] : std::array {
+             std::tuple { correlationFilledDisplayParameterId, "CORR / FILLED DISPLAY", true },
+             std::tuple { correlationSecondSpectrumParameterId, "CORR / 2ND SPECTRUM", false },
+             std::tuple { correlationHostClearParameterId, "CORR / HOST CLEAR", false },
+             std::tuple { correlationRangesVisibleParameterId, "CORR / RANGES", true },
+             std::tuple { correlationCursorReadoutParameterId, "CORR / CURSOR", true },
+             std::tuple { correlationZoomControlsParameterId, "CORR / ZOOM", true } })
+        layout.add(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { id, 1 }, name, defaultValue,
+            juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name] : std::array {
+             std::pair { correlationFirstSpectrumTypeParameterId, "CORR / 1ST GRAPH TYPE" },
+             std::pair { correlationSecondSpectrumTypeParameterId, "CORR / 2ND GRAPH TYPE" } })
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { id, 1 }, name,
+            juce::StringArray { "RTAVG", "MAX" }, 0,
+            juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { correlationModeParameterId, 1 },
+        "CORR / MODE", juce::StringArray { "PHASE", "AMPLITUDE" }, 0,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+    addFrequencyRangeParameter(correlationLowParameterId, "CORR / LOW", 20.0f, 20000.0f, 20.0f);
+    addFrequencyRangeParameter(correlationHighParameterId, "CORR / HIGH", 20.0f, 20000.0f, 20000.0f);
+    addFrequencyRangeParameter(correlationRangeLowParameterId, "CORR / RANGE LOW", -1.0f, 1.0f, -1.0f);
+    addFrequencyRangeParameter(correlationRangeHighParameterId, "CORR / RANGE HIGH", -1.0f, 1.0f, 1.0f);
 
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID { offlineModeParameterId, 1 },
@@ -375,6 +520,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout AnaAudioProcessor::createPar
 void AnaAudioProcessor::prepareToPlay(const double sampleRate, const int samplesPerBlock)
 {
     multibandScope.prepare(sampleRate);
+    frequencySpectrum.prepare(sampleRate);
+    correlationProcessor.prepare(sampleRate);
 
 #if JucePlugin_Enable_ARA
     prepareToPlayForARA(sampleRate,
@@ -391,6 +538,8 @@ void AnaAudioProcessor::releaseResources()
 #endif
 
     multibandScope.reset();
+    frequencySpectrum.reset();
+    correlationProcessor.reset();
 }
 
 bool AnaAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -409,12 +558,60 @@ void AnaAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
     multibandScope.setCrossoverSettings(getActiveSplitCount(), getCrossoverFrequencies());
 
+    auto* playHead = getPlayHead();
+    auto hostIsPlaying = false;
+    if (playHead != nullptr)
+        if (const auto position = playHead->getPosition())
+        {
+            if (const auto bpm = position->getBpm(); bpm.hasValue()
+                && std::isfinite(*bpm) && *bpm > 0.0)
+                hostTempoBpm.store(*bpm, std::memory_order_relaxed);
+            if (const auto isPlaying = position->getIsPlaying())
+                hostIsPlaying = isPlaying != 0;
+        }
+
 #if JucePlugin_Enable_ARA
-    processBlockForARA(buffer, isRealtime(), getPlayHead());
+    processBlockForARA(buffer, isRealtime(), playHead);
 #endif
 
     if (! isOfflineMode())
         multibandScope.processBlock(buffer);
+
+    static constexpr std::array<int, 6> frequencyBlockSizes { 512, 1024, 2048, 4096, 8192, 16384 };
+    const auto parameterChoice = [this] (const char* parameterId, const int highestIndex)
+    {
+        const auto* value = parameters.getRawParameterValue(parameterId);
+        return value != nullptr
+            ? juce::jlimit(0, highestIndex, juce::roundToInt(value->load(std::memory_order_relaxed)))
+            : 0;
+    };
+    const auto blockSizeIndex = parameterChoice(frequencyBlockSizeParameterId,
+                                                static_cast<int>(frequencyBlockSizes.size()) - 1);
+    const auto* overlap = parameters.getRawParameterValue(frequencyOverlapParameterId);
+    const auto* averagingTime = parameters.getRawParameterValue(frequencyAverageTimeParameterId);
+    const auto* hostClear = parameters.getRawParameterValue(frequencyHostClearParameterId);
+    if (hostClear != nullptr && hostClear->load(std::memory_order_relaxed) >= 0.5f
+        && hostIsPlaying && ! hostWasPlaying)
+        frequencySpectrum.requestClear();
+    frequencySpectrum.processBlock(buffer, frequencyBlockSizes[static_cast<size_t>(blockSizeIndex)],
+                                   overlap != nullptr ? overlap->load(std::memory_order_relaxed) : 0.75f,
+                                   averagingTime != nullptr ? averagingTime->load(std::memory_order_relaxed) : 500.0f);
+    const auto correlationBlockSizeIndex = parameterChoice(correlationBlockSizeParameterId,
+                                                           static_cast<int>(frequencyBlockSizes.size()) - 1);
+    const auto* correlationOverlap = parameters.getRawParameterValue(correlationOverlapParameterId);
+    const auto* correlationAveragingTime = parameters.getRawParameterValue(correlationAverageTimeParameterId);
+    const auto* correlationHostClear = parameters.getRawParameterValue(correlationHostClearParameterId);
+    if (correlationHostClear != nullptr && correlationHostClear->load(std::memory_order_relaxed) >= 0.5f
+        && hostIsPlaying && ! hostWasPlaying)
+        correlationProcessor.requestClear();
+    correlationProcessor.processBlock(buffer, frequencyBlockSizes[static_cast<size_t>(correlationBlockSizeIndex)],
+                                      correlationOverlap != nullptr
+                                          ? correlationOverlap->load(std::memory_order_relaxed)
+                                          : 0.75f,
+                                      correlationAveragingTime != nullptr
+                                          ? correlationAveragingTime->load(std::memory_order_relaxed)
+                                          : 500.0f);
+    hostWasPlaying = hostIsPlaying;
 
     for (auto channel = getTotalNumInputChannels(); channel < getTotalNumOutputChannels(); ++channel)
         buffer.clear(channel, 0, buffer.getNumSamples());
@@ -547,15 +744,43 @@ void AnaAudioProcessor::requestOfflineAnalysis(const size_t columnCount, const b
     const auto sourceId = getSelectedOfflineSourceId();
     const auto takeId = getSelectedOfflineTakeId();
     const auto sourceTakeChoices = getOfflineSourceTakeChoices();
+    static constexpr std::array<int, 6> frequencyBlockSizes { 512, 1024, 2048, 4096, 8192, 16384 };
+    const auto* blockSize = parameters.getRawParameterValue(frequencyBlockSizeParameterId);
+    const auto blockSizeIndex = juce::jlimit(0, static_cast<int>(frequencyBlockSizes.size()) - 1,
+                                             blockSize != nullptr
+                                                 ? juce::roundToInt(blockSize->load(std::memory_order_relaxed))
+                                                 : 3);
+    const auto* overlap = parameters.getRawParameterValue(frequencyOverlapParameterId);
+    const auto* averagingTime = parameters.getRawParameterValue(frequencyAverageTimeParameterId);
+    const auto frequencyOverlap = overlap != nullptr ? overlap->load(std::memory_order_relaxed) : 0.75f;
+    const auto frequencyAveragingTime = averagingTime != nullptr
+        ? averagingTime->load(std::memory_order_relaxed)
+        : 500.0f;
+    const auto* correlationBlockSize = parameters.getRawParameterValue(correlationBlockSizeParameterId);
+    const auto correlationBlockSizeIndex = juce::jlimit(0, static_cast<int>(frequencyBlockSizes.size()) - 1,
+        correlationBlockSize != nullptr
+            ? juce::roundToInt(correlationBlockSize->load(std::memory_order_relaxed)) : 3);
+    const auto* correlationOverlapValue = parameters.getRawParameterValue(correlationOverlapParameterId);
+    const auto* correlationAveragingTimeValue = parameters.getRawParameterValue(correlationAverageTimeParameterId);
+    const auto correlationOverlap = correlationOverlapValue != nullptr
+        ? correlationOverlapValue->load(std::memory_order_relaxed) : 0.75f;
+    const auto correlationAveragingTime = correlationAveragingTimeValue != nullptr
+        ? correlationAveragingTimeValue->load(std::memory_order_relaxed) : 500.0f;
 
     if (auto* renderer = getPlaybackRenderer<ana::ara::PlaybackRenderer>())
         renderer->requestOfflineAnalysis(
-            activeSplitCount, frequencies, columnCount, sourceId, takeId,
+            activeSplitCount, frequencies, columnCount, frequencyBlockSizes[static_cast<size_t>(blockSizeIndex)],
+            frequencyOverlap, frequencyAveragingTime,
+            frequencyBlockSizes[static_cast<size_t>(correlationBlockSizeIndex)],
+            correlationOverlap, correlationAveragingTime, sourceId, takeId,
             sourceTakeChoices, forceRefresh);
 
     if (auto* renderer = getEditorRenderer<ana::ara::EditorRenderer>())
         renderer->requestOfflineAnalysis(
-            activeSplitCount, frequencies, columnCount, sourceId, takeId,
+            activeSplitCount, frequencies, columnCount, frequencyBlockSizes[static_cast<size_t>(blockSizeIndex)],
+            frequencyOverlap, frequencyAveragingTime,
+            frequencyBlockSizes[static_cast<size_t>(correlationBlockSizeIndex)],
+            correlationOverlap, correlationAveragingTime, sourceId, takeId,
             sourceTakeChoices, forceRefresh);
 #else
     juce::ignoreUnused(columnCount, forceRefresh);
@@ -620,10 +845,32 @@ juce::String AnaAudioProcessor::getSelectedOfflineTakeId() const
 
 double AnaAudioProcessor::getScopeTimeMilliseconds() const noexcept
 {
+    if (isScopeTimeNoteBased())
+    {
+        static constexpr std::array<double, 9> wholeNoteDivisors {
+            16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.125, 0.0625
+        };
+        const auto* noteValue = parameters.getRawParameterValue(scopeNoteLengthParameterId);
+        const auto noteIndex = noteValue != nullptr
+            ? juce::jlimit(0, static_cast<int>(wholeNoteDivisors.size()) - 1,
+                           juce::roundToInt(noteValue->load(std::memory_order_relaxed)))
+            : 4;
+        const auto bpm = std::max(1.0, hostTempoBpm.load(std::memory_order_relaxed));
+        return 240000.0 / (bpm * wholeNoteDivisors[static_cast<size_t>(noteIndex)]);
+    }
+
     if (const auto* value = parameters.getRawParameterValue(scopeTimeParameterId))
         return static_cast<double>(value->load(std::memory_order_relaxed));
 
-    return 1000.0;
+    return 10000.0;
+}
+
+bool AnaAudioProcessor::isScopeTimeNoteBased() const noexcept
+{
+    if (const auto* value = parameters.getRawParameterValue(scopeTimeBaseParameterId))
+        return value->load(std::memory_order_relaxed) >= 0.5f;
+
+    return false;
 }
 
 bool AnaAudioProcessor::isScopeFilledStyle() const noexcept
@@ -664,14 +911,6 @@ bool AnaAudioProcessor::areScopeOtherControlsVisible() const noexcept
         return value->load(std::memory_order_relaxed) >= 0.5f;
 
     return true;
-}
-
-bool AnaAudioProcessor::shouldAlwaysUseSecondOfflineTake() const noexcept
-{
-    if (const auto* value = parameters.getRawParameterValue(alwaysSecondTakeParameterId))
-        return value->load(std::memory_order_relaxed) >= 0.5f;
-
-    return false;
 }
 
 size_t AnaAudioProcessor::getActiveSplitCount() const noexcept
@@ -733,6 +972,21 @@ int AnaAudioProcessor::getScopeSingleViewBand() const noexcept
                         static_cast<int>(parameters.state.getProperty(scopeSingleViewStateKey, -1)));
 }
 
+bool AnaAudioProcessor::isScopeFullSourceView() const noexcept
+{
+    return static_cast<bool>(parameters.state.getProperty(scopeFullSourceStateKey, false));
+}
+
+bool AnaAudioProcessor::isFrequencyPageSelected() const noexcept
+{
+    return getAnalyzerPageState() == 1;
+}
+
+int AnaAudioProcessor::getAnalyzerPageState() const noexcept
+{
+    return juce::jlimit(0, 2, static_cast<int>(parameters.state.getProperty(analyzerPageStateKey, 0)));
+}
+
 void AnaAudioProcessor::setLastEditorSize(const int width, const int height) noexcept
 {
     const auto validWidth = std::max(0, width);
@@ -754,6 +1008,21 @@ void AnaAudioProcessor::setLastEditorSize(const int width, const int height) noe
         updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
                               .withNonParameterStateChanged(true));
     }
+}
+
+void AnaAudioProcessor::setFrequencyPageSelected(const bool shouldSelectFrequency)
+{
+    setAnalyzerPageState(shouldSelectFrequency ? 1 : 0);
+}
+
+void AnaAudioProcessor::setAnalyzerPageState(const int page)
+{
+    const auto safePage = juce::jlimit(0, 2, page);
+    if (getAnalyzerPageState() == safePage)
+        return;
+
+    parameters.state.setProperty(analyzerPageStateKey, safePage, nullptr);
+    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
 }
 
 ana::dsp::Crossover::SplitFrequencies AnaAudioProcessor::getCrossoverFrequencies() const noexcept
@@ -832,17 +1101,6 @@ void AnaAudioProcessor::setSelectedOfflineTakeId(const juce::String& takeId)
                           .withNonParameterStateChanged(true));
 }
 
-void AnaAudioProcessor::setAlwaysUseSecondOfflineTake(const bool shouldUseSecondTake)
-{
-    auto* parameter = parameters.getParameter(alwaysSecondTakeParameterId);
-    if (parameter == nullptr)
-        return;
-
-    parameter->beginChangeGesture();
-    parameter->setValueNotifyingHost(shouldUseSecondTake ? 1.0f : 0.0f);
-    parameter->endChangeGesture();
-}
-
 void AnaAudioProcessor::setScopeSingleViewBand(const int bandIndex)
 {
     const auto validBand = juce::jlimit(-1,
@@ -853,6 +1111,19 @@ void AnaAudioProcessor::setScopeSingleViewBand(const int bandIndex)
         return;
 
     parameters.state.setProperty(scopeSingleViewStateKey, validBand, nullptr);
+    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
+                          .withNonParameterStateChanged(true));
+}
+
+void AnaAudioProcessor::setScopeFullSourceView(const bool shouldShowFullSource)
+{
+    if (isScopeFullSourceView() == shouldShowFullSource)
+        return;
+
+    parameters.state.setProperty(scopeFullSourceStateKey, shouldShowFullSource, nullptr);
+    if (shouldShowFullSource)
+        parameters.state.setProperty(scopeSingleViewStateKey, -1, nullptr);
+
     updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
                           .withNonParameterStateChanged(true));
 }

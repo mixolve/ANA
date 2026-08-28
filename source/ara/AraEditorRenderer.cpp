@@ -76,6 +76,12 @@ void EditorRenderer::requestOfflineAnalysis(
     const size_t activeSplitCount,
     const dsp::Crossover::SplitFrequencies& frequencies,
     const size_t columnCount,
+    const int frequencyBlockSize,
+    const float frequencyOverlap,
+    const float frequencyAveragingTimeMilliseconds,
+    const int correlationBlockSize,
+    const float correlationOverlap,
+    const float correlationAveragingTimeMilliseconds,
     const juce::String& sourceId,
     const juce::String& takeId,
     const std::vector<OfflineSourceTakeChoice>& sourceTakeChoices,
@@ -89,6 +95,14 @@ void EditorRenderer::requestOfflineAnalysis(
         && latestAnalysisSettings.activeSplitCount == activeSplitCount
         && latestAnalysisSettings.frequencies == frequencies
         && latestAnalysisSettings.columnCount == columnCount
+        && latestAnalysisSettings.frequencyBlockSize == frequencyBlockSize
+        && juce::approximatelyEqual(latestAnalysisSettings.frequencyOverlap, frequencyOverlap)
+        && juce::approximatelyEqual(latestAnalysisSettings.frequencyAveragingTimeMilliseconds,
+                                    frequencyAveragingTimeMilliseconds)
+        && latestAnalysisSettings.correlationBlockSize == correlationBlockSize
+        && juce::approximatelyEqual(latestAnalysisSettings.correlationOverlap, correlationOverlap)
+        && juce::approximatelyEqual(latestAnalysisSettings.correlationAveragingTimeMilliseconds,
+                                    correlationAveragingTimeMilliseconds)
         && latestAnalysisSettings.sourceId == sourceId
         && latestAnalysisSettings.takeId == takeId
         && latestAnalysisSettings.sourceTakeChoices == sourceTakeChoices
@@ -98,6 +112,12 @@ void EditorRenderer::requestOfflineAnalysis(
     latestAnalysisSettings.activeSplitCount = std::min(activeSplitCount, dsp::Crossover::numSplits);
     latestAnalysisSettings.frequencies = frequencies;
     latestAnalysisSettings.columnCount = std::max<size_t>(1, columnCount);
+    latestAnalysisSettings.frequencyBlockSize = frequencyBlockSize;
+    latestAnalysisSettings.frequencyOverlap = frequencyOverlap;
+    latestAnalysisSettings.frequencyAveragingTimeMilliseconds = frequencyAveragingTimeMilliseconds;
+    latestAnalysisSettings.correlationBlockSize = correlationBlockSize;
+    latestAnalysisSettings.correlationOverlap = correlationOverlap;
+    latestAnalysisSettings.correlationAveragingTimeMilliseconds = correlationAveragingTimeMilliseconds;
     latestAnalysisSettings.sourceId = sourceId;
     latestAnalysisSettings.takeId = takeId;
     latestAnalysisSettings.sourceTakeChoices = sourceTakeChoices;
@@ -216,10 +236,7 @@ std::shared_ptr<OfflineScopeSnapshot> EditorRenderer::buildOfflineSnapshot(
 {
     const auto columnCount = std::max<size_t>(1, request.columnCount);
     constexpr int readBlockSize = 4096;
-    const auto processingLock = lock.getProcessingLock();
-
-    if (! processingLock.isLocked())
-        return {};
+    const juce::ScopedReadLock processingLock(lock.getProcessingReadWriteLock());
 
     const auto playbackRegions = collectPlaybackRegions();
     const auto sourceTakeChoices = request.sourceTakeChoices.empty()
@@ -228,6 +245,10 @@ std::shared_ptr<OfflineScopeSnapshot> EditorRenderer::buildOfflineSnapshot(
     auto snapshot = std::make_shared<OfflineScopeSnapshot>();
     snapshot->activeBandCount = request.activeSplitCount + 1;
     snapshot->revision = request.revision | (uint64_t { 1 } << 63);
+    prepareOfflineFrequencySpectrum(*snapshot, request.frequencyBlockSize, request.frequencyOverlap,
+                                    request.frequencyAveragingTimeMilliseconds);
+    prepareOfflineCorrelationSpectrum(*snapshot, request.correlationBlockSize, request.correlationOverlap,
+                                      request.correlationAveragingTimeMilliseconds);
 
     if (std::any_of(sourceTakeChoices.begin(), sourceTakeChoices.end(),
                     [] (const auto& choice) { return choice.hostEnumerated; }))
@@ -280,14 +301,17 @@ std::shared_ptr<OfflineScopeSnapshot> EditorRenderer::buildOfflineSnapshot(
     snapshot->startTimeSeconds = firstTime;
     snapshot->durationSeconds = std::max(0.0, lastTime - firstTime);
 
-    for (auto& band : snapshot->bands)
+    const auto initialiseEnvelopes = [columnCount] (auto& envelopes)
     {
-        for (auto& envelope : band)
+        for (auto& envelope : envelopes)
         {
             envelope.minimums.assign(columnCount, std::numeric_limits<float>::max());
             envelope.maximums.assign(columnCount, std::numeric_limits<float>::lowest());
         }
-    }
+    };
+    for (auto& band : snapshot->bands)
+        initialiseEnvelopes(band);
+    initialiseEnvelopes(snapshot->wideband);
 
     for (auto* playbackRegion : playbackRegions)
     {
@@ -329,6 +353,9 @@ std::shared_ptr<OfflineScopeSnapshot> EditorRenderer::buildOfflineSnapshot(
             if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
                 continue;
 
+            processOfflineFrequencyBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
+            processOfflineCorrelationBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
+
             const auto* left = readBuffer.getReadPointer(0);
             const auto* right = readBuffer.getReadPointer(1);
 
@@ -343,6 +370,18 @@ std::shared_ptr<OfflineScopeSnapshot> EditorRenderer::buildOfflineSnapshot(
                 const auto column = std::min(columnCount - 1,
                     static_cast<size_t>(std::max(0.0, normalizedTime)
                                         * static_cast<double>(columnCount)));
+                const std::array<float, OfflineScopeSnapshot::numChannelModes> widebandModes {
+                    left[sampleIndex], right[sampleIndex],
+                    0.5f * (left[sampleIndex] + right[sampleIndex]),
+                    0.5f * (left[sampleIndex] - right[sampleIndex])
+                };
+
+                for (size_t modeIndex = 0; modeIndex < widebandModes.size(); ++modeIndex)
+                {
+                    auto& envelope = snapshot->wideband[modeIndex];
+                    envelope.minimums[column] = std::min(envelope.minimums[column], widebandModes[modeIndex]);
+                    envelope.maximums[column] = std::max(envelope.maximums[column], widebandModes[modeIndex]);
+                }
                 const auto ranges = crossover.processSample(left[sampleIndex], right[sampleIndex]);
 
                 for (size_t bandIndex = 0; bandIndex < snapshot->activeBandCount; ++bandIndex)
@@ -378,9 +417,9 @@ std::shared_ptr<OfflineScopeSnapshot> EditorRenderer::buildOfflineSnapshot(
             }))
         return {};
 
-    for (auto& band : snapshot->bands)
+    const auto finishEnvelopes = [columnCount] (auto& envelopes)
     {
-        for (auto& envelope : band)
+        for (auto& envelope : envelopes)
         {
             for (size_t column = 0; column < columnCount; ++column)
             {
@@ -388,7 +427,10 @@ std::shared_ptr<OfflineScopeSnapshot> EditorRenderer::buildOfflineSnapshot(
                     envelope.minimums[column] = envelope.maximums[column] = 0.0f;
             }
         }
-    }
+    };
+    for (auto& band : snapshot->bands)
+        finishEnvelopes(band);
+    finishEnvelopes(snapshot->wideband);
 
     return snapshot;
 }

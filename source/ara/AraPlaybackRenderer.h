@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../MultibandScope.h"
+#include "../scope/MultibandWaveformProcessor.h"
 
 #include <JuceHeader.h>
 
@@ -46,12 +46,32 @@ bool analyseHostTakeChoices(OfflineScopeSnapshot& snapshot,
                             size_t activeSplitCount,
                             size_t columnCount,
                             const std::function<bool()>& shouldCancel);
+void prepareOfflineFrequencySpectrum(OfflineScopeSnapshot& snapshot,
+                                     int blockSize,
+                                     float overlap,
+                                     float averagingTimeMilliseconds);
+void processOfflineFrequencyBlock(OfflineScopeSnapshot& snapshot,
+                                  juce::AudioBuffer<float>& buffer,
+                                  int samplesToProcess,
+                                  double sampleRate);
+void prepareOfflineCorrelationSpectrum(OfflineScopeSnapshot& snapshot,
+                                       int blockSize,
+                                       float overlap,
+                                       float averagingTimeMilliseconds);
+void processOfflineCorrelationBlock(OfflineScopeSnapshot& snapshot,
+                                    juce::AudioBuffer<float>& buffer,
+                                    int samplesToProcess,
+                                    double sampleRate);
 
 class ProcessingLock
 {
 public:
     virtual ~ProcessingLock() = default;
-    virtual juce::ScopedTryReadLock getProcessingLock() = 0;
+    virtual juce::ReadWriteLock& getProcessingReadWriteLock() = 0;
+    juce::ScopedTryReadLock getProcessingLock()
+    {
+        return juce::ScopedTryReadLock(getProcessingReadWriteLock());
+    }
 };
 
 class PlaybackRenderer final : public juce::ARAPlaybackRenderer,
@@ -76,6 +96,12 @@ public:
     void requestOfflineAnalysis(size_t activeSplitCount,
                                 const dsp::Crossover::SplitFrequencies& frequencies,
                                 size_t columnCount,
+                                int frequencyBlockSize,
+                                float frequencyOverlap,
+                                float frequencyAveragingTimeMilliseconds,
+                                int correlationBlockSize,
+                                float correlationOverlap,
+                                float correlationAveragingTimeMilliseconds,
                                 const juce::String& sourceId,
                                 const juce::String& takeId,
                                 const std::vector<OfflineSourceTakeChoice>& sourceTakeChoices,
@@ -98,6 +124,12 @@ private:
         dsp::Crossover::SplitFrequencies frequencies {};
         size_t activeSplitCount = 0;
         size_t columnCount = 512;
+        int frequencyBlockSize = 4096;
+        float frequencyOverlap = 0.75f;
+        float frequencyAveragingTimeMilliseconds = 500.0f;
+        int correlationBlockSize = 4096;
+        float correlationOverlap = 0.75f;
+        float correlationAveragingTimeMilliseconds = 500.0f;
         juce::String sourceId;
         juce::String takeId;
         std::vector<OfflineSourceTakeChoice> sourceTakeChoices;

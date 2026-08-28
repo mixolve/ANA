@@ -36,9 +36,9 @@ bool DocumentController::doStoreObjectsToStream(juce::ARAOutputStream&,
     return true;
 }
 
-juce::ScopedTryReadLock DocumentController::getProcessingLock()
+juce::ReadWriteLock& DocumentController::getProcessingReadWriteLock()
 {
-    return juce::ScopedTryReadLock(processingLock);
+    return processingLock;
 }
 } // namespace ana::ara
 

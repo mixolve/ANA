@@ -1,6 +1,6 @@
 #pragma once
 
-#include "dsp/Crossover.h"
+#include "LinkwitzRileyCrossover.h"
 
 #include <JuceHeader.h>
 #include <array>
@@ -11,6 +11,16 @@
 
 namespace ana
 {
+namespace freq
+{
+class FrequencySpectrumProcessor;
+}
+
+namespace corr
+{
+class StereoCorrelationProcessor;
+}
+
 enum class ScopeChannelMode
 {
     left,
@@ -33,10 +43,21 @@ struct OfflineScopeSnapshot
     using BandEnvelopes = std::array<ScopeEnvelope, numChannelModes>;
 
     std::array<BandEnvelopes, dsp::Crossover::numRanges> bands;
+    BandEnvelopes wideband;
     size_t activeBandCount = 0;
     double startTimeSeconds = 0.0;
     double durationSeconds = 0.0;
     uint64_t revision = 0;
+    std::shared_ptr<freq::FrequencySpectrumProcessor> frequencySpectrum;
+    double frequencySampleRate = 0.0;
+    int frequencyBlockSize = 4096;
+    float frequencyOverlap = 0.75f;
+    float frequencyAveragingTimeMilliseconds = 500.0f;
+    std::shared_ptr<corr::StereoCorrelationProcessor> correlationSpectrum;
+    double correlationSampleRate = 0.0;
+    int correlationBlockSize = 4096;
+    float correlationOverlap = 0.75f;
+    float correlationAveragingTimeMilliseconds = 500.0f;
 };
 
 struct OfflineSourceTakeChoice
@@ -80,7 +101,16 @@ public:
     static constexpr size_t numSourceChannels = 2;
     static constexpr size_t ringCapacity = 524288;
     using BandSnapshot = std::array<std::vector<float>, numSourceChannels>;
-    using Snapshot = std::array<BandSnapshot, numBands>;
+    struct Snapshot
+    {
+        std::array<BandSnapshot, numBands> bands;
+        BandSnapshot wideband;
+
+        BandSnapshot& operator[](const size_t index) noexcept { return bands[index]; }
+        const BandSnapshot& operator[](const size_t index) const noexcept { return bands[index]; }
+        BandSnapshot& front() noexcept { return bands.front(); }
+        const BandSnapshot& front() const noexcept { return bands.front(); }
+    };
 
     MultibandScope();
 
@@ -101,6 +131,7 @@ private:
     dsp::Crossover::SplitFrequencies currentFrequencies { 134.0, 523.0, 2093.0, 5000.0, 10000.0 };
     size_t currentActiveSplitCount = dsp::Crossover::numSplits;
     std::array<std::array<std::array<std::atomic<float>, ringCapacity>, numSourceChannels>, numBands> ringBuffers;
+    std::array<std::array<std::atomic<float>, ringCapacity>, numSourceChannels> widebandRingBuffers;
     std::atomic<uint64_t> writeCursor { 0 };
     std::atomic<double> sampleRate { 44100.0 };
     size_t displayDecimation = 1;

@@ -1,5 +1,8 @@
 #include "AraPlaybackRenderer.h"
 
+#include "../corr/StereoCorrelationProcessor.h"
+#include "../freq/FrequencySpectrumProcessor.h"
+
 #if JucePlugin_Enable_ARA
 
 #include <algorithm>
@@ -79,6 +82,80 @@ bool matchesOfflineSelection(const juce::ARAPlaybackRegion& playbackRegion,
     const auto selectedTakeNumber = takeSelection.getIntValue();
     return selectedTakeNumber <= 0
         || getOfflineTakeNumber(playbackRegion, choices) == selectedTakeNumber;
+}
+
+void prepareOfflineFrequencySpectrum(OfflineScopeSnapshot& snapshot,
+                                     const int blockSize,
+                                     const float overlap,
+                                     const float averagingTimeMilliseconds)
+{
+    snapshot.frequencySpectrum = std::make_shared<freq::FrequencySpectrumProcessor>();
+    snapshot.frequencySampleRate = 0.0;
+    snapshot.frequencyBlockSize = blockSize;
+    snapshot.frequencyOverlap = overlap;
+    snapshot.frequencyAveragingTimeMilliseconds = averagingTimeMilliseconds;
+}
+
+void processOfflineFrequencyBlock(OfflineScopeSnapshot& snapshot,
+                                  juce::AudioBuffer<float>& buffer,
+                                  const int samplesToProcess,
+                                  const double sampleRate)
+{
+    if (snapshot.frequencySpectrum == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+        return;
+
+    if (snapshot.frequencySampleRate <= 0.0)
+    {
+        snapshot.frequencySampleRate = sampleRate;
+        snapshot.frequencySpectrum->prepare(sampleRate);
+    }
+
+    if (! juce::approximatelyEqual(snapshot.frequencySampleRate, sampleRate))
+        return;
+
+    if (samplesToProcess < buffer.getNumSamples())
+        buffer.clear(samplesToProcess, buffer.getNumSamples() - samplesToProcess);
+
+    snapshot.frequencySpectrum->processBlock(buffer, snapshot.frequencyBlockSize,
+                                             snapshot.frequencyOverlap,
+                                             snapshot.frequencyAveragingTimeMilliseconds);
+}
+
+void prepareOfflineCorrelationSpectrum(OfflineScopeSnapshot& snapshot,
+                                       const int blockSize,
+                                       const float overlap,
+                                       const float averagingTimeMilliseconds)
+{
+    snapshot.correlationSpectrum = std::make_shared<corr::StereoCorrelationProcessor>();
+    snapshot.correlationSampleRate = 0.0;
+    snapshot.correlationBlockSize = blockSize;
+    snapshot.correlationOverlap = overlap;
+    snapshot.correlationAveragingTimeMilliseconds = averagingTimeMilliseconds;
+}
+
+void processOfflineCorrelationBlock(OfflineScopeSnapshot& snapshot,
+                                    juce::AudioBuffer<float>& buffer,
+                                    const int samplesToProcess,
+                                    const double sampleRate)
+{
+    if (snapshot.correlationSpectrum == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+        return;
+
+    if (snapshot.correlationSampleRate <= 0.0)
+    {
+        snapshot.correlationSampleRate = sampleRate;
+        snapshot.correlationSpectrum->prepare(sampleRate);
+    }
+
+    if (! juce::approximatelyEqual(snapshot.correlationSampleRate, sampleRate))
+        return;
+
+    if (samplesToProcess < buffer.getNumSamples())
+        buffer.clear(samplesToProcess, buffer.getNumSamples() - samplesToProcess);
+
+    snapshot.correlationSpectrum->processBlock(buffer, snapshot.correlationBlockSize,
+                                               snapshot.correlationOverlap,
+                                               snapshot.correlationAveragingTimeMilliseconds);
 }
 
 std::vector<juce::ARAPlaybackRegion*> collectOfflinePlaybackRegions(
@@ -277,6 +354,9 @@ bool analyseOfflineTakeSource(
         if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
             continue;
 
+        processOfflineFrequencyBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        processOfflineCorrelationBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+
         const auto* left = readBuffer.getReadPointer(0);
         const auto* right = readBuffer.getReadPointer(1);
 
@@ -286,6 +366,18 @@ bool analyseOfflineTakeSource(
                 / static_cast<double>(sourceSampleCount);
             const auto column = std::min(columnCount - 1,
                 static_cast<size_t>(normalizedTime * static_cast<double>(columnCount)));
+            const std::array<float, OfflineScopeSnapshot::numChannelModes> widebandModes {
+                left[sampleIndex], right[sampleIndex],
+                0.5f * (left[sampleIndex] + right[sampleIndex]),
+                0.5f * (left[sampleIndex] - right[sampleIndex])
+            };
+
+            for (size_t modeIndex = 0; modeIndex < widebandModes.size(); ++modeIndex)
+            {
+                auto& envelope = snapshot.wideband[modeIndex];
+                envelope.minimums[column] = std::min(envelope.minimums[column], widebandModes[modeIndex]);
+                envelope.maximums[column] = std::max(envelope.maximums[column], widebandModes[modeIndex]);
+            }
             const auto ranges = crossover.processSample(left[sampleIndex], right[sampleIndex]);
 
             for (size_t bandIndex = 0; bandIndex < snapshot.activeBandCount; ++bandIndex)
@@ -362,21 +454,25 @@ static juce::ARAAudioSource* findHostTakeAudioSource(
 
 static void initialiseOfflineEnvelopes(OfflineScopeSnapshot& snapshot, const size_t columnCount)
 {
-    for (auto& band : snapshot.bands)
+    const auto initialise = [columnCount] (auto& envelopes)
     {
-        for (auto& envelope : band)
+        for (auto& envelope : envelopes)
         {
             envelope.minimums.assign(columnCount, std::numeric_limits<float>::max());
             envelope.maximums.assign(columnCount, std::numeric_limits<float>::lowest());
         }
-    }
+    };
+
+    for (auto& band : snapshot.bands)
+        initialise(band);
+    initialise(snapshot.wideband);
 }
 
 static void finishOfflineEnvelopes(OfflineScopeSnapshot& snapshot)
 {
-    for (auto& band : snapshot.bands)
+    const auto finish = [] (auto& envelopes)
     {
-        for (auto& envelope : band)
+        for (auto& envelope : envelopes)
         {
             for (size_t column = 0; column < envelope.minimums.size(); ++column)
             {
@@ -384,7 +480,11 @@ static void finishOfflineEnvelopes(OfflineScopeSnapshot& snapshot)
                     envelope.minimums[column] = envelope.maximums[column] = 0.0f;
             }
         }
-    }
+    };
+
+    for (auto& band : snapshot.bands)
+        finish(band);
+    finish(snapshot.wideband);
 }
 
 static bool analyseHostTakeChoice(
@@ -432,6 +532,9 @@ static bool analyseHostTakeChoice(
         if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
             continue;
 
+        processOfflineFrequencyBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        processOfflineCorrelationBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+
         const auto* left = readBuffer.getReadPointer(0);
         const auto* right = readBuffer.getReadPointer(1);
         for (int sampleIndex = 0; sampleIndex < samplesToRead; ++sampleIndex)
@@ -446,6 +549,18 @@ static bool analyseHostTakeChoice(
             const auto column = std::min(columnCount - 1,
                 static_cast<size_t>(std::max(0.0, normalizedTime)
                                     * static_cast<double>(columnCount)));
+            const std::array<float, OfflineScopeSnapshot::numChannelModes> widebandModes {
+                left[sampleIndex], right[sampleIndex],
+                0.5f * (left[sampleIndex] + right[sampleIndex]),
+                0.5f * (left[sampleIndex] - right[sampleIndex])
+            };
+
+            for (size_t modeIndex = 0; modeIndex < widebandModes.size(); ++modeIndex)
+            {
+                auto& envelope = snapshot.wideband[modeIndex];
+                envelope.minimums[column] = std::min(envelope.minimums[column], widebandModes[modeIndex]);
+                envelope.maximums[column] = std::max(envelope.maximums[column], widebandModes[modeIndex]);
+            }
             const auto ranges = crossover.processSample(left[sampleIndex], right[sampleIndex]);
 
             for (size_t bandIndex = 0; bandIndex < snapshot.activeBandCount; ++bandIndex)
@@ -842,6 +957,12 @@ void PlaybackRenderer::requestOfflineAnalysis(
     const size_t activeSplitCount,
     const dsp::Crossover::SplitFrequencies& frequencies,
     const size_t columnCount,
+    const int frequencyBlockSize,
+    const float frequencyOverlap,
+    const float frequencyAveragingTimeMilliseconds,
+    const int correlationBlockSize,
+    const float correlationOverlap,
+    const float correlationAveragingTimeMilliseconds,
     const juce::String& sourceId,
     const juce::String& takeId,
     const std::vector<OfflineSourceTakeChoice>& sourceTakeChoices,
@@ -855,6 +976,14 @@ void PlaybackRenderer::requestOfflineAnalysis(
         && latestAnalysisSettings.activeSplitCount == activeSplitCount
         && latestAnalysisSettings.frequencies == frequencies
         && latestAnalysisSettings.columnCount == columnCount
+        && latestAnalysisSettings.frequencyBlockSize == frequencyBlockSize
+        && juce::approximatelyEqual(latestAnalysisSettings.frequencyOverlap, frequencyOverlap)
+        && juce::approximatelyEqual(latestAnalysisSettings.frequencyAveragingTimeMilliseconds,
+                                    frequencyAveragingTimeMilliseconds)
+        && latestAnalysisSettings.correlationBlockSize == correlationBlockSize
+        && juce::approximatelyEqual(latestAnalysisSettings.correlationOverlap, correlationOverlap)
+        && juce::approximatelyEqual(latestAnalysisSettings.correlationAveragingTimeMilliseconds,
+                                    correlationAveragingTimeMilliseconds)
         && latestAnalysisSettings.sourceId == sourceId
         && latestAnalysisSettings.takeId == takeId
         && latestAnalysisSettings.sourceTakeChoices == sourceTakeChoices
@@ -864,6 +993,12 @@ void PlaybackRenderer::requestOfflineAnalysis(
     latestAnalysisSettings.activeSplitCount = std::min(activeSplitCount, dsp::Crossover::numSplits);
     latestAnalysisSettings.frequencies = frequencies;
     latestAnalysisSettings.columnCount = std::max<size_t>(1, columnCount);
+    latestAnalysisSettings.frequencyBlockSize = frequencyBlockSize;
+    latestAnalysisSettings.frequencyOverlap = frequencyOverlap;
+    latestAnalysisSettings.frequencyAveragingTimeMilliseconds = frequencyAveragingTimeMilliseconds;
+    latestAnalysisSettings.correlationBlockSize = correlationBlockSize;
+    latestAnalysisSettings.correlationOverlap = correlationOverlap;
+    latestAnalysisSettings.correlationAveragingTimeMilliseconds = correlationAveragingTimeMilliseconds;
     latestAnalysisSettings.sourceId = sourceId;
     latestAnalysisSettings.takeId = takeId;
     latestAnalysisSettings.sourceTakeChoices = sourceTakeChoices;
@@ -967,10 +1102,7 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
 {
     const auto columnCount = std::max<size_t>(1, request.columnCount);
     constexpr int readBlockSize = 4096;
-    const auto processingLock = lock.getProcessingLock();
-
-    if (! processingLock.isLocked())
-        return {};
+    const juce::ScopedReadLock processingLock(lock.getProcessingReadWriteLock());
 
     std::vector<juce::ARAPlaybackRegion*> rendererRegions;
     for (auto* playbackRegion : getPlaybackRegions())
@@ -983,6 +1115,10 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
     auto snapshot = std::make_shared<OfflineScopeSnapshot>();
     snapshot->activeBandCount = request.activeSplitCount + 1;
     snapshot->revision = request.revision;
+    prepareOfflineFrequencySpectrum(*snapshot, request.frequencyBlockSize, request.frequencyOverlap,
+                                    request.frequencyAveragingTimeMilliseconds);
+    prepareOfflineCorrelationSpectrum(*snapshot, request.correlationBlockSize, request.correlationOverlap,
+                                      request.correlationAveragingTimeMilliseconds);
 
     if (std::any_of(sourceTakeChoices.begin(), sourceTakeChoices.end(),
                     [] (const auto& choice) { return choice.hostEnumerated; }))
@@ -1035,14 +1171,7 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
     snapshot->startTimeSeconds = firstTime;
     snapshot->durationSeconds = std::max(0.0, lastTime - firstTime);
 
-    for (auto& band : snapshot->bands)
-    {
-        for (auto& envelope : band)
-        {
-            envelope.minimums.assign(columnCount, std::numeric_limits<float>::max());
-            envelope.maximums.assign(columnCount, std::numeric_limits<float>::lowest());
-        }
-    }
+    initialiseOfflineEnvelopes(*snapshot, columnCount);
 
     for (auto* playbackRegion : playbackRegions)
     {
@@ -1084,6 +1213,9 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
             if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
                 continue;
 
+            processOfflineFrequencyBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
+            processOfflineCorrelationBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
+
             const auto* left = readBuffer.getReadPointer(0);
             const auto* right = readBuffer.getReadPointer(1);
 
@@ -1098,6 +1230,18 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
                 const auto column = std::min(columnCount - 1,
                     static_cast<size_t>(std::max(0.0, normalizedTime)
                                         * static_cast<double>(columnCount)));
+                const std::array<float, OfflineScopeSnapshot::numChannelModes> widebandModes {
+                    left[sampleIndex], right[sampleIndex],
+                    0.5f * (left[sampleIndex] + right[sampleIndex]),
+                    0.5f * (left[sampleIndex] - right[sampleIndex])
+                };
+
+                for (size_t modeIndex = 0; modeIndex < widebandModes.size(); ++modeIndex)
+                {
+                    auto& envelope = snapshot->wideband[modeIndex];
+                    envelope.minimums[column] = std::min(envelope.minimums[column], widebandModes[modeIndex]);
+                    envelope.maximums[column] = std::max(envelope.maximums[column], widebandModes[modeIndex]);
+                }
                 const auto ranges = crossover.processSample(left[sampleIndex], right[sampleIndex]);
 
                 for (size_t bandIndex = 0; bandIndex < snapshot->activeBandCount; ++bandIndex)
@@ -1133,17 +1277,7 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
             }))
         return {};
 
-    for (auto& band : snapshot->bands)
-    {
-        for (auto& envelope : band)
-        {
-            for (size_t column = 0; column < columnCount; ++column)
-            {
-                if (envelope.minimums[column] > envelope.maximums[column])
-                    envelope.minimums[column] = envelope.maximums[column] = 0.0f;
-            }
-        }
-    }
+    finishOfflineEnvelopes(*snapshot);
 
     return snapshot;
 }

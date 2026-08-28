@@ -1,4 +1,4 @@
-#include "MultibandScope.h"
+#include "MultibandWaveformProcessor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +30,10 @@ void MultibandScope::reset()
         for (auto& channel : band)
             for (auto& sample : channel)
                 sample.store(0.0f, std::memory_order_relaxed);
+
+    for (auto& channel : widebandRingBuffers)
+        for (auto& sample : channel)
+            sample.store(0.0f, std::memory_order_relaxed);
 
     writeCursor.store(0, std::memory_order_release);
     displayDecimationCounter = 0;
@@ -74,6 +78,8 @@ void MultibandScope::processBlock(const juce::AudioBuffer<float>& buffer) noexce
         }
 
         const auto ringIndex = static_cast<size_t>(cursor) & (ringCapacity - 1);
+        widebandRingBuffers[0][ringIndex].store(left[sampleIndex], std::memory_order_relaxed);
+        widebandRingBuffers[1][ringIndex].store(right[sampleIndex], std::memory_order_relaxed);
 
         for (size_t bandIndex = 0; bandIndex < numBands; ++bandIndex)
         {
@@ -110,6 +116,19 @@ void MultibandScope::copySince(Snapshot& destination, uint64_t& readCursor) cons
                 channel[sampleIndex] = ringBuffers[bandIndex][channelIndex][ringIndex]
                     .load(std::memory_order_relaxed);
             }
+        }
+    }
+
+    for (size_t channelIndex = 0; channelIndex < numSourceChannels; ++channelIndex)
+    {
+        auto& channel = destination.wideband[channelIndex];
+        channel.resize(sampleCount);
+
+        for (size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+        {
+            const auto ringIndex = static_cast<size_t>(startCursor + sampleIndex) & (ringCapacity - 1);
+            channel[sampleIndex] = widebandRingBuffers[channelIndex][ringIndex]
+                .load(std::memory_order_relaxed);
         }
     }
 

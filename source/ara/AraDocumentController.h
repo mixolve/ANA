@@ -24,7 +24,7 @@ protected:
                                 const juce::ARAStoreObjectsFilter* filter) noexcept override;
 
 private:
-    juce::ScopedTryReadLock getProcessingLock() override;
+    juce::ReadWriteLock& getProcessingReadWriteLock() override;
 
     juce::ReadWriteLock processingLock;
 

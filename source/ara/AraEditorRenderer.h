@@ -22,6 +22,12 @@ public:
     void requestOfflineAnalysis(size_t activeSplitCount,
                                 const dsp::Crossover::SplitFrequencies& frequencies,
                                 size_t columnCount,
+                                int frequencyBlockSize,
+                                float frequencyOverlap,
+                                float frequencyAveragingTimeMilliseconds,
+                                int correlationBlockSize,
+                                float correlationOverlap,
+                                float correlationAveragingTimeMilliseconds,
                                 const juce::String& sourceId,
                                 const juce::String& takeId,
                                 const std::vector<OfflineSourceTakeChoice>& sourceTakeChoices,
@@ -41,6 +47,12 @@ private:
         dsp::Crossover::SplitFrequencies frequencies {};
         size_t activeSplitCount = 0;
         size_t columnCount = 512;
+        int frequencyBlockSize = 4096;
+        float frequencyOverlap = 0.75f;
+        float frequencyAveragingTimeMilliseconds = 500.0f;
+        int correlationBlockSize = 4096;
+        float correlationOverlap = 0.75f;
+        float correlationAveragingTimeMilliseconds = 500.0f;
         juce::String sourceId;
         juce::String takeId;
         std::vector<OfflineSourceTakeChoice> sourceTakeChoices;
