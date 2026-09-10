@@ -1,4 +1,4 @@
-#include "FrequencySpectrumProcessor.h"
+#include "SpectrumProcessor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,15 +16,15 @@ float toDecibels(const float magnitude, const int fftSize) noexcept
 }
 }
 
-FrequencySpectrumProcessor::FrequencySpectrumProcessor() { reset(); }
+SpectrumProcessor::SpectrumProcessor() { reset(); }
 
-void FrequencySpectrumProcessor::prepare(const double newSampleRate)
+void SpectrumProcessor::prepare(const double newSampleRate)
 {
     fftStream.prepare(newSampleRate);
     reset();
 }
 
-void FrequencySpectrumProcessor::reset()
+void SpectrumProcessor::reset()
 {
     fftStream.reset();
     leftAverage.fill(floorDecibels);
@@ -50,22 +50,22 @@ void FrequencySpectrumProcessor::reset()
     revision.fetch_add(1, std::memory_order_release);
 }
 
-void FrequencySpectrumProcessor::requestClear() noexcept
+void SpectrumProcessor::requestClear() noexcept
 {
     clearRequested.store(true, std::memory_order_release);
 }
 
-void FrequencySpectrumProcessor::setFrozen(const bool shouldFreeze) noexcept
+void SpectrumProcessor::setFrozen(const bool shouldFreeze) noexcept
 {
     frozen.store(shouldFreeze, std::memory_order_release);
 }
 
-bool FrequencySpectrumProcessor::isFrozen() const noexcept
+bool SpectrumProcessor::isFrozen() const noexcept
 {
     return frozen.load(std::memory_order_acquire);
 }
 
-void FrequencySpectrumProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
+void SpectrumProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
                                                const int requestedBlockSize,
                                                const float overlap,
                                                const float averagingTimeMilliseconds) noexcept
@@ -86,7 +86,7 @@ void FrequencySpectrumProcessor::processBlock(const juce::AudioBuffer<float>& bu
                            });
 }
 
-void FrequencySpectrumProcessor::copySpectrum(const Channel channel,
+void SpectrumProcessor::copySpectrum(const Channel channel,
                                                const DisplayType type,
                                                std::vector<float>& destination,
                                                int& fftSize) const
@@ -125,17 +125,17 @@ void FrequencySpectrumProcessor::copySpectrum(const Channel channel,
         destination[static_cast<size_t>(index)] = (*source)[static_cast<size_t>(index)].load(std::memory_order_acquire);
 }
 
-double FrequencySpectrumProcessor::getSampleRate() const noexcept
+double SpectrumProcessor::getSampleRate() const noexcept
 {
     return fftStream.getSampleRate();
 }
 
-uint64_t FrequencySpectrumProcessor::getRevision() const noexcept
+uint64_t SpectrumProcessor::getRevision() const noexcept
 {
     return revision.load(std::memory_order_acquire);
 }
 
-void FrequencySpectrumProcessor::publish(const fft::StereoFftFrame& frame,
+void SpectrumProcessor::publish(const fft::StereoFftFrame& frame,
                                          const float averagingTimeMilliseconds) noexcept
 {
     const auto fftSize = frame.size;

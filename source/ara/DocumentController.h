@@ -1,7 +1,7 @@
 #pragma once
 
-#include "AraEditorRenderer.h"
-#include "AraPlaybackRenderer.h"
+#include "EditorRenderer.h"
+#include "PlaybackRenderer.h"
 
 #if JucePlugin_Enable_ARA
 

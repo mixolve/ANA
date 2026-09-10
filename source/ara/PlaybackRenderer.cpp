@@ -1,7 +1,9 @@
-#include "AraPlaybackRenderer.h"
+#include "PlaybackRenderer.h"
+#include "BandlimitedResampler.h"
 
-#include "../corr/StereoCorrelationProcessor.h"
-#include "../freq/FrequencySpectrumProcessor.h"
+#include "../corr/StereoProcessor.h"
+#include "../freq/SpectrumProcessor.h"
+#include "../lvls/MeterProcessor.h"
 
 #if JucePlugin_Enable_ARA
 
@@ -14,6 +16,59 @@ namespace ana::ara
 {
 namespace
 {
+juce::String normalizePersistentId(const juce::String& value)
+{
+    juce::String normalized;
+    for (const auto character : value)
+        if (juce::CharacterFunctions::getHexDigitValue(character) >= 0)
+            normalized += juce::CharacterFunctions::toLowerCase(character);
+    return normalized;
+}
+
+uint64_t hashAudioSample(uint64_t hash, const float sample)
+{
+    const auto quantized = static_cast<uint32_t>(std::llround(
+        std::clamp(static_cast<double>(sample), -1.0, 1.0) * 8388607.0));
+    hash ^= quantized;
+    return hash * 1099511628211ull;
+}
+
+std::optional<uint64_t> getAraAudioContentFingerprint(juce::ARAAudioSource& source)
+{
+    constexpr int samplesPerSegment = 32;
+    constexpr std::array<double, 4> positions { 0.067, 0.283, 0.571, 0.853 };
+    constexpr uint64_t initialHash = 1469598103934665603ull;
+
+    const auto sampleRate = source.getSampleRate();
+    const auto sourceSampleCount = source.getSampleCount();
+    const auto channelCount = std::clamp(source.getChannelCount(), 1, 2);
+    if (sampleRate <= 0.0 || sourceSampleCount <= 0)
+        return {};
+
+    uint64_t hash = initialHash;
+    hash ^= static_cast<uint64_t>(channelCount);
+    hash *= 1099511628211ull;
+
+    juce::ARAAudioSourceReader reader(&source);
+    juce::AudioBuffer<float> buffer(channelCount, samplesPerSegment);
+    for (const auto position : positions)
+    {
+        const auto start = std::clamp<juce::int64>(
+            static_cast<juce::int64>(std::llround(position * static_cast<double>(sourceSampleCount))),
+            0,
+            std::max<juce::int64>(0, sourceSampleCount - samplesPerSegment));
+        buffer.clear();
+        if (! reader.read(&buffer, 0, samplesPerSegment, start, true, true))
+            return {};
+
+        for (int sample = 0; sample < samplesPerSegment; ++sample)
+            for (int channel = 0; channel < channelCount; ++channel)
+                hash = hashAudioSample(hash, buffer.getSample(channel, sample));
+    }
+
+    return hash;
+}
+
 juce::String getSourceId(const juce::ARAAudioSource* source, const void* fallback)
 {
     if (source != nullptr && ! source->getPersistentID().empty())
@@ -84,30 +139,30 @@ bool matchesOfflineSelection(const juce::ARAPlaybackRegion& playbackRegion,
         || getOfflineTakeNumber(playbackRegion, choices) == selectedTakeNumber;
 }
 
-void prepareOfflineFrequencySpectrum(OfflineScopeSnapshot& snapshot,
+void prepareOfflineFrequencySpectrum(OfflineAnalysisSnapshot& snapshot,
                                      const int blockSize,
                                      const float overlap,
                                      const float averagingTimeMilliseconds)
 {
-    snapshot.frequencySpectrum = std::make_shared<freq::FrequencySpectrumProcessor>();
+    snapshot.spectrum = std::make_shared<freq::SpectrumProcessor>();
     snapshot.frequencySampleRate = 0.0;
     snapshot.frequencyBlockSize = blockSize;
     snapshot.frequencyOverlap = overlap;
     snapshot.frequencyAveragingTimeMilliseconds = averagingTimeMilliseconds;
 }
 
-void processOfflineFrequencyBlock(OfflineScopeSnapshot& snapshot,
+void processOfflineFrequencyBlock(OfflineAnalysisSnapshot& snapshot,
                                   juce::AudioBuffer<float>& buffer,
                                   const int samplesToProcess,
                                   const double sampleRate)
 {
-    if (snapshot.frequencySpectrum == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+    if (snapshot.spectrum == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
         return;
 
     if (snapshot.frequencySampleRate <= 0.0)
     {
         snapshot.frequencySampleRate = sampleRate;
-        snapshot.frequencySpectrum->prepare(sampleRate);
+        snapshot.spectrum->prepare(sampleRate);
     }
 
     if (! juce::approximatelyEqual(snapshot.frequencySampleRate, sampleRate))
@@ -116,35 +171,35 @@ void processOfflineFrequencyBlock(OfflineScopeSnapshot& snapshot,
     if (samplesToProcess < buffer.getNumSamples())
         buffer.clear(samplesToProcess, buffer.getNumSamples() - samplesToProcess);
 
-    snapshot.frequencySpectrum->processBlock(buffer, snapshot.frequencyBlockSize,
+    snapshot.spectrum->processBlock(buffer, snapshot.frequencyBlockSize,
                                              snapshot.frequencyOverlap,
                                              snapshot.frequencyAveragingTimeMilliseconds);
 }
 
-void prepareOfflineCorrelationSpectrum(OfflineScopeSnapshot& snapshot,
+void prepareOfflineCorrelationSpectrum(OfflineAnalysisSnapshot& snapshot,
                                        const int blockSize,
                                        const float overlap,
                                        const float averagingTimeMilliseconds)
 {
-    snapshot.correlationSpectrum = std::make_shared<corr::StereoCorrelationProcessor>();
+    snapshot.correlation = std::make_shared<corr::StereoProcessor>();
     snapshot.correlationSampleRate = 0.0;
     snapshot.correlationBlockSize = blockSize;
     snapshot.correlationOverlap = overlap;
     snapshot.correlationAveragingTimeMilliseconds = averagingTimeMilliseconds;
 }
 
-void processOfflineCorrelationBlock(OfflineScopeSnapshot& snapshot,
+void processOfflineCorrelationBlock(OfflineAnalysisSnapshot& snapshot,
                                     juce::AudioBuffer<float>& buffer,
                                     const int samplesToProcess,
                                     const double sampleRate)
 {
-    if (snapshot.correlationSpectrum == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+    if (snapshot.correlation == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
         return;
 
     if (snapshot.correlationSampleRate <= 0.0)
     {
         snapshot.correlationSampleRate = sampleRate;
-        snapshot.correlationSpectrum->prepare(sampleRate);
+        snapshot.correlation->prepare(sampleRate);
     }
 
     if (! juce::approximatelyEqual(snapshot.correlationSampleRate, sampleRate))
@@ -153,9 +208,39 @@ void processOfflineCorrelationBlock(OfflineScopeSnapshot& snapshot,
     if (samplesToProcess < buffer.getNumSamples())
         buffer.clear(samplesToProcess, buffer.getNumSamples() - samplesToProcess);
 
-    snapshot.correlationSpectrum->processBlock(buffer, snapshot.correlationBlockSize,
+    snapshot.correlation->processBlock(buffer, snapshot.correlationBlockSize,
                                                snapshot.correlationOverlap,
                                                snapshot.correlationAveragingTimeMilliseconds);
+}
+
+void prepareOfflineLevelMeter(OfflineAnalysisSnapshot& snapshot)
+{
+    snapshot.meters = std::make_shared<lvls::MeterProcessor>();
+    snapshot.levelSampleRate = 0.0;
+}
+
+void processOfflineLevelBlock(OfflineAnalysisSnapshot& snapshot,
+                              juce::AudioBuffer<float>& buffer,
+                              const int samplesToProcess,
+                              const double sampleRate,
+                              const lvls::MeterProcessor::ProcessingOptions options)
+{
+    if (snapshot.meters == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+        return;
+
+    if (snapshot.levelSampleRate <= 0.0)
+    {
+        snapshot.levelSampleRate = sampleRate;
+        snapshot.meters->prepare(sampleRate);
+    }
+
+    if (! juce::approximatelyEqual(snapshot.levelSampleRate, sampleRate))
+        return;
+
+    if (samplesToProcess < buffer.getNumSamples())
+        buffer.clear(samplesToProcess, buffer.getNumSamples() - samplesToProcess);
+
+    snapshot.meters->processBlock(buffer, 300.0f, 1000.0f, false, options);
 }
 
 std::vector<juce::ARAPlaybackRegion*> collectOfflinePlaybackRegions(
@@ -253,7 +338,7 @@ std::vector<OfflineSourceTakeChoice> makeOfflineSourceTakeChoices(
                             source != nullptr
                                 ? juce::String::fromUTF8(source->getPersistentID().c_str())
                                 : juce::String(),
-                            0.0, 0.0, 0.0, 1.0, false, playbackRegion != nullptr });
+                            0.0, 0.0, 0.0, 1.0, 1.0, false, playbackRegion != nullptr });
     };
 
     auto sortedRegions = playbackRegions;
@@ -321,16 +406,23 @@ juce::ARAAudioModification* findOfflineTakeModification(
 }
 
 bool analyseOfflineTakeSource(
-    OfflineScopeSnapshot& snapshot,
+    OfflineAnalysisSnapshot& snapshot,
     juce::ARAAudioSource& source,
     const dsp::Crossover::SplitFrequencies& frequencies,
     const size_t activeSplitCount,
-    const std::function<bool()>& shouldCancel)
+    const bool includeScope,
+    const bool includeFrequency,
+    const bool includeCorrelation,
+    const bool includeLevel,
+    const lvls::MeterProcessor::ProcessingOptions levelOptions,
+    const std::function<bool()>& shouldCancel,
+    const std::function<void(float)>& onProgress)
 {
     constexpr int readBlockSize = 4096;
     const auto sourceRate = source.getSampleRate();
     const auto sourceSampleCount = source.getSampleCount();
-    const auto columnCount = snapshot.bands.front().front().minimums.size();
+    const auto columnCount = includeScope
+        ? snapshot.bands.front().front().minimums.size() : size_t { 1 };
 
     if (sourceRate <= 0.0 || sourceSampleCount <= 0 || columnCount == 0)
         return true;
@@ -354,8 +446,17 @@ bool analyseOfflineTakeSource(
         if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
             continue;
 
-        processOfflineFrequencyBlock(snapshot, readBuffer, samplesToRead, sourceRate);
-        processOfflineCorrelationBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        if (includeFrequency)
+            processOfflineFrequencyBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        if (includeCorrelation)
+            processOfflineCorrelationBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        if (includeLevel)
+            processOfflineLevelBlock(snapshot, readBuffer, samplesToRead, sourceRate, levelOptions);
+        onProgress(static_cast<float>(readPosition + samplesToRead)
+                   / static_cast<float>(sourceSampleCount));
+
+        if (! includeScope)
+            continue;
 
         const auto* left = readBuffer.getReadPointer(0);
         const auto* right = readBuffer.getReadPointer(1);
@@ -366,7 +467,7 @@ bool analyseOfflineTakeSource(
                 / static_cast<double>(sourceSampleCount);
             const auto column = std::min(columnCount - 1,
                 static_cast<size_t>(normalizedTime * static_cast<double>(columnCount)));
-            const std::array<float, OfflineScopeSnapshot::numChannelModes> widebandModes {
+            const std::array<float, OfflineAnalysisSnapshot::numChannelModes> widebandModes {
                 left[sampleIndex], right[sampleIndex],
                 0.5f * (left[sampleIndex] + right[sampleIndex]),
                 0.5f * (left[sampleIndex] - right[sampleIndex])
@@ -384,7 +485,7 @@ bool analyseOfflineTakeSource(
             {
                 const auto bandLeft = static_cast<float>(ranges[bandIndex].left);
                 const auto bandRight = static_cast<float>(ranges[bandIndex].right);
-                const std::array<float, OfflineScopeSnapshot::numChannelModes> modes {
+                const std::array<float, OfflineAnalysisSnapshot::numChannelModes> modes {
                     bandLeft,
                     bandRight,
                     0.5f * (bandLeft + bandRight),
@@ -402,25 +503,6 @@ bool analyseOfflineTakeSource(
     }
 
     return true;
-}
-
-static juce::String normalizePersistentId(const juce::String& value)
-{
-    juce::String normalized;
-    for (const auto character : value)
-        if (juce::CharacterFunctions::getHexDigitValue(character) >= 0)
-            normalized += juce::CharacterFunctions::toLowerCase(character);
-
-    return normalized;
-}
-
-static juce::String getAudioSourceFileName(const juce::ARAAudioSource& source)
-{
-    const char* utf8Name = source.getName();
-    if (utf8Name == nullptr || *utf8Name == '\0')
-        return {};
-
-    return juce::File(juce::String::fromUTF8(utf8Name)).getFileName();
 }
 
 static juce::ARAAudioSource* findHostTakeAudioSource(
@@ -444,15 +526,19 @@ static juce::ARAAudioSource* findHostTakeAudioSource(
         }
     }
 
-    if (choice.audioSourceName.isNotEmpty())
+    if (choice.hasAudioContentFingerprint)
+    {
         for (auto* source : document->getAudioSources<juce::ARAAudioSource>())
-            if (source != nullptr && getAudioSourceFileName(*source) == choice.audioSourceName)
-                return source;
+            if (source != nullptr)
+                if (const auto fingerprint = getAraAudioContentFingerprint(*source);
+                    fingerprint.has_value() && *fingerprint == choice.audioContentFingerprint)
+                    return source;
+    }
 
     return nullptr;
 }
 
-static void initialiseOfflineEnvelopes(OfflineScopeSnapshot& snapshot, const size_t columnCount)
+static void initialiseOfflineEnvelopes(OfflineAnalysisSnapshot& snapshot, const size_t columnCount)
 {
     const auto initialise = [columnCount] (auto& envelopes)
     {
@@ -468,7 +554,7 @@ static void initialiseOfflineEnvelopes(OfflineScopeSnapshot& snapshot, const siz
     initialise(snapshot.wideband);
 }
 
-static void finishOfflineEnvelopes(OfflineScopeSnapshot& snapshot)
+static void finishOfflineEnvelopes(OfflineAnalysisSnapshot& snapshot)
 {
     const auto finish = [] (auto& envelopes)
     {
@@ -488,17 +574,24 @@ static void finishOfflineEnvelopes(OfflineScopeSnapshot& snapshot)
 }
 
 static bool analyseHostTakeChoice(
-    OfflineScopeSnapshot& snapshot,
+    OfflineAnalysisSnapshot& snapshot,
     juce::ARAAudioSource& source,
     const OfflineSourceTakeChoice& choice,
     const dsp::Crossover::SplitFrequencies& frequencies,
     const size_t activeSplitCount,
-    const std::function<bool()>& shouldCancel)
+    const bool includeScope,
+    const bool includeFrequency,
+    const bool includeCorrelation,
+    const bool includeLevel,
+    const lvls::MeterProcessor::ProcessingOptions levelOptions,
+    const std::function<bool()>& shouldCancel,
+    const std::function<void(float)>& onProgress)
 {
     constexpr int readBlockSize = 4096;
     const auto sourceRate = source.getSampleRate();
     const auto sourceSampleCount = source.getSampleCount();
-    const auto columnCount = snapshot.bands.front().front().minimums.size();
+    const auto columnCount = includeScope
+        ? snapshot.bands.front().front().minimums.size() : size_t { 1 };
     if (sourceRate <= 0.0 || sourceSampleCount <= 0 || columnCount == 0
         || choice.playbackDurationSeconds <= 0.0)
         return true;
@@ -532,8 +625,20 @@ static bool analyseHostTakeChoice(
         if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
             continue;
 
-        processOfflineFrequencyBlock(snapshot, readBuffer, samplesToRead, sourceRate);
-        processOfflineCorrelationBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        if (! juce::approximatelyEqual(choice.gain, 1.0))
+            readBuffer.applyGain(0, samplesToRead, static_cast<float>(choice.gain));
+
+        if (includeFrequency)
+            processOfflineFrequencyBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        if (includeCorrelation)
+            processOfflineCorrelationBlock(snapshot, readBuffer, samplesToRead, sourceRate);
+        if (includeLevel)
+            processOfflineLevelBlock(snapshot, readBuffer, samplesToRead, sourceRate, levelOptions);
+        onProgress(static_cast<float>(readPosition + samplesToRead - sourceStart)
+                   / static_cast<float>(sourceEnd - sourceStart));
+
+        if (! includeScope)
+            continue;
 
         const auto* left = readBuffer.getReadPointer(0);
         const auto* right = readBuffer.getReadPointer(1);
@@ -549,7 +654,7 @@ static bool analyseHostTakeChoice(
             const auto column = std::min(columnCount - 1,
                 static_cast<size_t>(std::max(0.0, normalizedTime)
                                     * static_cast<double>(columnCount)));
-            const std::array<float, OfflineScopeSnapshot::numChannelModes> widebandModes {
+            const std::array<float, OfflineAnalysisSnapshot::numChannelModes> widebandModes {
                 left[sampleIndex], right[sampleIndex],
                 0.5f * (left[sampleIndex] + right[sampleIndex]),
                 0.5f * (left[sampleIndex] - right[sampleIndex])
@@ -567,7 +672,7 @@ static bool analyseHostTakeChoice(
             {
                 const auto bandLeft = static_cast<float>(ranges[bandIndex].left);
                 const auto bandRight = static_cast<float>(ranges[bandIndex].right);
-                const std::array<float, OfflineScopeSnapshot::numChannelModes> modes {
+                const std::array<float, OfflineAnalysisSnapshot::numChannelModes> modes {
                     bandLeft,
                     bandRight,
                     0.5f * (bandLeft + bandRight),
@@ -588,7 +693,7 @@ static bool analyseHostTakeChoice(
 }
 
 bool analyseHostTakeChoices(
-    OfflineScopeSnapshot& snapshot,
+    OfflineAnalysisSnapshot& snapshot,
     ARA::PlugIn::DocumentController* documentController,
     const std::vector<OfflineSourceTakeChoice>& choices,
     const juce::String& sourceId,
@@ -596,7 +701,13 @@ bool analyseHostTakeChoices(
     const dsp::Crossover::SplitFrequencies& frequencies,
     const size_t activeSplitCount,
     const size_t columnCount,
-    const std::function<bool()>& shouldCancel)
+    const bool includeScope,
+    const bool includeFrequency,
+    const bool includeCorrelation,
+    const bool includeLevel,
+    const lvls::MeterProcessor::ProcessingOptions levelOptions,
+    const std::function<bool()>& shouldCancel,
+    const std::function<void(float)>& onProgress)
 {
     const auto selectedTakeNumber = takeSelection.getIntValue();
     std::vector<const OfflineSourceTakeChoice*> selectedChoices;
@@ -621,6 +732,10 @@ bool analyseHostTakeChoices(
 
     auto firstTime = std::numeric_limits<double>::max();
     auto lastTime = std::numeric_limits<double>::lowest();
+    auto totalDuration = 0.0;
+    for (const auto* choice : selectedChoices)
+        totalDuration += std::max(0.0, choice->playbackDurationSeconds);
+    auto completedDuration = 0.0;
     for (const auto* choice : selectedChoices)
     {
         firstTime = std::min(firstTime, choice->playbackStartSeconds);
@@ -641,12 +756,23 @@ bool analyseHostTakeChoices(
         if (audioSource == nullptr)
             continue;
 
+        const auto choiceDuration = std::max(0.0, choice->playbackDurationSeconds);
         if (! analyseHostTakeChoice(snapshot, *audioSource, *choice, frequencies,
-                                    activeSplitCount, shouldCancel))
+                                    activeSplitCount, includeScope, includeFrequency,
+                                    includeCorrelation, includeLevel, levelOptions, shouldCancel,
+                                    [&] (const float localProgress)
+                                    {
+                                        onProgress(static_cast<float>((completedDuration
+                                            + choiceDuration * localProgress)
+                                            / std::max(0.001, totalDuration)));
+                                    }))
             return false;
+        completedDuration += choiceDuration;
+        onProgress(static_cast<float>(completedDuration / std::max(0.001, totalDuration)));
     }
 
-    finishOfflineEnvelopes(snapshot);
+    if (includeScope)
+        finishOfflineEnvelopes(snapshot);
     return true;
 }
 
@@ -668,38 +794,39 @@ public:
                       juce::TimeSliceThread& readerThread,
                       const int readAheadSize)
     {
-        auto sourceReader = std::make_unique<juce::ARAAudioSourceReader>(source);
+        directReader = std::make_unique<juce::ARAAudioSourceReader>(source);
 
         if (shouldBuffer)
         {
             auto bufferingReader = std::make_unique<juce::BufferingAudioReader>(
-                sourceReader.release(), readerThread, readAheadSize);
-            setTimeout = [bufferingReaderPtr = bufferingReader.get()] (const int milliseconds)
-            {
-                bufferingReaderPtr->setReadTimeout(milliseconds);
-            };
-            reader = std::move(bufferingReader);
-        }
-        else
-        {
-            reader = std::move(sourceReader);
+                new juce::ARAAudioSourceReader(source), readerThread, readAheadSize);
+            bufferingReader->setReadTimeout(0);
+            bufferedReader = std::move(bufferingReader);
         }
     }
 
-    void setReadTimeout(const int milliseconds)
+    bool read(juce::AudioBuffer<float>* const destination,
+              const int destinationStartSample,
+              const int numberOfSamples,
+              const juce::int64 readerStartSample,
+              const bool useLeftChannel,
+              const bool useRightChannel)
     {
-        if (setTimeout)
-            setTimeout(milliseconds);
-    }
+        if (bufferedReader != nullptr
+            && bufferedReader->read(destination, destinationStartSample, numberOfSamples,
+                                    readerStartSample, useLeftChannel, useRightChannel))
+            return true;
 
-    juce::AudioFormatReader* get() const noexcept
-    {
-        return reader.get();
+        // The cache request above also schedules read-ahead. Until it is ready,
+        // use an independent reader so the first audible block is never silence.
+        return directReader != nullptr
+            && directReader->read(destination, destinationStartSample, numberOfSamples,
+                                  readerStartSample, useLeftChannel, useRightChannel);
     }
 
 private:
-    std::function<void(int)> setTimeout;
-    std::unique_ptr<juce::AudioFormatReader> reader;
+    std::unique_ptr<juce::AudioFormatReader> directReader;
+    std::unique_ptr<juce::AudioFormatReader> bufferedReader;
 };
 
 PlaybackRenderer::PlaybackRenderer(ARA::PlugIn::DocumentController* documentController,
@@ -709,7 +836,7 @@ PlaybackRenderer::PlaybackRenderer(ARA::PlugIn::DocumentController* documentCont
       lock(processingLock),
       araDocumentController(documentController)
 {
-    startThread(juce::Thread::Priority::normal);
+    startThread(juce::Thread::Priority::high);
 }
 
 PlaybackRenderer::~PlaybackRenderer()
@@ -725,10 +852,13 @@ void PlaybackRenderer::prepareToPlay(const double sampleRate,
                                      juce::AudioProcessor::ProcessingPrecision,
                                      const AlwaysNonRealtime alwaysNonRealtime)
 {
+    BandlimitedResampler::prepare();
     preparedSampleRate = sampleRate;
     preparedBlockSize = maximumSamplesPerBlock;
     preparedChannelCount = numChannels;
     useBufferedReaders = alwaysNonRealtime == AlwaysNonRealtime::no;
+    renderedBuffer = std::make_unique<juce::AudioBuffer<float>>(preparedChannelCount,
+                                                                preparedBlockSize);
     mixBuffer = std::make_unique<juce::AudioBuffer<float>>(preparedChannelCount, preparedBlockSize);
     isPrepared = true;
     rebuildReaders();
@@ -738,22 +868,31 @@ void PlaybackRenderer::prepareToPlay(const double sampleRate,
 void PlaybackRenderer::rebuildReaders()
 {
     readers.clear();
-    sourceBufferSize = preparedBlockSize + 4;
+    sourceBufferSize = preparedBlockSize + BandlimitedResampler::kernelRadius * 2 + 4;
+
+    const auto addReader = [this] (juce::ARAAudioSource* audioSource)
+    {
+        if (audioSource == nullptr || readers.find(audioSource) != readers.end())
+            return;
+
+        const auto readAheadSize = std::max(4 * preparedBlockSize,
+                                            juce::roundToInt(2.0 * preparedSampleRate));
+        readers.emplace(audioSource,
+                        std::make_unique<AudioSourceReader>(audioSource,
+                                                           useBufferedReaders,
+                                                           *sharedReaderThread,
+                                                           readAheadSize));
+    };
+
+    if (araDocumentController != nullptr)
+        if (auto* document = araDocumentController->getDocument())
+            for (auto* audioSource : document->getAudioSources<juce::ARAAudioSource>())
+                addReader(audioSource);
 
     for (auto* playbackRegion : getPlaybackRegions())
     {
         auto* audioSource = playbackRegion->getAudioModification()->getAudioSource();
-
-        if (readers.find(audioSource) == readers.end())
-        {
-            const auto readAheadSize = std::max(4 * preparedBlockSize,
-                                                juce::roundToInt(2.0 * preparedSampleRate));
-            readers.emplace(audioSource,
-                            std::make_unique<AudioSourceReader>(audioSource,
-                                                               useBufferedReaders,
-                                                               *sharedReaderThread,
-                                                               readAheadSize));
-        }
+        addReader(audioSource);
 
         const auto playbackDuration = playbackRegion->getDurationInPlaybackTime();
         const auto modificationDuration = playbackRegion->getDurationInAudioModificationTime();
@@ -764,23 +903,59 @@ void PlaybackRenderer::rebuildReaders()
                 * modificationDuration / playbackDuration;
             sourceBufferSize = std::max(sourceBufferSize,
                 juce::roundToInt(std::ceil(static_cast<double>(preparedBlockSize)
-                                           * std::max(1.0, sourceIncrement))) + 4);
+                                           * std::max(1.0, sourceIncrement)))
+                    + BandlimitedResampler::kernelRadius * 2 + 4);
         }
     }
 
     sourceBuffer = std::make_unique<juce::AudioBuffer<float>>(preparedChannelCount, sourceBufferSize);
 }
 
+bool PlaybackRenderer::setRealtimeTakeChoices(const std::vector<OfflineSourceTakeChoice>& choices)
+{
+    auto activeTakes = std::make_shared<std::vector<RealtimeTake>>();
+    activeTakes->reserve(choices.size());
+    size_t activeChoiceCount = 0;
+    for (const auto& choice : choices)
+    {
+        if (! choice.activeTake || choice.audioSourcePersistentId.isEmpty()
+            || choice.playbackDurationSeconds <= 0.0 || choice.playRate <= 0.0)
+            continue;
+
+        ++activeChoiceCount;
+        auto* audioSource = findHostTakeAudioSource(araDocumentController, choice);
+        if (audioSource == nullptr)
+            continue;
+
+        activeTakes->push_back({ audioSource,
+                                choice.playbackStartSeconds,
+                                choice.playbackDurationSeconds,
+                                choice.sourceStartSeconds,
+                                choice.playRate,
+                                choice.gain });
+    }
+    const auto resolved = activeTakes->size() == activeChoiceCount;
+    if (! resolved)
+        activeTakes->clear();
+
+    hostTakeSelectionPresent.store(resolved && activeChoiceCount > 0,
+                                   std::memory_order_release);
+    std::shared_ptr<const std::vector<RealtimeTake>> publishedTakes = std::move(activeTakes);
+    std::atomic_store_explicit(&realtimeTakes, std::move(publishedTakes), std::memory_order_release);
+    return resolved;
+}
+
 void PlaybackRenderer::releaseResources()
 {
     isPrepared = false;
     readers.clear();
+    renderedBuffer.reset();
     mixBuffer.reset();
     sourceBuffer.reset();
 }
 
 bool PlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
-                                    const juce::AudioProcessor::Realtime realtime,
+                                    const juce::AudioProcessor::Realtime,
                                     const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept
 {
     const auto processingLock = lock.getProcessingLock();
@@ -797,120 +972,167 @@ bool PlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
 
     if (numSamples > preparedBlockSize
         || buffer.getNumChannels() != preparedChannelCount
+        || renderedBuffer == nullptr
         || mixBuffer == nullptr
         || sourceBuffer == nullptr)
         return false;
 
-    buffer.clear();
+    renderedBuffer->clear();
 
     if (positionInfo.getIsPlaying())
     {
         const auto blockRange = juce::Range<juce::int64>::withStartAndLength(timeInSamples, numSamples);
-
-        for (auto* playbackRegion : getPlaybackRegions())
+        const auto renderSource = [&] (juce::ARAAudioSource* audioSource,
+                                       const juce::Range<juce::int64> renderRange,
+                                       const double sourceStart,
+                                       const double sourceIncrement,
+                                       const float gain)
         {
-            const auto playbackRange = playbackRegion->getSampleRange(
-                preparedSampleRate, juce::ARAPlaybackRegion::IncludeHeadAndTail::no);
-            auto renderRange = blockRange.getIntersectionWith(playbackRange);
-
-            if (renderRange.isEmpty())
-                continue;
-
-            auto* audioSource = playbackRegion->getAudioModification()->getAudioSource();
             const auto reader = readers.find(audioSource);
-
             if (reader == readers.end())
-            {
-                success = false;
-                continue;
-            }
-
-            reader->second->setReadTimeout(realtime == juce::AudioProcessor::Realtime::no ? 100 : 0);
+                return false;
 
             const auto samplesToRead = static_cast<int>(renderRange.getLength());
             const auto startInBuffer = static_cast<int>(renderRange.getStart() - blockRange.getStart());
-            const auto playbackDuration = playbackRegion->getDurationInPlaybackTime();
-
-            if (playbackDuration <= 0.0)
-            {
-                success = false;
-                continue;
-            }
-
-            const auto modificationDuration = playbackRegion->getDurationInAudioModificationTime();
-            const auto sourceRate = audioSource->getSampleRate();
-            const auto sourceIncrement = sourceRate / preparedSampleRate
-                * modificationDuration / playbackDuration;
-            const auto renderStartTime = static_cast<double>(renderRange.getStart()) / preparedSampleRate;
-            const auto sourceStart = (playbackRegion->getStartInAudioModificationTime()
-                                      + (renderStartTime - playbackRegion->getStartInPlaybackTime())
-                                            * modificationDuration / playbackDuration)
-                * sourceRate;
-
             mixBuffer->clear();
 
             if (std::abs(sourceIncrement - 1.0) < 1.0e-9
                 && std::abs(sourceStart - std::round(sourceStart)) < 1.0e-6)
             {
-                if (! reader->second->get()->read(mixBuffer.get(),
-                                                  startInBuffer,
-                                                  samplesToRead,
-                                                  static_cast<juce::int64>(std::llround(sourceStart)),
-                                                  true,
-                                                  true))
-                {
-                    success = false;
-                    continue;
-                }
+                if (! reader->second->read(mixBuffer.get(),
+                                           startInBuffer,
+                                           samplesToRead,
+                                           static_cast<juce::int64>(std::llround(sourceStart)),
+                                           true,
+                                           true))
+                    return false;
             }
             else
             {
-                const auto sourceReadStart = static_cast<juce::int64>(std::floor(sourceStart));
-                const auto sourceReadCount = juce::roundToInt(std::ceil(
-                    sourceStart - static_cast<double>(sourceReadStart)
-                    + static_cast<double>(std::max(0, samplesToRead - 1)) * sourceIncrement)) + 2;
+                const auto firstSourceSample = static_cast<juce::int64>(std::floor(sourceStart))
+                    - BandlimitedResampler::kernelRadius + 1;
+                const auto lastSourcePosition = sourceStart
+                    + static_cast<double>(std::max(0, samplesToRead - 1)) * sourceIncrement;
+                const auto sourceReadEnd = static_cast<juce::int64>(std::floor(lastSourcePosition))
+                    + BandlimitedResampler::kernelRadius + 1;
+                const auto sourceReadCount = static_cast<int>(sourceReadEnd - firstSourceSample);
 
-                if (sourceReadCount > sourceBufferSize
-                    || sourceReadStart < 0
-                    || ! reader->second->get()->read(sourceBuffer.get(),
-                                                     0,
-                                                     sourceReadCount,
-                                                     sourceReadStart,
-                                                     true,
-                                                     true))
-                {
-                    success = false;
-                    continue;
-                }
+                if (sourceReadCount <= 0 || sourceReadCount > sourceBufferSize)
+                    return false;
+
+                sourceBuffer->clear();
+                const auto readableStart = std::max<juce::int64>(0, firstSourceSample);
+                const auto readableEnd = std::min<juce::int64>(audioSource->getSampleCount(),
+                                                                sourceReadEnd);
+                const auto destinationOffset = static_cast<int>(readableStart - firstSourceSample);
+                const auto readableCount = static_cast<int>(std::max<juce::int64>(
+                    0, readableEnd - readableStart));
+                if (readableCount > 0
+                    && ! reader->second->read(sourceBuffer.get(),
+                                              destinationOffset,
+                                              readableCount,
+                                              readableStart,
+                                              true,
+                                              true))
+                    return false;
 
                 for (int sampleIndex = 0; sampleIndex < samplesToRead; ++sampleIndex)
                 {
                     const auto sourcePosition = sourceStart
-                        - static_cast<double>(sourceReadStart)
+                        - static_cast<double>(firstSourceSample)
                         + static_cast<double>(sampleIndex) * sourceIncrement;
-                    const auto sourceIndex = static_cast<int>(std::floor(sourcePosition));
-                    const auto fraction = static_cast<float>(sourcePosition - static_cast<double>(sourceIndex));
 
                     for (int channel = 0; channel < preparedChannelCount; ++channel)
-                    {
-                        const auto first = sourceBuffer->getSample(channel, sourceIndex);
-                        const auto second = sourceBuffer->getSample(channel, sourceIndex + 1);
                         mixBuffer->setSample(channel,
                                              startInBuffer + sampleIndex,
-                                             first + fraction * (second - first));
-                    }
+                                             BandlimitedResampler::interpolate(
+                                                 sourceBuffer->getReadPointer(channel),
+                                                 sourceReadCount,
+                                                 sourcePosition,
+                                                 sourceIncrement));
                 }
             }
 
             for (int channel = 0; channel < preparedChannelCount; ++channel)
-                buffer.addFrom(channel,
-                               startInBuffer,
-                               *mixBuffer,
-                               channel,
-                               startInBuffer,
-                               samplesToRead);
+                renderedBuffer->addFrom(channel,
+                                        startInBuffer,
+                                        *mixBuffer,
+                                        channel,
+                                        startInBuffer,
+                                        samplesToRead,
+                                        gain);
+            return true;
+        };
+
+        const auto activeTakes = std::atomic_load_explicit(&realtimeTakes, std::memory_order_acquire);
+        const auto hasHostTakeMap = activeTakes != nullptr && ! activeTakes->empty();
+        const auto hasHostTakeSelection = hostTakeSelectionPresent.load(std::memory_order_acquire);
+        if (hasHostTakeMap)
+        {
+            for (const auto& take : *activeTakes)
+            {
+                const auto playbackStart = static_cast<juce::int64>(std::llround(
+                    take.playbackStartSeconds * preparedSampleRate));
+                const auto playbackLength = static_cast<juce::int64>(std::llround(
+                    take.playbackDurationSeconds * preparedSampleRate));
+                const auto renderRange = blockRange.getIntersectionWith(
+                    juce::Range<juce::int64>::withStartAndLength(playbackStart, playbackLength));
+                if (renderRange.isEmpty())
+                    continue;
+
+                if (readers.find(take.audioSource) == readers.end())
+                {
+                    success = false;
+                    continue;
+                }
+
+                auto* audioSource = take.audioSource;
+                const auto sourceRate = audioSource->getSampleRate();
+                const auto renderStartTime = static_cast<double>(renderRange.getStart()) / preparedSampleRate;
+                const auto sourceStart = (take.sourceStartSeconds
+                    + (renderStartTime - take.playbackStartSeconds) * take.playRate) * sourceRate;
+                const auto sourceIncrement = sourceRate / preparedSampleRate * take.playRate;
+                if (! renderSource(audioSource, renderRange, sourceStart, sourceIncrement,
+                                   static_cast<float>(take.gain)))
+                    success = false;
+            }
+        }
+
+        if (! hasHostTakeMap && ! hasHostTakeSelection)
+        {
+            for (auto* playbackRegion : getPlaybackRegions())
+            {
+                const auto playbackRange = playbackRegion->getSampleRange(
+                    preparedSampleRate, juce::ARAPlaybackRegion::IncludeHeadAndTail::no);
+                const auto renderRange = blockRange.getIntersectionWith(playbackRange);
+                if (renderRange.isEmpty())
+                    continue;
+
+                auto* audioSource = playbackRegion->getAudioModification()->getAudioSource();
+                const auto playbackDuration = playbackRegion->getDurationInPlaybackTime();
+                if (audioSource == nullptr || playbackDuration <= 0.0)
+                {
+                    success = false;
+                    continue;
+                }
+
+                const auto modificationDuration = playbackRegion->getDurationInAudioModificationTime();
+                const auto sourceRate = audioSource->getSampleRate();
+                const auto sourceIncrement = sourceRate / preparedSampleRate
+                    * modificationDuration / playbackDuration;
+                const auto renderStartTime = static_cast<double>(renderRange.getStart()) / preparedSampleRate;
+                const auto sourceStart = (playbackRegion->getStartInAudioModificationTime()
+                    + (renderStartTime - playbackRegion->getStartInPlaybackTime())
+                        * modificationDuration / playbackDuration) * sourceRate;
+                if (! renderSource(audioSource, renderRange, sourceStart, sourceIncrement, 1.0f))
+                    success = false;
+            }
         }
     }
+
+    if (success)
+        for (int channel = 0; channel < preparedChannelCount; ++channel)
+            buffer.copyFrom(channel, 0, *renderedBuffer, channel, 0, numSamples);
 
     return success;
 }
@@ -953,66 +1175,26 @@ void PlaybackRenderer::didRemovePlaybackRegion(ARA::PlugIn::PlaybackRegion*) noe
     scheduleLatestAnalysis();
 }
 
-void PlaybackRenderer::requestOfflineAnalysis(
-    const size_t activeSplitCount,
-    const dsp::Crossover::SplitFrequencies& frequencies,
-    const size_t columnCount,
-    const int frequencyBlockSize,
-    const float frequencyOverlap,
-    const float frequencyAveragingTimeMilliseconds,
-    const int correlationBlockSize,
-    const float correlationOverlap,
-    const float correlationAveragingTimeMilliseconds,
-    const juce::String& sourceId,
-    const juce::String& takeId,
-    const std::vector<OfflineSourceTakeChoice>& sourceTakeChoices,
-    const bool forceRefresh)
+void PlaybackRenderer::requestOfflineAnalysis(OfflineAnalysisRequest request,
+                                              const bool forceRefresh)
 {
-    const auto currentRegionGeneration = regionGeneration.load(std::memory_order_relaxed);
+    request.regionGeneration = regionGeneration.load(std::memory_order_relaxed);
     const juce::ScopedLock scopedLock(analysisLock);
 
     if (! forceRefresh
         && latestAnalysisSettings.revision != 0
-        && latestAnalysisSettings.activeSplitCount == activeSplitCount
-        && latestAnalysisSettings.frequencies == frequencies
-        && latestAnalysisSettings.columnCount == columnCount
-        && latestAnalysisSettings.frequencyBlockSize == frequencyBlockSize
-        && juce::approximatelyEqual(latestAnalysisSettings.frequencyOverlap, frequencyOverlap)
-        && juce::approximatelyEqual(latestAnalysisSettings.frequencyAveragingTimeMilliseconds,
-                                    frequencyAveragingTimeMilliseconds)
-        && latestAnalysisSettings.correlationBlockSize == correlationBlockSize
-        && juce::approximatelyEqual(latestAnalysisSettings.correlationOverlap, correlationOverlap)
-        && juce::approximatelyEqual(latestAnalysisSettings.correlationAveragingTimeMilliseconds,
-                                    correlationAveragingTimeMilliseconds)
-        && latestAnalysisSettings.sourceId == sourceId
-        && latestAnalysisSettings.takeId == takeId
-        && latestAnalysisSettings.sourceTakeChoices == sourceTakeChoices
-        && latestAnalysisSettings.regionGeneration == currentRegionGeneration)
+        && latestAnalysisSettings.hasSameSettings(request))
         return;
 
-    latestAnalysisSettings.activeSplitCount = std::min(activeSplitCount, dsp::Crossover::numSplits);
-    latestAnalysisSettings.frequencies = frequencies;
-    latestAnalysisSettings.columnCount = std::max<size_t>(1, columnCount);
-    latestAnalysisSettings.frequencyBlockSize = frequencyBlockSize;
-    latestAnalysisSettings.frequencyOverlap = frequencyOverlap;
-    latestAnalysisSettings.frequencyAveragingTimeMilliseconds = frequencyAveragingTimeMilliseconds;
-    latestAnalysisSettings.correlationBlockSize = correlationBlockSize;
-    latestAnalysisSettings.correlationOverlap = correlationOverlap;
-    latestAnalysisSettings.correlationAveragingTimeMilliseconds = correlationAveragingTimeMilliseconds;
-    latestAnalysisSettings.sourceId = sourceId;
-    latestAnalysisSettings.takeId = takeId;
-    latestAnalysisSettings.sourceTakeChoices = sourceTakeChoices;
-    latestAnalysisSettings.regionGeneration = currentRegionGeneration;
-    latestAnalysisSettings.revision = latestAnalysisRevision.fetch_add(1, std::memory_order_relaxed) + 1;
+    request.revision = latestAnalysisRevision.fetch_add(1, std::memory_order_relaxed) + 1;
+    latestAnalysisSettings = std::move(request);
     pendingAnalysis = latestAnalysisSettings;
-
-    if (forceRefresh)
-        offlineSnapshot.reset();
+    analysisProgress.store(0, std::memory_order_release);
 
     notify();
 }
 
-std::shared_ptr<const OfflineScopeSnapshot> PlaybackRenderer::getOfflineSnapshot() const
+std::shared_ptr<const OfflineAnalysisSnapshot> PlaybackRenderer::getOfflineSnapshot() const
 {
     const juce::ScopedLock scopedLock(analysisLock);
     return offlineSnapshot;
@@ -1054,6 +1236,7 @@ void PlaybackRenderer::scheduleLatestAnalysis()
     latestAnalysisSettings.regionGeneration = regionGeneration.load(std::memory_order_relaxed);
     latestAnalysisSettings.revision = latestAnalysisRevision.fetch_add(1, std::memory_order_relaxed) + 1;
     pendingAnalysis = latestAnalysisSettings;
+    analysisProgress.store(0, std::memory_order_release);
     notify();
 }
 
@@ -1066,7 +1249,7 @@ void PlaybackRenderer::run()
         if (threadShouldExit())
             break;
 
-        std::optional<AnalysisRequest> request;
+        std::optional<OfflineAnalysisRequest> request;
 
         {
             const juce::ScopedLock scopedLock(analysisLock);
@@ -1084,6 +1267,7 @@ void PlaybackRenderer::run()
         {
             const juce::ScopedLock scopedLock(analysisLock);
             offlineSnapshot = std::move(snapshot);
+            analysisProgress.store(100, std::memory_order_release);
         }
         else if (snapshot == nullptr
                  && request->revision == latestAnalysisRevision.load(std::memory_order_relaxed)
@@ -1097,41 +1281,45 @@ void PlaybackRenderer::run()
     }
 }
 
-std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
-    const AnalysisRequest& request)
+std::shared_ptr<OfflineAnalysisSnapshot> analyseOfflinePlaybackRegions(
+    ARA::PlugIn::DocumentController* documentController,
+    const std::vector<juce::ARAPlaybackRegion*>& playbackRegions,
+    const OfflineAnalysisRequest& request,
+    const uint64_t snapshotRevision,
+    const std::function<bool()>& shouldCancel,
+    const std::function<void(float)>& onProgress)
 {
     const auto columnCount = std::max<size_t>(1, request.columnCount);
     constexpr int readBlockSize = 4096;
-    const juce::ScopedReadLock processingLock(lock.getProcessingReadWriteLock());
-
-    std::vector<juce::ARAPlaybackRegion*> rendererRegions;
-    for (auto* playbackRegion : getPlaybackRegions())
-        rendererRegions.push_back(playbackRegion);
-    const auto playbackRegions = collectOfflinePlaybackRegions(araDocumentController, rendererRegions);
     const auto sourceTakeChoices = request.sourceTakeChoices.empty()
-        ? makeOfflineSourceTakeChoices(araDocumentController, playbackRegions)
+        ? makeOfflineSourceTakeChoices(documentController, playbackRegions)
         : request.sourceTakeChoices;
 
-    auto snapshot = std::make_shared<OfflineScopeSnapshot>();
+    auto snapshot = std::make_shared<OfflineAnalysisSnapshot>();
+    const auto includeScope = request.analyzerPage == 0;
+    const auto includeFrequency = request.analyzerPage == 1;
+    const auto includeCorrelation = request.analyzerPage == 2;
+    const auto includeLevel = request.analyzerPage == 3;
     snapshot->activeBandCount = request.activeSplitCount + 1;
-    snapshot->revision = request.revision;
-    prepareOfflineFrequencySpectrum(*snapshot, request.frequencyBlockSize, request.frequencyOverlap,
-                                    request.frequencyAveragingTimeMilliseconds);
-    prepareOfflineCorrelationSpectrum(*snapshot, request.correlationBlockSize, request.correlationOverlap,
-                                      request.correlationAveragingTimeMilliseconds);
+    snapshot->revision = snapshotRevision;
+    if (includeFrequency)
+        prepareOfflineFrequencySpectrum(*snapshot, request.frequencyBlockSize, request.frequencyOverlap,
+                                        request.frequencyAveragingTimeMilliseconds);
+    if (includeCorrelation)
+        prepareOfflineCorrelationSpectrum(*snapshot, request.correlationBlockSize, request.correlationOverlap,
+                                          request.correlationAveragingTimeMilliseconds);
+    if (includeLevel)
+        prepareOfflineLevelMeter(*snapshot);
 
     if (std::any_of(sourceTakeChoices.begin(), sourceTakeChoices.end(),
                     [] (const auto& choice) { return choice.hostEnumerated; }))
     {
         if (! analyseHostTakeChoices(
-                *snapshot, araDocumentController, sourceTakeChoices,
+                *snapshot, documentController, sourceTakeChoices,
                 request.sourceId, request.takeId, request.frequencies,
-                request.activeSplitCount, columnCount,
-                [this, &request]
-                {
-                    return threadShouldExit()
-                        || request.revision != latestAnalysisRevision.load(std::memory_order_relaxed);
-                }))
+                request.activeSplitCount, columnCount, includeScope, includeFrequency,
+                includeCorrelation, includeLevel, request.levelOptions,
+                shouldCancel, onProgress))
             return {};
 
         return snapshot;
@@ -1160,7 +1348,7 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
     if (firstTime > lastTime)
     {
         directTake = findOfflineTakeModification(
-            araDocumentController, sourceTakeChoices, request.sourceId, request.takeId);
+            documentController, sourceTakeChoices, request.sourceId, request.takeId);
         if (directTake == nullptr || directTake->getAudioSource() == nullptr)
             return snapshot;
 
@@ -1171,15 +1359,15 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
     snapshot->startTimeSeconds = firstTime;
     snapshot->durationSeconds = std::max(0.0, lastTime - firstTime);
 
-    initialiseOfflineEnvelopes(*snapshot, columnCount);
+    if (includeScope)
+        initialiseOfflineEnvelopes(*snapshot, columnCount);
 
     for (auto* playbackRegion : playbackRegions)
     {
         if (! shouldAnalyse(playbackRegion))
             continue;
 
-        if (threadShouldExit()
-            || request.revision != latestAnalysisRevision.load(std::memory_order_relaxed))
+        if (shouldCancel())
             return {};
 
         auto* audioSource = playbackRegion->getAudioModification()->getAudioSource();
@@ -1203,8 +1391,7 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
 
         for (auto readPosition = sourceStart; readPosition < sourceEnd; readPosition += readBlockSize)
         {
-            if (threadShouldExit()
-                || request.revision != latestAnalysisRevision.load(std::memory_order_relaxed))
+            if (shouldCancel())
                 return {};
 
             const auto samplesToRead = static_cast<int>(std::min<juce::int64>(
@@ -1213,8 +1400,16 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
             if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
                 continue;
 
-            processOfflineFrequencyBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
-            processOfflineCorrelationBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
+            if (includeFrequency)
+                processOfflineFrequencyBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
+            if (includeCorrelation)
+                processOfflineCorrelationBlock(*snapshot, readBuffer, samplesToRead, sourceRate);
+            if (includeLevel)
+                processOfflineLevelBlock(*snapshot, readBuffer, samplesToRead, sourceRate,
+                                         request.levelOptions);
+
+            if (! includeScope)
+                continue;
 
             const auto* left = readBuffer.getReadPointer(0);
             const auto* right = readBuffer.getReadPointer(1);
@@ -1230,7 +1425,7 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
                 const auto column = std::min(columnCount - 1,
                     static_cast<size_t>(std::max(0.0, normalizedTime)
                                         * static_cast<double>(columnCount)));
-                const std::array<float, OfflineScopeSnapshot::numChannelModes> widebandModes {
+                const std::array<float, OfflineAnalysisSnapshot::numChannelModes> widebandModes {
                     left[sampleIndex], right[sampleIndex],
                     0.5f * (left[sampleIndex] + right[sampleIndex]),
                     0.5f * (left[sampleIndex] - right[sampleIndex])
@@ -1248,7 +1443,7 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
                 {
                     const auto bandLeft = static_cast<float>(ranges[bandIndex].left);
                     const auto bandRight = static_cast<float>(ranges[bandIndex].right);
-                    const std::array<float, OfflineScopeSnapshot::numChannelModes> modes {
+                    const std::array<float, OfflineAnalysisSnapshot::numChannelModes> modes {
                         bandLeft,
                         bandRight,
                         0.5f * (bandLeft + bandRight),
@@ -1269,17 +1464,38 @@ std::shared_ptr<OfflineScopeSnapshot> PlaybackRenderer::buildOfflineSnapshot(
     if (directTake != nullptr
         && ! analyseOfflineTakeSource(
             *snapshot, *directTake->getAudioSource(), request.frequencies,
-            request.activeSplitCount,
-            [this, &request]
-            {
-                return threadShouldExit()
-                    || request.revision != latestAnalysisRevision.load(std::memory_order_relaxed);
-            }))
+            request.activeSplitCount, includeScope, includeFrequency,
+            includeCorrelation, includeLevel, request.levelOptions,
+            shouldCancel, onProgress))
         return {};
 
-    finishOfflineEnvelopes(*snapshot);
+    if (includeScope)
+        finishOfflineEnvelopes(*snapshot);
 
     return snapshot;
+}
+
+std::shared_ptr<OfflineAnalysisSnapshot> PlaybackRenderer::buildOfflineSnapshot(
+    const OfflineAnalysisRequest& request)
+{
+    const juce::ScopedReadLock processingLock(lock.getProcessingReadWriteLock());
+    std::vector<juce::ARAPlaybackRegion*> rendererRegions;
+    for (auto* playbackRegion : getPlaybackRegions())
+        rendererRegions.push_back(playbackRegion);
+
+    const auto playbackRegions = collectOfflinePlaybackRegions(araDocumentController, rendererRegions);
+    return analyseOfflinePlaybackRegions(
+        araDocumentController, playbackRegions, request, request.revision,
+        [this, &request]
+        {
+            return threadShouldExit()
+                || request.revision != latestAnalysisRevision.load(std::memory_order_relaxed);
+        },
+        [this] (const float progress)
+        {
+            analysisProgress.store(juce::jlimit(0, 99, juce::roundToInt(progress * 100.0f)),
+                                   std::memory_order_release);
+        });
 }
 } // namespace ana::ara
 

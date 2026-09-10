@@ -1,6 +1,7 @@
 #pragma once
 
-#include "../scope/MultibandWaveformProcessor.h"
+#include "OfflineAnalysisData.h"
+#include "../lvls/MeterProcessor.h"
 
 #include <JuceHeader.h>
 
@@ -32,12 +33,18 @@ juce::ARAAudioModification* findOfflineTakeModification(
     const std::vector<OfflineSourceTakeChoice>& choices,
     const juce::String& sourceId,
     const juce::String& takeSelection);
-bool analyseOfflineTakeSource(OfflineScopeSnapshot& snapshot,
+bool analyseOfflineTakeSource(OfflineAnalysisSnapshot& snapshot,
                               juce::ARAAudioSource& source,
                               const dsp::Crossover::SplitFrequencies& frequencies,
                               size_t activeSplitCount,
-                              const std::function<bool()>& shouldCancel);
-bool analyseHostTakeChoices(OfflineScopeSnapshot& snapshot,
+                              bool includeScope,
+                              bool includeFrequency,
+                              bool includeCorrelation,
+                              bool includeLevel,
+                              lvls::MeterProcessor::ProcessingOptions levelOptions,
+                              const std::function<bool()>& shouldCancel,
+                              const std::function<void(float)>& onProgress);
+bool analyseHostTakeChoices(OfflineAnalysisSnapshot& snapshot,
                             ARA::PlugIn::DocumentController* documentController,
                             const std::vector<OfflineSourceTakeChoice>& choices,
                             const juce::String& sourceId,
@@ -45,23 +52,42 @@ bool analyseHostTakeChoices(OfflineScopeSnapshot& snapshot,
                             const dsp::Crossover::SplitFrequencies& frequencies,
                             size_t activeSplitCount,
                             size_t columnCount,
-                            const std::function<bool()>& shouldCancel);
-void prepareOfflineFrequencySpectrum(OfflineScopeSnapshot& snapshot,
+                            bool includeScope,
+                            bool includeFrequency,
+                            bool includeCorrelation,
+                            bool includeLevel,
+                            lvls::MeterProcessor::ProcessingOptions levelOptions,
+                            const std::function<bool()>& shouldCancel,
+                            const std::function<void(float)>& onProgress);
+void prepareOfflineFrequencySpectrum(OfflineAnalysisSnapshot& snapshot,
                                      int blockSize,
                                      float overlap,
                                      float averagingTimeMilliseconds);
-void processOfflineFrequencyBlock(OfflineScopeSnapshot& snapshot,
+void processOfflineFrequencyBlock(OfflineAnalysisSnapshot& snapshot,
                                   juce::AudioBuffer<float>& buffer,
                                   int samplesToProcess,
                                   double sampleRate);
-void prepareOfflineCorrelationSpectrum(OfflineScopeSnapshot& snapshot,
+void prepareOfflineCorrelationSpectrum(OfflineAnalysisSnapshot& snapshot,
                                        int blockSize,
                                        float overlap,
                                        float averagingTimeMilliseconds);
-void processOfflineCorrelationBlock(OfflineScopeSnapshot& snapshot,
+void processOfflineCorrelationBlock(OfflineAnalysisSnapshot& snapshot,
                                     juce::AudioBuffer<float>& buffer,
                                     int samplesToProcess,
                                     double sampleRate);
+void prepareOfflineLevelMeter(OfflineAnalysisSnapshot& snapshot);
+void processOfflineLevelBlock(OfflineAnalysisSnapshot& snapshot,
+                              juce::AudioBuffer<float>& buffer,
+                              int samplesToProcess,
+                              double sampleRate,
+                              lvls::MeterProcessor::ProcessingOptions options = {});
+std::shared_ptr<OfflineAnalysisSnapshot> analyseOfflinePlaybackRegions(
+    ARA::PlugIn::DocumentController* documentController,
+    const std::vector<juce::ARAPlaybackRegion*>& playbackRegions,
+    const OfflineAnalysisRequest& request,
+    uint64_t snapshotRevision,
+    const std::function<bool()>& shouldCancel,
+    const std::function<void(float)>& onProgress);
 
 class ProcessingLock
 {
@@ -93,21 +119,11 @@ public:
                       juce::AudioProcessor::Realtime realtime,
                       const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept override;
 
-    void requestOfflineAnalysis(size_t activeSplitCount,
-                                const dsp::Crossover::SplitFrequencies& frequencies,
-                                size_t columnCount,
-                                int frequencyBlockSize,
-                                float frequencyOverlap,
-                                float frequencyAveragingTimeMilliseconds,
-                                int correlationBlockSize,
-                                float correlationOverlap,
-                                float correlationAveragingTimeMilliseconds,
-                                const juce::String& sourceId,
-                                const juce::String& takeId,
-                                const std::vector<OfflineSourceTakeChoice>& sourceTakeChoices,
-                                bool forceRefresh = false);
-    std::shared_ptr<const OfflineScopeSnapshot> getOfflineSnapshot() const;
+    void requestOfflineAnalysis(OfflineAnalysisRequest request, bool forceRefresh = false);
+    std::shared_ptr<const OfflineAnalysisSnapshot> getOfflineSnapshot() const;
     std::vector<OfflineSourceTakeChoice> getOfflineSourceTakeChoices() const;
+    bool setRealtimeTakeChoices(const std::vector<OfflineSourceTakeChoice>& choices);
+    int getAnalysisProgress() const noexcept { return analysisProgress.load(std::memory_order_acquire); }
 
     using juce::ARAPlaybackRenderer::processBlock;
 
@@ -119,42 +135,38 @@ private:
     class SharedReaderThread;
     class AudioSourceReader;
 
-    struct AnalysisRequest
+    struct RealtimeTake
     {
-        dsp::Crossover::SplitFrequencies frequencies {};
-        size_t activeSplitCount = 0;
-        size_t columnCount = 512;
-        int frequencyBlockSize = 4096;
-        float frequencyOverlap = 0.75f;
-        float frequencyAveragingTimeMilliseconds = 500.0f;
-        int correlationBlockSize = 4096;
-        float correlationOverlap = 0.75f;
-        float correlationAveragingTimeMilliseconds = 500.0f;
-        juce::String sourceId;
-        juce::String takeId;
-        std::vector<OfflineSourceTakeChoice> sourceTakeChoices;
-        uint64_t regionGeneration = 0;
-        uint64_t revision = 0;
+        juce::ARAAudioSource* audioSource = nullptr;
+        double playbackStartSeconds = 0.0;
+        double playbackDurationSeconds = 0.0;
+        double sourceStartSeconds = 0.0;
+        double playRate = 1.0;
+        double gain = 1.0;
     };
 
     void run() override;
     void rebuildReaders();
     void scheduleLatestAnalysis();
-    std::shared_ptr<OfflineScopeSnapshot> buildOfflineSnapshot(const AnalysisRequest& request);
+    std::shared_ptr<OfflineAnalysisSnapshot> buildOfflineSnapshot(const OfflineAnalysisRequest& request);
 
     ProcessingLock& lock;
     ARA::PlugIn::DocumentController* araDocumentController = nullptr;
     juce::SharedResourcePointer<SharedReaderThread> sharedReaderThread;
     std::map<juce::ARAAudioSource*, std::unique_ptr<AudioSourceReader>> readers;
+    std::unique_ptr<juce::AudioBuffer<float>> renderedBuffer;
     std::unique_ptr<juce::AudioBuffer<float>> mixBuffer;
     std::unique_ptr<juce::AudioBuffer<float>> sourceBuffer;
+    std::atomic<bool> hostTakeSelectionPresent { false };
     mutable juce::CriticalSection analysisLock;
-    std::optional<AnalysisRequest> pendingAnalysis;
-    std::shared_ptr<const OfflineScopeSnapshot> offlineSnapshot;
+    std::optional<OfflineAnalysisRequest> pendingAnalysis;
+    std::shared_ptr<const OfflineAnalysisSnapshot> offlineSnapshot;
     mutable std::vector<OfflineSourceTakeChoice> cachedOfflineSourceTakeChoices;
-    AnalysisRequest latestAnalysisSettings;
+    OfflineAnalysisRequest latestAnalysisSettings;
     std::atomic<uint64_t> latestAnalysisRevision { 0 };
+    std::atomic<int> analysisProgress { 100 };
     std::atomic<uint64_t> regionGeneration { 0 };
+    std::shared_ptr<const std::vector<RealtimeTake>> realtimeTakes;
     bool useBufferedReaders = true;
     bool isPrepared = false;
     int preparedChannelCount = 2;

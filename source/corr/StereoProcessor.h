@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../fft/StereoFftStream.h"
+#include "../shared/StereoFftStream.h"
 
 #include <JuceHeader.h>
 
@@ -10,7 +10,7 @@
 
 namespace ana::corr
 {
-class StereoCorrelationProcessor
+class StereoProcessor
 {
 public:
     enum class Mode { phase, amplitude };
@@ -19,7 +19,7 @@ public:
     static constexpr int maximumFftSize = fft::StereoFftStream::maximumFftSize;
     static constexpr int maximumBinCount = maximumFftSize / 2 + 1;
 
-    StereoCorrelationProcessor();
+    StereoProcessor();
 
     void prepare(double newSampleRate) noexcept;
     void reset() noexcept;

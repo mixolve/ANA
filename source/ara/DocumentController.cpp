@@ -1,4 +1,4 @@
-#include "AraDocumentController.h"
+#include "DocumentController.h"
 
 #if JucePlugin_Enable_ARA
 

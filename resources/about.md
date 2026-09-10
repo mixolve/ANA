@@ -1,5 +1,9 @@
+MADE BY MIXOLVE
+
 [WEB](https://mixolve.cc/)
 
 VIBECODED. V:02
 
 [MANUAL](ana-manual://open)
+
+ARA (OFFLINE MODE) TESTED ONLY IN REAPER

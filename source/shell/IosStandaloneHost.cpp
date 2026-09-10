@@ -2,10 +2,10 @@
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter();
 
-class AnaHostComponent final : public juce::Component
+class PluginHostComponent final : public juce::Component
 {
 public:
-    AnaHostComponent()
+    PluginHostComponent()
         : processor(createPluginFilter())
     {
         jassert(processor != nullptr);
@@ -21,7 +21,7 @@ public:
         setSize(editor != nullptr ? editor->getWidth() : 1024,
                 editor != nullptr ? editor->getHeight() : 720);
 
-        const juce::Component::SafePointer<AnaHostComponent> safeThis(this);
+        const juce::Component::SafePointer<PluginHostComponent> safeThis(this);
         const auto initialiseAudio = [safeThis] (const bool microphoneAllowed)
         {
             if (safeThis == nullptr)
@@ -41,7 +41,7 @@ public:
             initialiseAudio(true);
     }
 
-    ~AnaHostComponent() override
+    ~PluginHostComponent() override
     {
         deviceManager.removeAudioCallback(&player);
         player.setProcessor(nullptr);
@@ -63,7 +63,7 @@ private:
     juce::AudioDeviceManager deviceManager;
 };
 
-class AnaIosHostApplication final : public juce::JUCEApplication
+class IosHostApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "ANA"; }
@@ -88,7 +88,7 @@ private:
                              DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(true);
-            setContentOwned(new AnaHostComponent(), true);
+            setContentOwned(new PluginHostComponent(), true);
             centreWithSize(getWidth(), getHeight());
             setVisible(true);
         }
@@ -102,4 +102,4 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
 };
 
-START_JUCE_APPLICATION(AnaIosHostApplication)
+START_JUCE_APPLICATION(IosHostApplication)

@@ -1,6 +1,9 @@
-#include "AnaEditor.h"
-#include "AnaProcessor.h"
-#include "AnaTheme.h"
+#include "Editor.h"
+#include "Processor.h"
+#include "Theme.h"
+#if ANA_HAS_SF_SYMBOLS
+#include "SfSymbols.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -9,17 +12,23 @@
 namespace
 {
 constexpr float minimumCrossoverGapHz = 1.0f;
-constexpr int bandButtonWidth = 44;
-constexpr int bandZoomValueWidth = 74;
+constexpr int bandZoomValueWidth = ana::ui::textControlWidth(6);
 constexpr int bandRangeSliderHeight = 14;
 constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
 constexpr int minimumBandHeight = ana::ui::gap.pixels() * 3 + ana::ui::controlHeight + bandRangeSliderHeight;
-constexpr int minimumEditorWidth = 1300;
 constexpr int minimumEditorHeight = 300;
 constexpr int maximumEditorSize = 32768;
-constexpr int defaultEditorWidth = 1024;
-constexpr int defaultEditorHeight = 720;
+constexpr int readoutTextVerticalOffset = -1;
 constexpr int waveformRightInset = ana::ui::gap.pixels() + bandZoomSliderWidth;
+constexpr int levelScaleLabelWidth = ana::ui::textControlWidth(3);
+constexpr int levelMeterReadoutWidth = ana::ui::textControlWidth(7);
+constexpr int historyMetricReadoutWidth = ana::ui::textControlWidth(7);
+constexpr int historySviewWidth = ana::ui::textControlWidth(5);
+constexpr int historyMinimumWidth = historyMetricReadoutWidth * 2 + historySviewWidth + bandZoomSliderWidth
+    + ana::ui::gap.pixels() * 3;
+constexpr int minimumEditorWidth = 800;
+constexpr int defaultEditorWidth = minimumEditorWidth;
+constexpr int defaultEditorHeight = minimumEditorHeight;
 constexpr std::array<const char*, 6> scopeModeButtonNames { "LR", "L", "R", "MS", "M", "S" };
 constexpr std::array<ana::ScopeChannelMode, 6> scopeModeButtonModes {
     ana::ScopeChannelMode::lr,
@@ -29,6 +38,69 @@ constexpr std::array<ana::ScopeChannelMode, 6> scopeModeButtonModes {
     ana::ScopeChannelMode::mid,
     ana::ScopeChannelMode::side
 };
+
+class InvisibleResizableEdgeComponent final : public juce::ResizableEdgeComponent
+{
+public:
+    using juce::ResizableEdgeComponent::ResizableEdgeComponent;
+    void paint(juce::Graphics&) override {}
+};
+
+struct LevelHistoryLayout
+{
+    juce::Rectangle<int> header;
+    juce::Rectangle<int> plot;
+    juce::Rectangle<int> metricLabelRow;
+    juce::Rectangle<int> metricReadoutRow;
+    juce::Rectangle<int> sviewButton;
+    juce::Rectangle<int> horizontalZoom;
+    juce::Rectangle<int> verticalZoom;
+};
+
+LevelHistoryLayout makeLevelHistoryLayout(juce::Rectangle<int> bounds,
+                                          const bool showZoomControls) noexcept
+{
+    LevelHistoryLayout layout;
+    auto historyArea = bounds;
+    if (showZoomControls)
+    {
+        layout.verticalZoom = historyArea.removeFromRight(
+            std::min(bandZoomSliderWidth, historyArea.getWidth()));
+        ana::ui::gap.removeFromRight(historyArea);
+    }
+
+    layout.header = historyArea.removeFromTop(
+        std::min(ana::ui::controlHeight, historyArea.getHeight()));
+    ana::ui::gap.removeFromTop(historyArea);
+
+    auto plotArea = historyArea;
+    if (showZoomControls)
+    {
+        layout.horizontalZoom = plotArea.removeFromBottom(
+            std::min(bandRangeSliderHeight, plotArea.getHeight()));
+        ana::ui::gap.removeFromBottom(plotArea);
+    }
+    layout.plot = plotArea;
+
+    const auto sviewWidth = std::min(historySviewWidth, std::max(0, layout.plot.getWidth()));
+    const auto sviewY = std::max(layout.plot.getY(),
+        layout.plot.getBottom() - ana::ui::controlHeight);
+    layout.sviewButton = {
+        layout.plot.getX(),
+        sviewY,
+        sviewWidth,
+        std::min(ana::ui::controlHeight, layout.plot.getBottom() - sviewY)
+    };
+    layout.metricLabelRow = historyArea.withWidth(historyMetricReadoutWidth * 2
+                                             + ana::ui::gap.pixels())
+                                      .withHeight(std::min(ana::ui::controlHeight,
+                                                          historyArea.getHeight()));
+    layout.metricReadoutRow = historyArea.withWidth(historyMetricReadoutWidth * 2
+                                               + ana::ui::gap.pixels())
+        .withHeight(layout.metricLabelRow.getHeight())
+        .withY(layout.metricLabelRow.getBottom() + ana::ui::gap.pixels());
+    return layout;
+}
 
 struct DisplayedModes
 {
@@ -54,6 +126,50 @@ DisplayedModes getDisplayedModes(const ana::ScopeChannelMode mode) noexcept
 juce::String formatFrequency(const double frequency)
 {
     return juce::String(frequency, frequency >= 100.0 ? 0 : 1);
+}
+
+juce::String formatReadoutFrequency(const double frequency)
+{
+    return juce::String::formatted("%08.2f", frequency);
+}
+
+juce::String formatReadoutLevel(const double level)
+{
+    return juce::String::formatted("%+07.2f", level);
+}
+
+juce::String formatLufsReadout(const double level)
+{
+    return level <= -119.9 ? juce::String("-inf") : formatReadoutLevel(level);
+}
+
+juce::String formatLevelScaleTick(const int value)
+{
+    return juce::String::formatted("%+03d", value);
+}
+
+juce::String formatCorrelationCoefficient(const double coefficient)
+{
+    return juce::String::formatted("%+.2f", coefficient);
+}
+
+juce::String formatBlockSizeChoice(const double value)
+{
+    constexpr std::array<int, 6> sizes { 512, 1024, 2048, 4096, 8192, 16384 };
+    return juce::String(sizes[static_cast<size_t>(juce::jlimit(
+        0, static_cast<int>(sizes.size()) - 1, juce::roundToInt(value)))]);
+}
+
+juce::String formatSpectrumTypeChoice(const double value)
+{
+    constexpr std::array<const char*, 2> choices { "RTAVG", "MAX" };
+    return choices[static_cast<size_t>(juce::jlimit(
+        0, static_cast<int>(choices.size()) - 1, juce::roundToInt(value)))];
+}
+
+juce::Rectangle<int> readoutTextBounds(const juce::Rectangle<int> bounds) noexcept
+{
+    return bounds.translated(0, readoutTextVerticalOffset);
 }
 
 double parseFrequency(const juce::String& text)
@@ -168,31 +284,191 @@ void drawWaveformEnvelope(juce::Graphics& graphics,
 
 } // namespace
 
-AnaScopeButton::AnaScopeButton(juce::String text)
+void EllipsisLabel::paint(juce::Graphics& graphics)
+{
+    if (isBeingEdited())
+    {
+        getLookAndFeel().drawLabel(graphics, *this);
+        return;
+    }
+
+    if (drawBackground)
+        graphics.fillAll(findColour(juce::Label::backgroundColourId));
+    graphics.setColour(isEnabled() ? findColour(juce::Label::textColourId)
+                                   : ana::ui::light);
+    graphics.setFont(getFont());
+    graphics.drawText(getText(), getBorderSize().subtractedFrom(getLocalBounds())
+                                     .translated(0, textVerticalOffset),
+                      getJustificationType(), true);
+    graphics.setColour(isEnabled() ? findColour(juce::Label::outlineColourId)
+                                   : ana::ui::light);
+    graphics.drawRect(getLocalBounds());
+}
+
+ControlButton::ControlButton(juce::String text)
     : juce::Button(std::move(text))
 {
+    iconButton = getButtonText() == "chevron.forward.2"
+        || getButtonText() == "gearshape"
+        || getButtonText() == "snowflake"
+        || getButtonText() == "arrow.trianglehead.2.clockwise"
+        || getButtonText() == "info.circle";
+#if ANA_HAS_SF_SYMBOLS
+    if (iconButton)
+        symbolImage = loadSfSymbol(getButtonText(), ana::ui::iconFontSize);
+#endif
     setWantsKeyboardFocus(false);
 }
 
-void AnaScopeButton::paintButton(juce::Graphics& graphics,
-                                 const bool,
+int ControlButton::getPreferredWidth() const noexcept
+{
+    return iconButton ? ana::ui::iconControlSize : ana::ui::textControlWidth(getButtonText());
+}
+
+void ControlButton::paintButton(juce::Graphics& graphics,
+                                 const bool shouldDrawButtonAsHighlighted,
                                  const bool shouldDrawButtonAsDown)
 {
-    const auto bounds = getLocalBounds().toFloat().reduced(0.5f);
-    auto fill = shouldDrawButtonAsDown ? ana::ui::grey700 : ana::ui::field;
+    const auto bounds = getLocalBounds();
+    const auto hovered = isEnabled()
+        && (shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown);
+    const auto fill = hovered ? ana::ui::hover : ana::ui::field;
 
     graphics.setColour(fill);
     graphics.fillRect(bounds);
     const auto active = isEnabled() && getToggleState();
-    graphics.setColour(active ? ana::ui::accent : ana::ui::grey500);
-    graphics.drawRect(bounds, active ? 1.5f : 1.0f);
-    graphics.setColour(isEnabled() ? ana::ui::white : ana::ui::grey500);
-    graphics.setFont(ana::ui::makeFont());
-    graphics.drawFittedText(getButtonText(), getLocalBounds().reduced(ana::ui::gap.pixels(), 1),
-                            juce::Justification::centred, 1);
+    graphics.setColour(active ? ana::ui::white : ana::ui::grey500);
+    graphics.drawRect(bounds, active ? ana::ui::activeBorderWidth : 1);
+    const auto foreground = ! isEnabled() ? ana::ui::grey500
+        : hovered ? juce::Colours::black : ana::ui::white;
+    graphics.setColour(foreground);
+    if (symbolImage.isValid())
+    {
+        juce::DrawableImage drawable;
+        drawable.setImage(symbolImage);
+        drawable.setOverlayColour(foreground);
+        const auto iconSize = juce::roundToInt(ana::ui::iconFontSize);
+        drawable.drawWithin(graphics, getLocalBounds().withSizeKeepingCentre(iconSize, iconSize).toFloat(),
+                            juce::RectanglePlacement::centred, 1.0f);
+    }
+    else
+    {
+        graphics.setFont(ana::ui::makeFont());
+        graphics.drawText(getButtonText(), getLocalBounds().reduced(ana::ui::gap.pixels(), 1),
+                          juce::Justification::centred, true);
+    }
 }
 
-juce::Slider::SliderLayout AnaSliderLookAndFeel::getSliderLayout(juce::Slider& slider)
+AboutPopup::AboutPopup(std::function<void()> closeCallback)
+    : onClose(std::move(closeCallback))
+{
+    setOpaque(true);
+    setWantsKeyboardFocus(true);
+    setMouseClickGrabsKeyboardFocus(false);
+
+    const auto configureLink = [this] (juce::HyperlinkButton& link)
+    {
+        link.setFont(ana::ui::makeFont(), false);
+        link.setJustificationType(juce::Justification::centred);
+        link.setColour(juce::HyperlinkButton::textColourId, ana::ui::accent);
+        link.setWantsKeyboardFocus(false);
+        addAndMakeVisible(link);
+    };
+    configureLink(webLink);
+    configureLink(manualLink);
+    manualLink.onClick = []
+    {
+        const auto url = createOfflineManualUrl();
+        if (url.isWellFormed())
+            url.launchInDefaultBrowser();
+    };
+
+    const auto aboutText = juce::String::fromUTF8(BinaryData::about_md, BinaryData::about_mdSize);
+    for (const auto& line : juce::StringArray::fromLines(aboutText))
+    {
+        const auto trimmed = line.trim();
+        if (trimmed.isEmpty())
+            continue;
+        if (trimmed.startsWith("[WEB]"))
+        {
+            contentRows.push_back(&webLink);
+            continue;
+        }
+        if (trimmed.startsWith("[MANUAL]"))
+        {
+            contentRows.push_back(&manualLink);
+            continue;
+        }
+
+        auto label = std::make_unique<EllipsisLabel>();
+        label->setText(trimmed, juce::dontSendNotification);
+        label->setFont(ana::ui::makeFont());
+        label->setJustificationType(juce::Justification::centred);
+        label->setColour(juce::Label::textColourId, ana::ui::white);
+        label->setColour(juce::Label::backgroundColourId, ana::ui::black);
+        label->setColour(juce::Label::outlineColourId, ana::ui::black);
+        addAndMakeVisible(*label);
+        contentRows.push_back(label.get());
+        textLabels.push_back(std::move(label));
+    }
+
+    okButton.onClick = [this] { requestClose(); };
+    addAndMakeVisible(okButton);
+}
+
+void AboutPopup::paint(juce::Graphics& graphics)
+{
+    graphics.fillAll(juce::Colours::black);
+}
+
+void AboutPopup::resized()
+{
+    auto area = getLocalBounds().reduced(ana::ui::gap.pixels());
+    okButton.setBounds(area.removeFromBottom(ana::ui::controlHeight));
+    ana::ui::gap.removeFromBottom(area);
+    for (size_t index = 0; index < contentRows.size(); ++index)
+    {
+        contentRows[index]->setBounds(area.removeFromTop(ana::ui::controlHeight));
+        if (index + 1 < contentRows.size())
+            ana::ui::gap.removeFromTop(area);
+    }
+}
+
+bool AboutPopup::keyPressed(const juce::KeyPress& key)
+{
+    if (key != juce::KeyPress::escapeKey)
+        return false;
+    requestClose();
+    return true;
+}
+
+void AboutPopup::requestClose()
+{
+    auto deferredClose = std::move(onClose);
+    onClose = {};
+    juce::MessageManager::callAsync([callback = std::move(deferredClose)]
+    {
+        if (callback != nullptr)
+            callback();
+    });
+}
+
+juce::URL AboutPopup::createOfflineManualUrl()
+{
+    const auto directory = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                               .getChildFile("mixolve-ana");
+    if (directory.createDirectory().failed())
+        return {};
+    const auto manualFile = directory.getChildFile("manual.md");
+    manualFile.setReadOnly(false);
+    if (! manualFile.replaceWithData(BinaryData::manual_md,
+                                     static_cast<size_t>(BinaryData::manual_mdSize)))
+        return {};
+    manualFile.setReadOnly(true);
+    return juce::URL(manualFile);
+}
+
+juce::Slider::SliderLayout SliderLookAndFeel::getSliderLayout(juce::Slider& slider)
 {
     if (slider.getSliderStyle() == juce::Slider::LinearBarVertical)
         return { slider.getLocalBounds(), {} };
@@ -200,7 +476,7 @@ juce::Slider::SliderLayout AnaSliderLookAndFeel::getSliderLayout(juce::Slider& s
     return juce::LookAndFeel_V4::getSliderLayout(slider);
 }
 
-void AnaSliderLookAndFeel::drawLinearSlider(juce::Graphics& graphics,
+void SliderLookAndFeel::drawLinearSlider(juce::Graphics& graphics,
                                             const int x, const int y, const int width, const int height,
                                             const float sliderPosition,
                                             const float minimumSliderPosition,
@@ -209,8 +485,8 @@ void AnaSliderLookAndFeel::drawLinearSlider(juce::Graphics& graphics,
 {
     if (style == juce::Slider::LinearBarVertical)
     {
-        const auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y),
-                                                    static_cast<float>(width), static_cast<float>(height)).reduced(0.5f);
+        const auto frameBounds = juce::Rectangle<int>(x, y, width, height);
+        const auto bounds = frameBounds.toFloat();
         const auto markerY = juce::jlimit(bounds.getY(), bounds.getBottom(), sliderPosition);
         const auto neutralProportion = static_cast<float>(slider.valueToProportionOfLength(0.0));
         const auto neutralY = juce::jmap(neutralProportion, bounds.getBottom(), bounds.getY());
@@ -218,14 +494,14 @@ void AnaSliderLookAndFeel::drawLinearSlider(juce::Graphics& graphics,
         const auto fillBottom = std::max(markerY, neutralY);
         graphics.setColour(ana::ui::field);
         graphics.fillRect(bounds);
-        graphics.setColour(ana::ui::accent.withAlpha(slider.isEnabled() ? 0.22f : 0.06f));
+        graphics.setColour(slider.isEnabled() ? ana::ui::light : ana::ui::dark);
         graphics.fillRect(bounds.withTop(fillTop).withBottom(fillBottom));
         graphics.setColour(ana::ui::grey500);
         graphics.fillRect(bounds.getX(), neutralY - 0.5f, bounds.getWidth(), 1.0f);
         graphics.setColour(slider.isEnabled() ? ana::ui::accent : ana::ui::grey500);
         graphics.fillRect(bounds.getX(), markerY - 1.0f, bounds.getWidth(), 2.0f);
         graphics.setColour(ana::ui::grey500);
-        graphics.drawRect(bounds, 1.0f);
+        graphics.drawRect(frameBounds, 1);
         return;
     }
 
@@ -237,30 +513,30 @@ void AnaSliderLookAndFeel::drawLinearSlider(juce::Graphics& graphics,
         return;
     }
 
-    const auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y),
-                                                static_cast<float>(width), static_cast<float>(height)).reduced(0.5f);
+    const auto frameBounds = juce::Rectangle<int>(x, y, width, height);
+    const auto bounds = frameBounds.toFloat();
     const auto markerX = juce::jlimit(bounds.getX(), bounds.getRight(), sliderPosition);
 
     graphics.setColour(ana::ui::field);
     graphics.fillRect(bounds);
-    graphics.setColour(ana::ui::accent.withAlpha(slider.isEnabled() ? 0.18f : 0.06f));
+    graphics.setColour(slider.isEnabled() ? ana::ui::light : ana::ui::dark);
     graphics.fillRect(bounds.withRight(markerX));
     graphics.setColour(slider.isEnabled() ? ana::ui::accent : ana::ui::grey500);
     graphics.fillRect(markerX - 1.0f, bounds.getY(), 2.0f, bounds.getHeight());
     graphics.setColour(ana::ui::grey500);
-    graphics.drawRect(bounds, 1.0f);
+    graphics.drawRect(frameBounds, 1);
 
     if (style == juce::Slider::LinearBar)
     {
         graphics.setColour(slider.isEnabled() ? ana::ui::white : ana::ui::grey500);
         graphics.setFont(ana::ui::makeFont());
-        graphics.drawFittedText(slider.getTextFromValue(slider.getValue()),
-                                bounds.toNearestInt().reduced(ana::ui::gap.pixels(), 1),
-                                juce::Justification::centred, 1);
+        graphics.drawText(slider.getTextFromValue(slider.getValue()),
+                          readoutTextBounds(bounds.toNearestInt().reduced(ana::ui::gap.pixels(), 1)),
+                          juce::Justification::centred, true);
     }
 }
 
-void AnaSliderLookAndFeel::drawScrollbar(juce::Graphics& graphics,
+void SliderLookAndFeel::drawScrollbar(juce::Graphics& graphics,
                                          juce::ScrollBar&,
                                          const int x, const int y, const int width, const int height,
                                          const bool isScrollbarVertical,
@@ -281,11 +557,11 @@ void AnaSliderLookAndFeel::drawScrollbar(juce::Graphics& graphics,
     auto thumb = isScrollbarVertical
         ? juce::Rectangle<int>(x + 2, thumbStartPosition, std::max(1, width - 4), thumbSize)
         : juce::Rectangle<int>(thumbStartPosition, y + 2, thumbSize, std::max(1, height - 4));
-    graphics.setColour(ana::ui::accent.withAlpha(isMouseDown ? 1.0f : 0.65f));
+    graphics.setColour(isMouseDown ? ana::ui::white : ana::ui::light);
     graphics.fillRect(thumb);
 }
 
-juce::Label* AnaSliderLookAndFeel::createSliderTextBox(juce::Slider& slider)
+juce::Label* SliderLookAndFeel::createSliderTextBox(juce::Slider& slider)
 {
     auto* label = juce::LookAndFeel_V4::createSliderTextBox(slider);
     label->setFont(ana::ui::makeFont());
@@ -297,7 +573,7 @@ juce::Label* AnaSliderLookAndFeel::createSliderTextBox(juce::Slider& slider)
     return label;
 }
 
-AnaParameterControl::AnaParameterControl(juce::AudioProcessorValueTreeState& state,
+ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
                                          const juce::String& parameterId,
                                          juce::String title,
                                          Formatter formatter)
@@ -338,7 +614,8 @@ AnaParameterControl::AnaParameterControl(juce::AudioProcessorValueTreeState& sta
     valueEditor.setColour(juce::TextEditor::backgroundColourId, ana::ui::field);
     valueEditor.setColour(juce::TextEditor::outlineColourId, ana::ui::grey500);
     valueEditor.setColour(juce::TextEditor::focusedOutlineColourId, ana::ui::grey500);
-    valueEditor.setColour(juce::TextEditor::highlightColourId, ana::ui::accent.withAlpha(0.45f));
+    valueEditor.setColour(juce::TextEditor::highlightColourId, ana::ui::black);
+    valueEditor.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::white);
     valueEditor.onReturnKey = [this] { hideValueEditor(false); };
     valueEditor.onEscapeKey = [this] { hideValueEditor(true); };
     valueEditor.onFocusLost = [this]
@@ -348,16 +625,20 @@ AnaParameterControl::AnaParameterControl(juce::AudioProcessorValueTreeState& sta
     };
     addChildComponent(valueEditor);
     attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(state, parameterId, slider);
+    slider.textFromValueFunction = [this] (const double value)
+    {
+        return valueFormatter != nullptr ? valueFormatter(value) : juce::String(value);
+    };
 }
 
-AnaParameterControl::~AnaParameterControl()
+ParameterControl::~ParameterControl()
 {
     stopTimer();
     slider.setLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
 }
 
-void AnaParameterControl::setInteractionEnabled(const bool shouldEnable)
+void ParameterControl::setInteractionEnabled(const bool shouldEnable)
 {
     if (interactionEnabled == shouldEnable)
         return;
@@ -373,17 +654,17 @@ void AnaParameterControl::setInteractionEnabled(const bool shouldEnable)
     repaint();
 }
 
-juce::StringArray AnaParameterControl::getChoiceNames() const
+juce::StringArray ParameterControl::getChoiceNames() const
 {
     return choiceParameter != nullptr ? choiceParameter->choices : juce::StringArray();
 }
 
-int AnaParameterControl::getSelectedChoiceIndex() const noexcept
+int ParameterControl::getSelectedChoiceIndex() const noexcept
 {
     return choiceParameter != nullptr ? juce::roundToInt(slider.getValue()) : -1;
 }
 
-void AnaParameterControl::setSelectedChoiceIndex(const int choiceIndex)
+void ParameterControl::setSelectedChoiceIndex(const int choiceIndex)
 {
     if (choiceParameter == nullptr || ! juce::isPositiveAndBelow(choiceIndex, choiceParameter->choices.size()))
         return;
@@ -391,7 +672,7 @@ void AnaParameterControl::setSelectedChoiceIndex(const int choiceIndex)
     slider.setValue(choiceIndex, juce::sendNotificationSync);
 }
 
-void AnaParameterControl::setSelected(const bool shouldSelect)
+void ParameterControl::setSelected(const bool shouldSelect)
 {
     const auto nextSelected = shouldSelect && interactionEnabled;
 
@@ -402,7 +683,7 @@ void AnaParameterControl::setSelected(const bool shouldSelect)
     repaint();
 }
 
-void AnaParameterControl::setCompact(const bool shouldUseCompactLayout)
+void ParameterControl::setCompact(const bool shouldUseCompactLayout)
 {
     if (compact == shouldUseCompactLayout)
         return;
@@ -412,28 +693,32 @@ void AnaParameterControl::setCompact(const bool shouldUseCompactLayout)
     repaint();
 }
 
-void AnaParameterControl::paint(juce::Graphics& graphics)
+void ParameterControl::paint(juce::Graphics& graphics)
 {
-    graphics.setColour(pointerDown && pressHighlighted && pressRegion == PressRegion::title
-                           ? ana::ui::grey700 : ana::ui::field);
+    const auto titleHovered = interactionEnabled && hoverRegion == PressRegion::title;
+    const auto valueHovered = interactionEnabled && hoverRegion == PressRegion::value;
+    graphics.setColour(titleHovered ? ana::ui::hover : ana::ui::field);
     graphics.fillRect(titleBounds);
-    graphics.setColour(pointerDown && pressHighlighted && pressRegion == PressRegion::value
-                           ? ana::ui::grey700 : ana::ui::field);
+    graphics.setColour(valueHovered ? ana::ui::hover : ana::ui::field);
     graphics.fillRect(valueBounds);
-    graphics.setColour(selected ? ana::ui::accent : ana::ui::grey500);
-    graphics.drawRect(titleBounds, selected ? 2 : 1);
+    graphics.setColour(selected ? ana::ui::white : ana::ui::grey500);
+    graphics.drawRect(titleBounds, selected ? ana::ui::activeBorderWidth : 1);
     graphics.setColour(ana::ui::grey500);
     graphics.drawRect(valueBounds, 1);
-    graphics.setColour(interactionEnabled ? ana::ui::white : ana::ui::grey500);
     graphics.setFont(ana::ui::makeFont());
-    graphics.drawFittedText(longPressArmed ? "RESET?" : titleText, titleBounds.reduced(12, 1),
-                            juce::Justification::centredLeft, 1);
-    graphics.drawFittedText(interactionEnabled ? slider.getTextFromValue(slider.getValue()) : "OFF",
-                            valueBounds.reduced(ana::ui::gap.pixels(), 1),
-                            juce::Justification::centred, 1);
+    graphics.setColour(! interactionEnabled ? ana::ui::grey500
+                       : titleHovered ? juce::Colours::black : ana::ui::white);
+    graphics.drawText(longPressArmed ? "RESET?" : titleText,
+                      titleBounds.reduced(ana::ui::textPadding, 1),
+                      juce::Justification::centredLeft, true);
+    graphics.setColour(! interactionEnabled ? ana::ui::grey500
+                       : valueHovered ? juce::Colours::black : ana::ui::white);
+    graphics.drawText(interactionEnabled ? slider.getTextFromValue(slider.getValue()) : "OFF",
+                      readoutTextBounds(valueBounds.reduced(ana::ui::gap.pixels(), 1)),
+                      juce::Justification::centred, true);
 }
 
-void AnaParameterControl::resized()
+void ParameterControl::resized()
 {
     auto row = getLocalBounds();
 
@@ -442,18 +727,18 @@ void AnaParameterControl::resized()
         const auto availableWidth = std::max(0, row.getWidth() - ana::ui::gap.pixels());
         titleBounds = row.removeFromLeft(availableWidth / 2);
         ana::ui::gap.removeFromLeft(row);
+        valueBounds = row;
     }
     else
     {
         titleBounds = {};
+        valueBounds = row;
     }
-
-    valueBounds = row;
     slider.setBounds(valueBounds);
     valueEditor.setBounds(valueBounds);
 }
 
-void AnaParameterControl::mouseDown(const juce::MouseEvent& event)
+void ParameterControl::mouseDown(const juce::MouseEvent& event)
 {
     if (! interactionEnabled || ! event.mods.isLeftButtonDown())
         return;
@@ -472,7 +757,20 @@ void AnaParameterControl::mouseDown(const juce::MouseEvent& event)
     repaint();
 }
 
-void AnaParameterControl::mouseDrag(const juce::MouseEvent& event)
+void ParameterControl::mouseMove(const juce::MouseEvent& event)
+{
+    const auto nextHoverRegion = ! interactionEnabled ? PressRegion::none
+        : titleBounds.contains(event.getPosition()) ? PressRegion::title
+        : valueBounds.contains(event.getPosition()) ? PressRegion::value
+                                                    : PressRegion::none;
+    if (hoverRegion != nextHoverRegion)
+    {
+        hoverRegion = nextHoverRegion;
+        repaint();
+    }
+}
+
+void ParameterControl::mouseDrag(const juce::MouseEvent& event)
 {
     if (! pointerDown)
         return;
@@ -487,7 +785,7 @@ void AnaParameterControl::mouseDrag(const juce::MouseEvent& event)
     }
 }
 
-void AnaParameterControl::mouseUp(const juce::MouseEvent& event)
+void ParameterControl::mouseUp(const juce::MouseEvent& event)
 {
     if (! pointerDown)
         return;
@@ -536,15 +834,20 @@ void AnaParameterControl::mouseUp(const juce::MouseEvent& event)
     }
 }
 
-void AnaParameterControl::commitPendingEditor()
+void ParameterControl::commitPendingEditor()
 {
     hideValueEditor(false);
 }
 
-void AnaParameterControl::mouseExit(const juce::MouseEvent&)
+void ParameterControl::mouseExit(const juce::MouseEvent&)
 {
+    hoverRegion = PressRegion::none;
+
     if (! pointerDown)
+    {
+        repaint();
         return;
+    }
 
     pressHighlighted = false;
     longPressArmed = false;
@@ -552,7 +855,7 @@ void AnaParameterControl::mouseExit(const juce::MouseEvent&)
     repaint();
 }
 
-void AnaParameterControl::timerCallback()
+void ParameterControl::timerCallback()
 {
     stopTimer();
 
@@ -563,7 +866,7 @@ void AnaParameterControl::timerCallback()
     repaint();
 }
 
-void AnaParameterControl::showValueEditor()
+void ParameterControl::showValueEditor()
 {
     if (! interactionEnabled || choiceParameter != nullptr || valueEditorActive)
         return;
@@ -576,7 +879,7 @@ void AnaParameterControl::showValueEditor()
     valueEditor.selectAll();
 }
 
-void AnaParameterControl::hideValueEditor(const bool discardChanges)
+void ParameterControl::hideValueEditor(const bool discardChanges)
 {
     if (! valueEditorActive)
         return;
@@ -595,7 +898,7 @@ void AnaParameterControl::hideValueEditor(const bool discardChanges)
     repaint();
 }
 
-void AnaParameterControl::resetToDefault()
+void ParameterControl::resetToDefault()
 {
     if (parameter == nullptr || ! interactionEnabled)
         return;
@@ -604,7 +907,7 @@ void AnaParameterControl::resetToDefault()
                     juce::sendNotificationSync);
 }
 
-AnaChoicePrompt::AnaChoicePrompt(juce::Rectangle<int> anchorBoundsIn,
+ChoicePopup::ChoicePopup(juce::Rectangle<int> anchorBoundsIn,
                                  juce::StringArray choicesIn,
                                  const int selectedIndex,
                                  std::function<void(int)> selectCallback,
@@ -622,65 +925,58 @@ AnaChoicePrompt::AnaChoicePrompt(juce::Rectangle<int> anchorBoundsIn,
 
     for (int index = 0; index < choices.size(); ++index)
     {
-        auto button = std::make_unique<AnaScopeButton>(choices[index]);
-        button->setToggleState(index == selectedIndex, juce::dontSendNotification);
+        auto button = std::make_unique<ControlButton>(choices[index]);
+        button->setToggleState(choices.size() != 2 && index == selectedIndex,
+                               juce::dontSendNotification);
         button->onClick = [this, index] { choose(index); };
         addAndMakeVisible(*button);
         choiceButtons.push_back(std::move(button));
     }
 }
 
-void AnaChoicePrompt::paint(juce::Graphics& graphics)
+void ChoicePopup::paintOverChildren(juce::Graphics& graphics)
 {
-    graphics.setColour(juce::Colours::black.withAlpha(0.55f));
-    graphics.fillAll();
-    graphics.setColour(ana::ui::grey700);
-    graphics.fillRect(panelBounds);
-    graphics.setColour(ana::ui::grey500);
-    graphics.drawRect(panelBounds, 1);
+    graphics.setColour(ana::ui::white);
+    graphics.drawRect(panelBounds, 2);
 }
 
-void AnaChoicePrompt::resized()
+void ChoicePopup::resized()
 {
+    constexpr int popupItemGap = 0;
     const auto itemCount = static_cast<int>(choiceButtons.size());
     const auto contentHeight = itemCount * ana::ui::controlHeight
-        + std::max(0, itemCount - 1) * ana::ui::gap.pixels();
-    auto contentWidth = 0.0f;
+        + std::max(0, itemCount - 1) * popupItemGap;
+    auto choiceWidth = ana::ui::textControlWidth(1);
     for (const auto& choice : choices)
-    {
-        juce::GlyphArrangement glyphs;
-        glyphs.addLineOfText(ana::ui::makeFont(), choice, 0.0f, 0.0f);
-        contentWidth = std::max(contentWidth,
-                                glyphs.getBoundingBox(0, glyphs.getNumGlyphs(), true).getWidth());
-    }
-    const auto desiredPanelWidth = juce::roundToInt(std::ceil(contentWidth))
-        + ana::ui::gap.pixels() * 4;
+        choiceWidth = std::max(choiceWidth, ana::ui::textControlWidth(choice));
+    const auto desiredPanelWidth = choiceWidth;
     const auto panelWidth = std::max(1, std::min(
         std::max(anchorBounds.getWidth(), desiredPanelWidth),
         getWidth() - ana::ui::gap.pixels() * 2));
     const auto panelHeight = std::min(getHeight() - ana::ui::gap.pixels() * 2,
-                                      contentHeight + ana::ui::gap.pixels() * 2);
+                                      contentHeight);
     panelBounds = juce::Rectangle<int>(panelWidth, std::max(1, panelHeight));
     panelBounds.setPosition(anchorBounds.getPosition());
     panelBounds = panelBounds.constrainedWithin(getLocalBounds().reduced(ana::ui::gap.pixels()));
 
-    auto area = panelBounds.reduced(ana::ui::gap.pixels());
+    auto area = panelBounds;
     for (size_t index = 0; index < choiceButtons.size(); ++index)
     {
-        choiceButtons[index]->setBounds(area.removeFromTop(ana::ui::controlHeight));
+        const auto row = area.removeFromTop(ana::ui::controlHeight);
+        choiceButtons[index]->setBounds(row);
 
         if (index + 1 < choiceButtons.size())
-            area.removeFromTop(ana::ui::gap.pixels());
+            area.removeFromTop(popupItemGap);
     }
 }
 
-void AnaChoicePrompt::mouseDown(const juce::MouseEvent& event)
+void ChoicePopup::mouseDown(const juce::MouseEvent& event)
 {
     if (! panelBounds.contains(event.getPosition()))
         close();
 }
 
-void AnaChoicePrompt::choose(const int index)
+void ChoicePopup::choose(const int index)
 {
     if (closing)
         return;
@@ -700,7 +996,7 @@ void AnaChoicePrompt::choose(const int index)
     });
 }
 
-void AnaChoicePrompt::close()
+void ChoicePopup::close()
 {
     if (closing)
         return;
@@ -714,96 +1010,14 @@ void AnaChoicePrompt::close()
     });
 }
 
-AnaLocalChoiceControl::AnaLocalChoiceControl(juce::String title)
-    : titleText(std::move(title))
+void RangeSlider::paint(juce::Graphics& graphics)
 {
-    setWantsKeyboardFocus(false);
-    setMouseClickGrabsKeyboardFocus(false);
-    choices.add("ALL");
-}
-
-void AnaLocalChoiceControl::setChoices(juce::StringArray newChoices,
-                                       const int newSelectedIndex)
-{
-    if (newChoices.isEmpty())
-        newChoices.add("ALL");
-
-    choices = std::move(newChoices);
-    selectedIndex = juce::jlimit(0, choices.size() - 1, newSelectedIndex);
-    repaint();
-}
-
-void AnaLocalChoiceControl::setSelectedChoiceIndex(const int newSelectedIndex,
-                                                   const bool sendChange)
-{
-    const auto nextIndex = juce::jlimit(0, std::max(0, choices.size() - 1), newSelectedIndex);
-
-    if (selectedIndex == nextIndex)
-        return;
-
-    selectedIndex = nextIndex;
-    repaint();
-
-    if (sendChange && onSelectionChanged)
-        onSelectionChanged(selectedIndex);
-}
-
-void AnaLocalChoiceControl::paint(juce::Graphics& graphics)
-{
-    graphics.setColour(ana::ui::field);
-    graphics.fillRect(titleBounds);
-    graphics.setColour(pointerDown ? ana::ui::grey700 : ana::ui::field);
-    graphics.fillRect(valueBounds);
-    graphics.setColour(ana::ui::grey500);
-    graphics.drawRect(titleBounds, 1);
-    graphics.drawRect(valueBounds, 1);
-    graphics.setColour(isEnabled() ? ana::ui::white : ana::ui::grey500);
-    graphics.setFont(ana::ui::makeFont());
-    graphics.drawFittedText(titleText, titleBounds.reduced(ana::ui::gap.pixels(), 1),
-                            juce::Justification::centredLeft, 1);
-    graphics.drawFittedText(choices[selectedIndex], valueBounds.reduced(ana::ui::gap.pixels(), 1),
-                            juce::Justification::centred, 1);
-}
-
-void AnaLocalChoiceControl::resized()
-{
-    auto area = getLocalBounds();
-    titleBounds = area.removeFromLeft(area.getWidth() / 2);
-    valueBounds = area;
-}
-
-void AnaLocalChoiceControl::mouseDown(const juce::MouseEvent& event)
-{
-    pointerDown = isEnabled() && valueBounds.contains(event.getPosition());
-    repaint();
-}
-
-void AnaLocalChoiceControl::mouseUp(const juce::MouseEvent& event)
-{
-    const auto shouldOpen = pointerDown && valueBounds.contains(event.getPosition());
-    pointerDown = false;
-    repaint();
-
-    if (shouldOpen && onChoiceRequested)
-        onChoiceRequested();
-}
-
-void AnaLocalChoiceControl::mouseExit(const juce::MouseEvent&)
-{
-    if (! isMouseButtonDown())
-    {
-        pointerDown = false;
-        repaint();
-    }
-}
-
-void AnaRangeSlider::paint(juce::Graphics& graphics)
-{
-    const auto bounds = getLocalBounds().toFloat().reduced(0.5f);
+    const auto frameBounds = getLocalBounds();
+    const auto bounds = frameBounds.toFloat();
 
     graphics.setColour(ana::ui::field);
     graphics.fillRect(bounds);
-    graphics.setColour(ana::ui::accent.withAlpha(0.2f));
+    graphics.setColour(ana::ui::light);
 
     if (orientation == Orientation::horizontal)
     {
@@ -825,10 +1039,10 @@ void AnaRangeSlider::paint(juce::Graphics& graphics)
     }
 
     graphics.setColour(ana::ui::grey500);
-    graphics.drawRect(bounds, 1.0f);
+    graphics.drawRect(frameBounds, 1);
 }
 
-void AnaRangeSlider::mouseDown(const juce::MouseEvent& event)
+void RangeSlider::mouseDown(const juce::MouseEvent& event)
 {
     constexpr float handleHitRadius = 8.0f;
     const auto length = static_cast<float>(std::max(1, orientation == Orientation::horizontal
@@ -850,7 +1064,7 @@ void AnaRangeSlider::mouseDown(const juce::MouseEvent& event)
         dragMode = DragMode::none;
 }
 
-void AnaRangeSlider::mouseDrag(const juce::MouseEvent& event)
+void RangeSlider::mouseDrag(const juce::MouseEvent& event)
 {
     constexpr float minimumRange = 0.01f;
     const auto delta = static_cast<float>(orientation == Orientation::horizontal
@@ -883,18 +1097,18 @@ void AnaRangeSlider::mouseDrag(const juce::MouseEvent& event)
     }
 }
 
-void AnaRangeSlider::mouseUp(const juce::MouseEvent&)
+void RangeSlider::mouseUp(const juce::MouseEvent&)
 {
     dragMode = DragMode::none;
 }
 
-void AnaRangeSlider::setRange(const float newStart, const float newEnd)
+void RangeSlider::setRange(const float newStart, const float newEnd)
 {
     updateRange(juce::jlimit(0.0f, 1.0f, newStart),
                 juce::jlimit(0.0f, 1.0f, newEnd));
 }
 
-void AnaRangeSlider::updateRange(const float newStart, const float newEnd)
+void RangeSlider::updateRange(const float newStart, const float newEnd)
 {
     if (std::abs(rangeStart - newStart) <= 1.0e-6f
         && std::abs(rangeEnd - newEnd) <= 1.0e-6f)
@@ -908,16 +1122,16 @@ void AnaRangeSlider::updateRange(const float newStart, const float newEnd)
         onRangeChanged();
 }
 
-AnaFrequencyDisplayComponent::AnaFrequencyDisplayComponent(AnaAudioProcessor& processorRef)
+SpectrumView::SpectrumView(PluginProcessor& processorRef)
     : processor(processorRef),
-      frequencyLowControl(processorRef.getParameters(), AnaAudioProcessor::frequencyLowParameterId,
-                          "FREQ-LOW", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      frequencyHighControl(processorRef.getParameters(), AnaAudioProcessor::frequencyHighParameterId,
-                           "FREQ-HIGH", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      rangeLowControl(processorRef.getParameters(), AnaAudioProcessor::frequencyRangeLowParameterId,
-                      "RANGE-LOW", [] (const double value) { return juce::String(value, 1); }),
-      rangeHighControl(processorRef.getParameters(), AnaAudioProcessor::frequencyRangeHighParameterId,
-                       "RANGE-HIGH", [] (const double value) { return juce::String(value, 1); })
+      frequencyLowControl(processorRef.getParameters(), PluginProcessor::frequencyLowParameterId,
+                          "FREQ-LOW", [] (const double value) { return formatReadoutFrequency(value); }),
+      frequencyHighControl(processorRef.getParameters(), PluginProcessor::frequencyHighParameterId,
+                           "FREQ-HIGH", [] (const double value) { return formatReadoutFrequency(value); }),
+      rangeLowControl(processorRef.getParameters(), PluginProcessor::frequencyRangeLowParameterId,
+                      "RANGE-LOW", [] (const double value) { return formatReadoutLevel(value); }),
+      rangeHighControl(processorRef.getParameters(), PluginProcessor::frequencyRangeHighParameterId,
+                       "RANGE-HIGH", [] (const double value) { return formatReadoutLevel(value); })
 {
     for (auto* component : std::array<juce::Component*, 6> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl,
@@ -931,6 +1145,7 @@ AnaFrequencyDisplayComponent::AnaFrequencyDisplayComponent(AnaAudioProcessor& pr
     cursorReadoutLabel.setColour(juce::Label::backgroundColourId, ana::ui::field);
     cursorReadoutLabel.setColour(juce::Label::outlineColourId, ana::ui::grey500);
     cursorReadoutLabel.setBorderSize(juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
+    cursorReadoutLabel.setTextVerticalOffset(readoutTextVerticalOffset);
     cursorReadoutLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(cursorReadoutLabel);
 
@@ -941,6 +1156,7 @@ AnaFrequencyDisplayComponent::AnaFrequencyDisplayComponent(AnaAudioProcessor& pr
     cursorNoteReadoutLabel.setColour(juce::Label::backgroundColourId, ana::ui::field);
     cursorNoteReadoutLabel.setColour(juce::Label::outlineColourId, ana::ui::grey500);
     cursorNoteReadoutLabel.setBorderSize(juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
+    cursorNoteReadoutLabel.setTextVerticalOffset(readoutTextVerticalOffset);
     cursorNoteReadoutLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(cursorNoteReadoutLabel);
 
@@ -951,17 +1167,18 @@ AnaFrequencyDisplayComponent::AnaFrequencyDisplayComponent(AnaAudioProcessor& pr
     cursorVerticalReadoutLabel.setColour(juce::Label::backgroundColourId, ana::ui::field);
     cursorVerticalReadoutLabel.setColour(juce::Label::outlineColourId, ana::ui::grey500);
     cursorVerticalReadoutLabel.setBorderSize(juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
+    cursorVerticalReadoutLabel.setTextVerticalOffset(readoutTextVerticalOffset);
     cursorVerticalReadoutLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(cursorVerticalReadoutLabel);
 
     static constexpr std::array<const char*, 7> monitorNames { "ST", "LR", "L", "R", "MS", "M", "S" };
     for (size_t index = 0; index < monitorButtons.size(); ++index)
     {
-        auto button = std::make_unique<AnaScopeButton>(monitorNames[index]);
+        auto button = std::make_unique<ControlButton>(monitorNames[index]);
         button->onClick = [this, index]
         {
             if (auto* parameter = processor.getParameters().getParameter(
-                    AnaAudioProcessor::frequencyChannelModeParameterId))
+                    PluginProcessor::frequencyChannelModeParameterId))
                 parameter->setValueNotifyingHost(parameter->convertTo0to1(static_cast<float>(index)));
         };
         addAndMakeVisible(*button);
@@ -970,12 +1187,12 @@ AnaFrequencyDisplayComponent::AnaFrequencyDisplayComponent(AnaAudioProcessor& pr
     splitButton.setClickingTogglesState(true);
     splitButton.onClick = [this]
     {
-        if (auto* parameter = processor.getParameters().getParameter(AnaAudioProcessor::frequencySplitViewParameterId))
+        if (auto* parameter = processor.getParameters().getParameter(PluginProcessor::frequencySplitViewParameterId))
             parameter->setValueNotifyingHost(splitButton.getToggleState() ? 1.0f : 0.0f);
     };
     addAndMakeVisible(splitButton);
 
-    for (auto* control : std::array<AnaParameterControl*, 4> {
+    for (auto* control : std::array<ParameterControl*, 4> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
     {
         control->setCompact(true);
@@ -995,7 +1212,7 @@ AnaFrequencyDisplayComponent::AnaFrequencyDisplayComponent(AnaAudioProcessor& pr
     startTimerHz(30);
 }
 
-void AnaFrequencyDisplayComponent::paint(juce::Graphics& graphics)
+void SpectrumView::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(juce::Colours::black);
     const auto plotBounds = getPlotBounds();
@@ -1008,49 +1225,49 @@ void AnaFrequencyDisplayComponent::paint(juce::Graphics& graphics)
     {
         const auto* value = processor.getParameters().getRawParameterValue(parameterId);
         return value != nullptr && value->load(std::memory_order_relaxed) >= 0.5f
-            ? ana::freq::FrequencySpectrumProcessor::DisplayType::maximum
-            : ana::freq::FrequencySpectrumProcessor::DisplayType::realtimeAverage;
+            ? ana::freq::SpectrumProcessor::DisplayType::maximum
+            : ana::freq::SpectrumProcessor::DisplayType::realtimeAverage;
     };
 
     const auto* monitorMode = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencyChannelModeParameterId);
+        PluginProcessor::frequencyChannelModeParameterId);
     const auto mode = juce::jlimit(0, 6, monitorMode != nullptr
                                         ? juce::roundToInt(monitorMode->load(std::memory_order_relaxed))
                                         : 0);
-    const auto firstChannel = mode == 0 ? ana::freq::FrequencySpectrumProcessor::Channel::stereo
-                                        : mode == 3 ? ana::freq::FrequencySpectrumProcessor::Channel::right
-                                        : mode == 5 || mode == 4 ? ana::freq::FrequencySpectrumProcessor::Channel::mid
-                                        : mode == 6 ? ana::freq::FrequencySpectrumProcessor::Channel::side
-                                                    : ana::freq::FrequencySpectrumProcessor::Channel::left;
-    const auto secondChannel = mode == 1 ? ana::freq::FrequencySpectrumProcessor::Channel::right
-                                         : mode == 4 ? ana::freq::FrequencySpectrumProcessor::Channel::side
+    const auto firstChannel = mode == 0 ? ana::freq::SpectrumProcessor::Channel::stereo
+                                        : mode == 3 ? ana::freq::SpectrumProcessor::Channel::right
+                                        : mode == 5 || mode == 4 ? ana::freq::SpectrumProcessor::Channel::mid
+                                        : mode == 6 ? ana::freq::SpectrumProcessor::Channel::side
+                                                    : ana::freq::SpectrumProcessor::Channel::left;
+    const auto secondChannel = mode == 1 ? ana::freq::SpectrumProcessor::Channel::right
+                                         : mode == 4 ? ana::freq::SpectrumProcessor::Channel::side
                                                      : firstChannel;
     const auto* split = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencySplitViewParameterId);
+        PluginProcessor::frequencySplitViewParameterId);
     const auto supportsSplitView = mode == 1 || mode == 4;
     const auto useSplitView = supportsSplitView && split != nullptr
         && split->load(std::memory_order_relaxed) >= 0.5f;
     const auto* secondSpectrumEnabled = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencySecondSpectrumParameterId);
+        PluginProcessor::frequencySecondSpectrumParameterId);
     const auto drawSecondSpectrum = useSplitView || secondSpectrumEnabled == nullptr
         || secondSpectrumEnabled->load(std::memory_order_relaxed) >= 0.5f;
-    const auto copySpectra = [&] (const ana::freq::FrequencySpectrumProcessor& spectrum)
+    const auto copySpectra = [&] (const ana::freq::SpectrumProcessor& spectrum)
     {
-        const auto firstType = spectrumType(AnaAudioProcessor::frequencyFirstSpectrumTypeParameterId);
+        const auto firstType = spectrumType(PluginProcessor::frequencyFirstSpectrumTypeParameterId);
         spectrum.copySpectrum(firstChannel, firstType,
                               primarySpectrum, fftSize);
         if (drawSecondSpectrum)
             spectrum.copySpectrum(secondChannel,
-                                  spectrumType(AnaAudioProcessor::frequencySecondSpectrumTypeParameterId),
+                                  spectrumType(PluginProcessor::frequencySecondSpectrumTypeParameterId),
                                   secondarySpectrum, fftSize);
     };
     if (processor.isOfflineMode())
     {
-        if (const auto snapshot = processor.getOfflineScopeSnapshot();
-            snapshot != nullptr && snapshot->frequencySpectrum != nullptr)
+        if (const auto snapshot = processor.getOfflineAnalysisSnapshot();
+            snapshot != nullptr && snapshot->spectrum != nullptr)
         {
             sampleRate = snapshot->frequencySampleRate;
-            copySpectra(*snapshot->frequencySpectrum);
+            copySpectra(*snapshot->spectrum);
         }
     }
     else
@@ -1066,18 +1283,22 @@ void AnaFrequencyDisplayComponent::paint(juce::Graphics& graphics)
         auto lowerBounds = upperBounds.withY(upperBounds.getBottom() + dividerHeight);
         graphics.setColour(ana::ui::accent);
         graphics.fillRect(plotBounds.getX(), upperBounds.getBottom(), plotBounds.getWidth(), dividerHeight);
-        drawSpectrum(graphics, primarySpectrum, fftSize, sampleRate, upperBounds, ana::ui::white);
-        drawSpectrum(graphics, secondarySpectrum, fftSize, sampleRate, lowerBounds, ana::ui::accent);
+        drawSpectrum(graphics, secondarySpectrum, fftSize, sampleRate, lowerBounds,
+                     ana::ui::white, ana::ui::dark);
+        drawSpectrum(graphics, primarySpectrum, fftSize, sampleRate, upperBounds,
+                     ana::ui::white, ana::ui::light);
     }
     else
     {
-        drawSpectrum(graphics, primarySpectrum, fftSize, sampleRate, plotBounds, ana::ui::white);
         if (drawSecondSpectrum)
-            drawSpectrum(graphics, secondarySpectrum, fftSize, sampleRate, plotBounds, ana::ui::accent);
+            drawSpectrum(graphics, secondarySpectrum, fftSize, sampleRate, plotBounds,
+                         ana::ui::white, ana::ui::dark);
+        drawSpectrum(graphics, primarySpectrum, fftSize, sampleRate, plotBounds,
+                     ana::ui::white, ana::ui::light);
     }
 
     const auto* cursorReadout = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencyCursorReadoutParameterId);
+        PluginProcessor::frequencyCursorReadoutParameterId);
     if (cursorInside && (cursorReadout == nullptr || cursorReadout->load(std::memory_order_relaxed) >= 0.5f))
     {
         graphics.setColour(ana::ui::white);
@@ -1086,45 +1307,63 @@ void AnaFrequencyDisplayComponent::paint(juce::Graphics& graphics)
     }
 }
 
-void AnaFrequencyDisplayComponent::resized()
+void SpectrumView::resized()
 {
     const auto plotBounds = getPlotBounds().toNearestInt();
-    const auto readoutWidth = std::min(110, std::max(64, plotBounds.getWidth() / 5));
-    const auto readoutY = plotBounds.getBottom() - ana::ui::gap.pixels() - ana::ui::controlHeight;
+    const auto* zoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::frequencyZoomControlsParameterId);
+    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
+    constexpr int frequencyReadoutWidth = ana::ui::textControlWidth(8);
+    constexpr int levelReadoutWidth = ana::ui::textControlWidth(7);
+    const auto readoutY = plotBounds.getBottom() - ana::ui::controlHeight;
     const auto graphRight = plotBounds.getRight();
     auto topArea = juce::Rectangle<int>(plotBounds.getX(), plotBounds.getY(),
                                         plotBounds.getWidth(), ana::ui::controlHeight);
-    auto topReadouts = topArea.removeFromRight(readoutWidth * 2 + ana::ui::gap.pixels());
+    auto topReadouts = topArea.removeFromRight(levelReadoutWidth * 2 + ana::ui::gap.pixels());
     ana::ui::gap.removeFromRight(topArea);
     ana::ui::FixedGapRow topControls(topArea);
-    cursorReadoutLabel.setBounds(topControls.takeLeft(readoutWidth));
-    cursorNoteReadoutLabel.setBounds(topControls.takeLeft(72));
+    cursorReadoutLabel.setBounds(topControls.takeLeft(frequencyReadoutWidth));
+    cursorNoteReadoutLabel.setBounds(topControls.takeLeft(ana::ui::textControlWidth(4)));
     ana::ui::FixedGapRow monitorControls(topControls.remaining());
-    constexpr int monitorButtonWidth = 44;
     for (auto& button : monitorButtons)
-        button->setBounds(monitorControls.takeLeft(monitorButtonWidth));
-    splitButton.setBounds(monitorControls.takeLeft(58));
+        button->setBounds(monitorControls.takeLeft(button->getPreferredWidth()));
+    splitButtonFits = monitorControls.remaining().getWidth() >= splitButton.getPreferredWidth();
+    splitButton.setBounds(splitButtonFits
+        ? monitorControls.takeLeft(splitButton.getPreferredWidth()) : juce::Rectangle<int>());
     ana::ui::FixedGapRow topReadoutControls(topReadouts);
-    cursorVerticalReadoutLabel.setBounds(topReadoutControls.takeLeft(readoutWidth));
-    rangeHighControl.setBounds(topReadoutControls.takeLeft(readoutWidth));
-    frequencyLowControl.setBounds(plotBounds.getX(), readoutY, readoutWidth, ana::ui::controlHeight);
-    frequencyHighControl.setBounds(graphRight - readoutWidth * 2 - ana::ui::gap.pixels(), readoutY,
-                                   readoutWidth, ana::ui::controlHeight);
-    rangeLowControl.setBounds(graphRight - readoutWidth, readoutY,
-                              readoutWidth, ana::ui::controlHeight);
-    frequencyRangeSlider.setBounds(0, getHeight() - 14, getWidth(), 14);
-    magnitudeRangeSlider.setBounds(getWidth() - 14, 0, 14, getHeight() - 14 - ana::ui::gap.pixels());
+    cursorVerticalReadoutLabel.setBounds(topReadoutControls.takeLeft(levelReadoutWidth));
+    rangeHighControl.setBounds(topReadoutControls.takeLeft(levelReadoutWidth));
+    frequencyLowControl.setBounds(plotBounds.getX(), readoutY, frequencyReadoutWidth, ana::ui::controlHeight);
+    frequencyHighControl.setBounds(graphRight - frequencyReadoutWidth - levelReadoutWidth
+                                       - ana::ui::gap.pixels(), readoutY,
+                                   frequencyReadoutWidth, ana::ui::controlHeight);
+    rangeLowControl.setBounds(graphRight - levelReadoutWidth, readoutY,
+                              levelReadoutWidth, ana::ui::controlHeight);
+    if (showZoom)
+    {
+        frequencyRangeSlider.setBounds(0, getHeight() - bandRangeSliderHeight,
+                                       getWidth(), bandRangeSliderHeight);
+        magnitudeRangeSlider.setBounds(getWidth() - bandZoomSliderWidth, 0,
+                                       bandZoomSliderWidth,
+                                       getHeight() - bandRangeSliderHeight
+                                           - ana::ui::gap.pixels());
+    }
+    else
+    {
+        frequencyRangeSlider.setBounds({});
+        magnitudeRangeSlider.setBounds({});
+    }
     syncRangeSliders();
     refreshMonitorControls();
 }
 
-void AnaFrequencyDisplayComponent::mouseDown(const juce::MouseEvent& event)
+void SpectrumView::mouseDown(const juce::MouseEvent& event)
 {
     if (event.originalComponent == this)
         processor.clearFrequencySpectrum();
 }
 
-void AnaFrequencyDisplayComponent::mouseMove(const juce::MouseEvent& event)
+void SpectrumView::mouseMove(const juce::MouseEvent& event)
 {
     const auto nextCursorInside = getPlotBounds().contains(event.position);
     if (cursorInside == nextCursorInside && cursorPosition == event.position)
@@ -1140,14 +1379,14 @@ void AnaFrequencyDisplayComponent::mouseMove(const juce::MouseEvent& event)
                 return value->load(std::memory_order_relaxed);
             return fallback;
         };
-        const auto lowFrequency = std::max(20.0f, readParameter(AnaAudioProcessor::frequencyLowParameterId, 20.0f));
+        const auto lowFrequency = std::max(20.0f, readParameter(PluginProcessor::frequencyLowParameterId, 20.0f));
         const auto highFrequency = std::max(lowFrequency + 1.0f,
-                                            readParameter(AnaAudioProcessor::frequencyHighParameterId, 20000.0f));
+                                            readParameter(PluginProcessor::frequencyHighParameterId, 20000.0f));
         const auto normalisedX = juce::jlimit(0.0f, 1.0f,
                                               (cursorPosition.x - getPlotBounds().getX())
                                                   / getPlotBounds().getWidth());
         lastCursorFrequency = lowFrequency * std::pow(highFrequency / lowFrequency, normalisedX);
-        cursorReadoutLabel.setText(juce::String(lastCursorFrequency, 1), juce::dontSendNotification);
+        cursorReadoutLabel.setText(formatReadoutFrequency(lastCursorFrequency), juce::dontSendNotification);
         static constexpr std::array<const char*, 12> noteNames {
             "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
         };
@@ -1156,18 +1395,19 @@ void AnaFrequencyDisplayComponent::mouseMove(const juce::MouseEvent& event)
         cursorNoteReadoutLabel.setText(juce::String(noteNames[static_cast<size_t>(noteIndex)])
                                            + juce::String(midiNote / 12 - 1),
                                        juce::dontSendNotification);
-        const auto lowRange = readParameter(AnaAudioProcessor::frequencyRangeLowParameterId, -96.0f);
+        const auto lowRange = readParameter(PluginProcessor::frequencyRangeLowParameterId, -96.0f);
         const auto highRange = std::max(lowRange + 1.0f,
-            readParameter(AnaAudioProcessor::frequencyRangeHighParameterId, 0.0f));
+            readParameter(PluginProcessor::frequencyRangeHighParameterId, 0.0f));
         const auto normalisedY = juce::jlimit(0.0f, 1.0f,
             (cursorPosition.y - getPlotBounds().getY()) / getPlotBounds().getHeight());
-        cursorVerticalReadoutLabel.setText(juce::String(highRange - normalisedY * (highRange - lowRange), 2),
+        cursorVerticalReadoutLabel.setText(formatReadoutLevel(
+                                               highRange - normalisedY * (highRange - lowRange)),
                                            juce::dontSendNotification);
     }
     repaint();
 }
 
-void AnaFrequencyDisplayComponent::mouseExit(const juce::MouseEvent&)
+void SpectrumView::mouseExit(const juce::MouseEvent&)
 {
     if (! cursorInside)
         return;
@@ -1176,21 +1416,29 @@ void AnaFrequencyDisplayComponent::mouseExit(const juce::MouseEvent&)
     repaint();
 }
 
-juce::Rectangle<float> AnaFrequencyDisplayComponent::getPlotBounds() const noexcept
+juce::Rectangle<float> SpectrumView::getPlotBounds() const noexcept
 {
     auto bounds = getLocalBounds().toFloat();
-    bounds.removeFromBottom(static_cast<float>(14 + ana::ui::gap.pixels()));
-    bounds.removeFromRight(static_cast<float>(14 + ana::ui::gap.pixels()));
+    const auto* zoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::frequencyZoomControlsParameterId);
+    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
+    if (showZoom)
+    {
+        bounds.removeFromBottom(static_cast<float>(bandRangeSliderHeight
+                                                    + ana::ui::gap.pixels()));
+        bounds.removeFromRight(static_cast<float>(bandZoomSliderWidth
+                                                   + ana::ui::gap.pixels()));
+    }
     return bounds;
 }
 
-void AnaFrequencyDisplayComponent::timerCallback()
+void SpectrumView::timerCallback()
 {
     syncRangeSliders();
     refreshMonitorControls();
     if (processor.isOfflineMode())
     {
-        if (const auto snapshot = processor.getOfflineScopeSnapshot();
+        if (const auto snapshot = processor.getOfflineAnalysisSnapshot();
             snapshot != nullptr && displayedOfflineRevision != snapshot->revision)
         {
             displayedOfflineRevision = snapshot->revision;
@@ -1207,7 +1455,7 @@ void AnaFrequencyDisplayComponent::timerCallback()
     }
 }
 
-void AnaFrequencyDisplayComponent::refreshMonitorControls()
+void SpectrumView::refreshMonitorControls()
 {
     const auto readValue = [this] (const char* parameterId, const float fallback)
     {
@@ -1215,26 +1463,26 @@ void AnaFrequencyDisplayComponent::refreshMonitorControls()
             return value->load(std::memory_order_relaxed);
         return fallback;
     };
-    const auto showMonitor = readValue(AnaAudioProcessor::frequencyMonitorControlsParameterId, 1.0f) >= 0.5f;
-    const auto showZoom = readValue(AnaAudioProcessor::frequencyZoomControlsParameterId, 1.0f) >= 0.5f;
+    const auto showMonitor = readValue(PluginProcessor::frequencyMonitorControlsParameterId, 1.0f) >= 0.5f;
+    const auto showZoom = readValue(PluginProcessor::frequencyZoomControlsParameterId, 1.0f) >= 0.5f;
     const auto mode = juce::jlimit(0, static_cast<int>(monitorButtons.size()) - 1,
-                                   juce::roundToInt(readValue(AnaAudioProcessor::frequencyChannelModeParameterId, 0.0f)));
+                                   juce::roundToInt(readValue(PluginProcessor::frequencyChannelModeParameterId, 0.0f)));
     const auto splitAvailable = mode == 1 || mode == 4;
     for (size_t index = 0; index < monitorButtons.size(); ++index)
     {
         monitorButtons[index]->setVisible(showMonitor);
         monitorButtons[index]->setToggleState(static_cast<int>(index) == mode, juce::dontSendNotification);
     }
-    splitButton.setVisible(showMonitor);
+    splitButton.setVisible(showMonitor && splitButtonFits);
     splitButton.setEnabled(splitAvailable);
     splitButton.setToggleState(splitAvailable
-                                   && readValue(AnaAudioProcessor::frequencySplitViewParameterId, 0.0f) >= 0.5f,
+                                   && readValue(PluginProcessor::frequencySplitViewParameterId, 0.0f) >= 0.5f,
                                juce::dontSendNotification);
     frequencyRangeSlider.setVisible(showZoom);
     magnitudeRangeSlider.setVisible(showZoom);
 }
 
-void AnaFrequencyDisplayComponent::syncRangeSliders()
+void SpectrumView::syncRangeSliders()
 {
     const auto readParameter = [this] (const char* parameterId, const float fallback)
     {
@@ -1242,17 +1490,17 @@ void AnaFrequencyDisplayComponent::syncRangeSliders()
             return value->load(std::memory_order_relaxed);
         return fallback;
     };
-    const auto lowFrequency = readParameter(AnaAudioProcessor::frequencyLowParameterId, 20.0f);
-    const auto highFrequency = readParameter(AnaAudioProcessor::frequencyHighParameterId, 20000.0f);
-    const auto lowRange = readParameter(AnaAudioProcessor::frequencyRangeLowParameterId, -96.0f);
-    const auto highRange = readParameter(AnaAudioProcessor::frequencyRangeHighParameterId, 0.0f);
+    const auto lowFrequency = readParameter(PluginProcessor::frequencyLowParameterId, 20.0f);
+    const auto highFrequency = readParameter(PluginProcessor::frequencyHighParameterId, 20000.0f);
+    const auto lowRange = readParameter(PluginProcessor::frequencyRangeLowParameterId, -96.0f);
+    const auto highRange = readParameter(PluginProcessor::frequencyRangeHighParameterId, 0.0f);
     const auto* rangesVisible = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencyRangesVisibleParameterId);
+        PluginProcessor::frequencyRangesVisibleParameterId);
     const auto* cursorReadout = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencyCursorReadoutParameterId);
+        PluginProcessor::frequencyCursorReadoutParameterId);
     const auto shouldShowRanges = rangesVisible == nullptr || rangesVisible->load(std::memory_order_relaxed) >= 0.5f;
 
-    for (auto* control : std::array<AnaParameterControl*, 4> {
+    for (auto* control : std::array<ParameterControl*, 4> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
         control->setVisible(shouldShowRanges);
     cursorReadoutLabel.setVisible(cursorReadout == nullptr || cursorReadout->load(std::memory_order_relaxed) >= 0.5f);
@@ -1266,7 +1514,7 @@ void AnaFrequencyDisplayComponent::syncRangeSliders()
                                   (24.0f - std::min(lowRange, highRange)) / 144.0f);
 }
 
-void AnaFrequencyDisplayComponent::updateFrequencyRangeFromSlider()
+void SpectrumView::updateFrequencyRangeFromSlider()
 {
     const auto lowFrequency = normalisedToFrequency(frequencyRangeSlider.getRangeStart());
     const auto highFrequency = normalisedToFrequency(frequencyRangeSlider.getRangeEnd());
@@ -1275,7 +1523,7 @@ void AnaFrequencyDisplayComponent::updateFrequencyRangeFromSlider()
     repaint();
 }
 
-void AnaFrequencyDisplayComponent::updateMagnitudeRangeFromSlider()
+void SpectrumView::updateMagnitudeRangeFromSlider()
 {
     const auto highRange = 24.0f - magnitudeRangeSlider.getRangeStart() * 144.0f;
     const auto lowRange = 24.0f - magnitudeRangeSlider.getRangeEnd() * 144.0f;
@@ -1284,12 +1532,13 @@ void AnaFrequencyDisplayComponent::updateMagnitudeRangeFromSlider()
     repaint();
 }
 
-void AnaFrequencyDisplayComponent::drawSpectrum(juce::Graphics& graphics,
+void SpectrumView::drawSpectrum(juce::Graphics& graphics,
                                                  const std::vector<float>& spectrum,
                                                  const int fftSize,
                                                  const double sampleRate,
                                                  const juce::Rectangle<float> plotBounds,
-                                                 const juce::Colour colour) const
+                                                 const juce::Colour lineColour,
+                                                 const juce::Colour fillColour) const
 {
     if (fftSize <= 0 || spectrum.empty())
         return;
@@ -1300,36 +1549,70 @@ void AnaFrequencyDisplayComponent::drawSpectrum(juce::Graphics& graphics,
             return value->load(std::memory_order_relaxed);
         return fallback;
     };
-    const auto lowFrequency = std::max(20.0f, readParameter(AnaAudioProcessor::frequencyLowParameterId, 20.0f));
+    const auto lowFrequency = std::max(20.0f, readParameter(PluginProcessor::frequencyLowParameterId, 20.0f));
     const auto highFrequency = std::max(lowFrequency + 1.0f,
-                                        readParameter(AnaAudioProcessor::frequencyHighParameterId, 20000.0f));
-    const auto lowRange = readParameter(AnaAudioProcessor::frequencyRangeLowParameterId, -96.0f);
+                                        readParameter(PluginProcessor::frequencyHighParameterId, 20000.0f));
+    const auto lowRange = readParameter(PluginProcessor::frequencyRangeLowParameterId, -96.0f);
     const auto highRange = std::max(lowRange + 1.0f,
-                                    readParameter(AnaAudioProcessor::frequencyRangeHighParameterId, 0.0f));
-    const auto slope = readParameter(AnaAudioProcessor::frequencySlopeParameterId, 0.0f);
+                                    readParameter(PluginProcessor::frequencyRangeHighParameterId, 0.0f));
+    const auto slope = readParameter(PluginProcessor::frequencySlopeParameterId, 0.0f);
     const auto binFrequency = static_cast<float>(sampleRate) / static_cast<float>(fftSize);
     const auto lowLog = std::log(lowFrequency);
     const auto highLog = std::log(highFrequency);
     const auto logSpan = std::max(0.0001f, highLog - lowLog);
 
+    bool hasAudibleData = false;
+    const auto columnCount = std::max(1, static_cast<int>(std::ceil(plotBounds.getWidth())));
+    std::vector<float> columnPowers(static_cast<size_t>(columnCount), 0.0f);
+    std::vector<int> columnCounts(static_cast<size_t>(columnCount), 0);
+    for (size_t bin = 1; bin < spectrum.size(); ++bin)
+    {
+        const auto frequency = static_cast<float>(bin) * binFrequency;
+        if (frequency < lowFrequency || frequency > highFrequency)
+            continue;
+
+        const auto normalisedFrequency = (std::log(frequency) - lowLog) / logSpan;
+        const auto slopedValue = spectrum[bin] + slope * normalisedFrequency;
+        hasAudibleData = hasAudibleData || slopedValue > lowRange + 0.01f;
+        const auto column = juce::jlimit(0, columnCount - 1,
+            static_cast<int>(std::floor(normalisedFrequency * plotBounds.getWidth())));
+        const auto gain = juce::Decibels::decibelsToGain(slopedValue);
+        columnPowers[static_cast<size_t>(column)] += gain * gain;
+        ++columnCounts[static_cast<size_t>(column)];
+    }
+
+    const auto smoothing = readParameter(PluginProcessor::frequencySmoothingParameterId, 30.0f);
+    const auto smoothingRadius = juce::jlimit(0, 48, juce::roundToInt(smoothing * 0.48f));
+    const auto sigma = std::max(0.5f, static_cast<float>(smoothingRadius) * 0.5f);
     juce::Path path;
     juce::Point<float> firstPoint;
     juce::Point<float> lastPoint;
     bool hasPoint = false;
-    auto activeColumn = -1;
-    auto accumulatedPower = 0.0f;
-    auto columnSampleCount = 0;
-    const auto columnCount = std::max(1, static_cast<int>(std::ceil(plotBounds.getWidth())));
-    const auto flushColumn = [&]
+    for (int column = 0; column < columnCount; ++column)
     {
-        if (columnSampleCount == 0)
-            return;
+        auto summedPower = 0.0f;
+        auto summedWeight = 0.0f;
+        const auto firstColumn = std::max(0, column - smoothingRadius);
+        const auto lastColumn = std::min(columnCount - 1, column + smoothingRadius);
+        for (int neighbour = firstColumn; neighbour <= lastColumn; ++neighbour)
+        {
+            const auto count = columnCounts[static_cast<size_t>(neighbour)];
+            if (count == 0)
+                continue;
+
+            const auto distance = static_cast<float>(std::abs(neighbour - column));
+            const auto weight = std::exp(-0.5f * distance * distance / (sigma * sigma));
+            summedPower += columnPowers[static_cast<size_t>(neighbour)] * weight;
+            summedWeight += static_cast<float>(count) * weight;
+        }
+        if (summedWeight <= 0.0f)
+            continue;
 
         const auto averagedDecibels = juce::Decibels::gainToDecibels(
-            std::sqrt(accumulatedPower / static_cast<float>(columnSampleCount)), lowRange);
+            std::sqrt(summedPower / summedWeight), lowRange);
         const auto normalisedLevel = juce::jlimit(0.0f, 1.0f,
             (averagedDecibels - lowRange) / (highRange - lowRange));
-        const auto point = juce::Point<float>(plotBounds.getX() + static_cast<float>(activeColumn) + 0.5f,
+        const auto point = juce::Point<float>(plotBounds.getX() + static_cast<float>(column) + 0.5f,
                                               plotBounds.getBottom() - normalisedLevel * plotBounds.getHeight());
         if (! hasPoint)
         {
@@ -1342,47 +1625,26 @@ void AnaFrequencyDisplayComponent::drawSpectrum(juce::Graphics& graphics,
             path.lineTo(point);
         }
         lastPoint = point;
-        accumulatedPower = 0.0f;
-        columnSampleCount = 0;
-    };
-    for (size_t bin = 1; bin < spectrum.size(); ++bin)
-    {
-        const auto frequency = static_cast<float>(bin) * binFrequency;
-        if (frequency < lowFrequency || frequency > highFrequency)
-            continue;
-
-        const auto normalisedFrequency = (std::log(frequency) - lowLog) / logSpan;
-        const auto slopedValue = spectrum[bin] + slope * normalisedFrequency;
-        const auto column = juce::jlimit(0, columnCount - 1,
-            static_cast<int>(std::floor(normalisedFrequency * plotBounds.getWidth())));
-        if (activeColumn >= 0 && column != activeColumn)
-            flushColumn();
-        activeColumn = column;
-        const auto gain = juce::Decibels::decibelsToGain(slopedValue);
-        accumulatedPower += gain * gain;
-        ++columnSampleCount;
     }
 
-    flushColumn();
-
-    if (! hasPoint)
+    if (! hasPoint || ! hasAudibleData)
         return;
 
     const auto* filled = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencyFilledDisplayParameterId);
+        PluginProcessor::frequencyFilledDisplayParameterId);
     if (filled != nullptr && filled->load(std::memory_order_relaxed) >= 0.5f)
     {
         auto fillPath = path;
         fillPath.lineTo(lastPoint.x, plotBounds.getBottom());
         fillPath.lineTo(firstPoint.x, plotBounds.getBottom());
         fillPath.closeSubPath();
-        graphics.setColour(colour.withAlpha(0.28f));
+        graphics.setColour(fillColour);
         graphics.fillPath(fillPath);
     }
 
-    graphics.setColour(colour);
+    graphics.setColour(lineColour);
     const auto* antiAlias = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::frequencyAntiAliasParameterId);
+        PluginProcessor::frequencyAntiAliasParameterId);
     if (antiAlias == nullptr || antiAlias->load(std::memory_order_relaxed) >= 0.5f)
     {
         graphics.strokePath(path, juce::PathStrokeType(1.0f));
@@ -1398,26 +1660,26 @@ void AnaFrequencyDisplayComponent::drawSpectrum(juce::Graphics& graphics,
     }
 }
 
-float AnaFrequencyDisplayComponent::frequencyToNormalised(const float frequency) noexcept
+float SpectrumView::frequencyToNormalised(const float frequency) noexcept
 {
     return juce::jlimit(0.0f, 1.0f, std::log(std::max(20.0f, frequency) / 20.0f) / std::log(1000.0f));
 }
 
-float AnaFrequencyDisplayComponent::normalisedToFrequency(const float normalised) noexcept
+float SpectrumView::normalisedToFrequency(const float normalised) noexcept
 {
     return 20.0f * std::pow(1000.0f, juce::jlimit(0.0f, 1.0f, normalised));
 }
 
-AnaCorrelationDisplayComponent::AnaCorrelationDisplayComponent(AnaAudioProcessor& processorRef)
+CorrelationView::CorrelationView(PluginProcessor& processorRef)
     : processor(processorRef),
-      frequencyLowControl(processorRef.getParameters(), AnaAudioProcessor::correlationLowParameterId,
-                          "LOW", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      frequencyHighControl(processorRef.getParameters(), AnaAudioProcessor::correlationHighParameterId,
-                           "HIGH", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      rangeLowControl(processorRef.getParameters(), AnaAudioProcessor::correlationRangeLowParameterId,
-                      "LOW", [] (const double value) { return juce::String(value, 2); }),
-      rangeHighControl(processorRef.getParameters(), AnaAudioProcessor::correlationRangeHighParameterId,
-                       "HIGH", [] (const double value) { return juce::String(value, 2); })
+      frequencyLowControl(processorRef.getParameters(), PluginProcessor::correlationLowParameterId,
+                          "LOW", [] (const double value) { return formatReadoutFrequency(value); }),
+      frequencyHighControl(processorRef.getParameters(), PluginProcessor::correlationHighParameterId,
+                           "HIGH", [] (const double value) { return formatReadoutFrequency(value); }),
+      rangeLowControl(processorRef.getParameters(), PluginProcessor::correlationRangeLowParameterId,
+                      "LOW", [] (const double value) { return formatCorrelationCoefficient(value); }),
+      rangeHighControl(processorRef.getParameters(), PluginProcessor::correlationRangeHighParameterId,
+                       "HIGH", [] (const double value) { return formatCorrelationCoefficient(value); })
 {
     for (auto* component : std::array<juce::Component*, 9> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl,
@@ -1426,7 +1688,7 @@ AnaCorrelationDisplayComponent::AnaCorrelationDisplayComponent(AnaAudioProcessor
         addAndMakeVisible(*component);
     addAndMakeVisible(correlationRangeSlider);
 
-    for (auto* control : std::array<AnaParameterControl*, 4> {
+    for (auto* control : std::array<ParameterControl*, 4> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
     {
         control->setCompact(true);
@@ -1439,6 +1701,7 @@ AnaCorrelationDisplayComponent::AnaCorrelationDisplayComponent(AnaAudioProcessor
     cursorReadoutLabel.setColour(juce::Label::backgroundColourId, ana::ui::field);
     cursorReadoutLabel.setColour(juce::Label::outlineColourId, ana::ui::grey500);
     cursorReadoutLabel.setBorderSize(juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
+    cursorReadoutLabel.setTextVerticalOffset(readoutTextVerticalOffset);
     cursorReadoutLabel.setInterceptsMouseClicks(false, false);
 
     cursorVerticalReadoutLabel.setFont(ana::ui::makeFont());
@@ -1448,6 +1711,7 @@ AnaCorrelationDisplayComponent::AnaCorrelationDisplayComponent(AnaAudioProcessor
     cursorVerticalReadoutLabel.setColour(juce::Label::backgroundColourId, ana::ui::field);
     cursorVerticalReadoutLabel.setColour(juce::Label::outlineColourId, ana::ui::grey500);
     cursorVerticalReadoutLabel.setBorderSize(juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
+    cursorVerticalReadoutLabel.setTextVerticalOffset(readoutTextVerticalOffset);
     cursorVerticalReadoutLabel.setInterceptsMouseClicks(false, false);
 
     phaseModeButton.onClick = [this] { setCorrelationMode(0); };
@@ -1465,7 +1729,7 @@ AnaCorrelationDisplayComponent::AnaCorrelationDisplayComponent(AnaAudioProcessor
     startTimerHz(30);
 }
 
-void AnaCorrelationDisplayComponent::paint(juce::Graphics& graphics)
+void CorrelationView::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(juce::Colours::black);
     const auto plotBounds = getPlotBounds();
@@ -1474,31 +1738,31 @@ void AnaCorrelationDisplayComponent::paint(juce::Graphics& graphics)
 
     int fftSize = 0;
     const auto* modeParameter = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::correlationModeParameterId);
+        PluginProcessor::correlationModeParameterId);
     const auto mode = modeParameter != nullptr && modeParameter->load(std::memory_order_relaxed) >= 0.5f
-        ? ana::corr::StereoCorrelationProcessor::Mode::amplitude
-        : ana::corr::StereoCorrelationProcessor::Mode::phase;
+        ? ana::corr::StereoProcessor::Mode::amplitude
+        : ana::corr::StereoProcessor::Mode::phase;
     const auto displayType = [this] (const char* parameterId)
     {
         const auto* value = processor.getParameters().getRawParameterValue(parameterId);
         return value != nullptr && value->load(std::memory_order_relaxed) >= 0.5f
-            ? ana::corr::StereoCorrelationProcessor::DisplayType::maximum
-            : ana::corr::StereoCorrelationProcessor::DisplayType::realtimeAverage;
+            ? ana::corr::StereoProcessor::DisplayType::maximum
+            : ana::corr::StereoProcessor::DisplayType::realtimeAverage;
     };
     const auto* displayedSpectrum = &processor.getCorrelationSpectrum();
     auto sampleRate = displayedSpectrum->getSampleRate();
     if (processor.isOfflineMode())
     {
-        if (const auto snapshot = processor.getOfflineScopeSnapshot();
-            snapshot != nullptr && snapshot->correlationSpectrum != nullptr)
+        if (const auto snapshot = processor.getOfflineAnalysisSnapshot();
+            snapshot != nullptr && snapshot->correlation != nullptr)
         {
-            displayedSpectrum = snapshot->correlationSpectrum.get();
+            displayedSpectrum = snapshot->correlation.get();
             sampleRate = snapshot->correlationSampleRate;
         }
     }
 
     displayedSpectrum->copyCorrelation(
-        mode, displayType(AnaAudioProcessor::correlationFirstSpectrumTypeParameterId),
+        mode, displayType(PluginProcessor::correlationFirstSpectrumTypeParameterId),
         primaryCorrelation, fftSize);
     if (fftSize <= 0 || primaryCorrelation.empty())
         return;
@@ -1509,35 +1773,37 @@ void AnaCorrelationDisplayComponent::paint(juce::Graphics& graphics)
             return value->load(std::memory_order_relaxed);
         return fallback;
     };
-    const auto lowFrequency = std::max(20.0f, readParameter(AnaAudioProcessor::correlationLowParameterId, 20.0f));
+    const auto lowFrequency = std::max(20.0f, readParameter(PluginProcessor::correlationLowParameterId, 20.0f));
     const auto highFrequency = std::max(lowFrequency + 1.0f,
-                                        readParameter(AnaAudioProcessor::correlationHighParameterId, 20000.0f));
-    const auto lowRange = readParameter(AnaAudioProcessor::correlationRangeLowParameterId, -1.0f);
+                                        readParameter(PluginProcessor::correlationHighParameterId, 20000.0f));
+    const auto lowRange = readParameter(PluginProcessor::correlationRangeLowParameterId, -1.0f);
     const auto highRange = std::max(lowRange + 0.01f,
-                                    readParameter(AnaAudioProcessor::correlationRangeHighParameterId, 1.0f));
+                                    readParameter(PluginProcessor::correlationRangeHighParameterId, 1.0f));
     const auto zeroY = plotBounds.getBottom() - juce::jlimit(0.0f, 1.0f,
         (0.0f - lowRange) / (highRange - lowRange)) * plotBounds.getHeight();
     drawCorrelation(graphics, primaryCorrelation, plotBounds, lowFrequency, highFrequency,
-                    lowRange, highRange, sampleRate, fftSize, ana::ui::white);
+                    lowRange, highRange, sampleRate, fftSize,
+                    ana::ui::white, ana::ui::light);
 
     const auto* secondSpectrum = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::correlationSecondSpectrumParameterId);
+        PluginProcessor::correlationSecondSpectrumParameterId);
     if (secondSpectrum != nullptr && secondSpectrum->load(std::memory_order_relaxed) >= 0.5f)
     {
         int secondaryFftSize = 0;
         displayedSpectrum->copyCorrelation(
-            mode, displayType(AnaAudioProcessor::correlationSecondSpectrumTypeParameterId),
+            mode, displayType(PluginProcessor::correlationSecondSpectrumTypeParameterId),
             secondaryCorrelation, secondaryFftSize);
         if (secondaryFftSize == fftSize)
             drawCorrelation(graphics, secondaryCorrelation, plotBounds, lowFrequency, highFrequency,
-                            lowRange, highRange, sampleRate, fftSize, ana::ui::accent);
+                            lowRange, highRange, sampleRate, fftSize,
+                            ana::ui::white, ana::ui::dark);
     }
 
     graphics.setColour(ana::ui::grey500);
     graphics.fillRect(plotBounds.getX(), zeroY, plotBounds.getWidth(), 1.0f);
 
     const auto* cursorReadout = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::correlationCursorReadoutParameterId);
+        PluginProcessor::correlationCursorReadoutParameterId);
     if (cursorInside && (cursorReadout == nullptr || cursorReadout->load(std::memory_order_relaxed) >= 0.5f))
     {
         graphics.setColour(ana::ui::white);
@@ -1546,7 +1812,7 @@ void AnaCorrelationDisplayComponent::paint(juce::Graphics& graphics)
     }
 }
 
-void AnaCorrelationDisplayComponent::drawCorrelation(juce::Graphics& graphics,
+void CorrelationView::drawCorrelation(juce::Graphics& graphics,
                                                       const std::vector<float>& values,
                                                       const juce::Rectangle<float> plotBounds,
                                                       const float lowFrequency,
@@ -1555,7 +1821,8 @@ void AnaCorrelationDisplayComponent::drawCorrelation(juce::Graphics& graphics,
                                                       const float highRange,
                                                       const double sampleRate,
                                                       const int fftSize,
-                                                      const juce::Colour colour)
+                                                      const juce::Colour lineColour,
+                                                      const juce::Colour fillColour)
 {
     if (fftSize <= 0 || values.empty())
         return;
@@ -1579,7 +1846,7 @@ void AnaCorrelationDisplayComponent::drawCorrelation(juce::Graphics& graphics,
     }
 
     const auto* smoothingParameter = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::correlationSmoothingParameterId);
+        PluginProcessor::correlationSmoothingParameterId);
     const auto smoothing = smoothingParameter != nullptr
         ? smoothingParameter->load(std::memory_order_relaxed) : 30.0f;
     const auto smoothingRadius = juce::jlimit(0, 48, juce::roundToInt(smoothing * 0.48f));
@@ -1629,56 +1896,72 @@ void AnaCorrelationDisplayComponent::drawCorrelation(juce::Graphics& graphics,
         return;
 
     const auto* filled = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::correlationFilledDisplayParameterId);
+        PluginProcessor::correlationFilledDisplayParameterId);
     if (filled == nullptr || filled->load(std::memory_order_relaxed) >= 0.5f)
     {
         auto fillPath = path;
         fillPath.lineTo(lastPoint.x, plotBounds.getBottom());
         fillPath.lineTo(firstPoint.x, plotBounds.getBottom());
         fillPath.closeSubPath();
-        graphics.setColour(colour.withAlpha(0.28f));
+        graphics.setColour(fillColour);
         graphics.fillPath(fillPath);
     }
 
-    graphics.setColour(colour);
+    graphics.setColour(lineColour);
     graphics.strokePath(path, juce::PathStrokeType(1.0f));
 }
 
-void AnaCorrelationDisplayComponent::resized()
+void CorrelationView::resized()
 {
     const auto plotBounds = getPlotBounds().toNearestInt();
-    const auto readoutWidth = std::min(110, std::max(64, plotBounds.getWidth() / 5));
+    const auto* zoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::correlationZoomControlsParameterId);
+    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
+    constexpr int frequencyReadoutWidth = ana::ui::textControlWidth(8);
+    constexpr int coefficientReadoutWidth = ana::ui::textControlWidth(5);
     const auto readoutY = plotBounds.getBottom() - ana::ui::controlHeight;
     const auto graphRight = plotBounds.getRight();
     auto topArea = juce::Rectangle<int>(plotBounds.getX(), plotBounds.getY(),
                                         plotBounds.getWidth(), ana::ui::controlHeight);
-    auto topReadouts = topArea.removeFromRight(readoutWidth * 2 + ana::ui::gap.pixels());
+    auto topReadouts = topArea.removeFromRight(coefficientReadoutWidth * 2
+                                              + ana::ui::gap.pixels());
     ana::ui::gap.removeFromRight(topArea);
     ana::ui::FixedGapRow topControls(topArea);
-    cursorReadoutLabel.setBounds(topControls.takeLeft(readoutWidth));
-    phaseModeButton.setBounds(topControls.takeLeft(70));
-    amplitudeModeButton.setBounds(topControls.takeLeft(108));
+    cursorReadoutLabel.setBounds(topControls.takeLeft(frequencyReadoutWidth));
+    phaseModeButton.setBounds(topControls.takeLeft(phaseModeButton.getPreferredWidth()));
+    amplitudeModeButton.setBounds(topControls.takeLeft(amplitudeModeButton.getPreferredWidth()));
     ana::ui::FixedGapRow topReadoutControls(topReadouts);
-    cursorVerticalReadoutLabel.setBounds(topReadoutControls.takeLeft(readoutWidth));
-    rangeHighControl.setBounds(topReadoutControls.takeLeft(readoutWidth));
-    frequencyLowControl.setBounds(plotBounds.getX(), readoutY, readoutWidth, ana::ui::controlHeight);
-    frequencyHighControl.setBounds(graphRight - readoutWidth * 2 - ana::ui::gap.pixels(), readoutY,
-                                   readoutWidth, ana::ui::controlHeight);
-    rangeLowControl.setBounds(graphRight - readoutWidth, readoutY, readoutWidth, ana::ui::controlHeight);
-    frequencyRangeSlider.setBounds(0, getHeight() - bandRangeSliderHeight, getWidth(), bandRangeSliderHeight);
-    correlationRangeSlider.setBounds(getWidth() - bandRangeSliderHeight, 0, bandRangeSliderHeight,
-                                     getHeight() - bandRangeSliderHeight - ana::ui::gap.pixels());
+    cursorVerticalReadoutLabel.setBounds(topReadoutControls.takeLeft(coefficientReadoutWidth));
+    rangeHighControl.setBounds(topReadoutControls.takeLeft(coefficientReadoutWidth));
+    frequencyLowControl.setBounds(plotBounds.getX(), readoutY, frequencyReadoutWidth, ana::ui::controlHeight);
+    frequencyHighControl.setBounds(graphRight - frequencyReadoutWidth - coefficientReadoutWidth
+                                       - ana::ui::gap.pixels(), readoutY,
+                                   frequencyReadoutWidth, ana::ui::controlHeight);
+    rangeLowControl.setBounds(graphRight - coefficientReadoutWidth, readoutY,
+                              coefficientReadoutWidth, ana::ui::controlHeight);
+    if (showZoom)
+    {
+        frequencyRangeSlider.setBounds(0, getHeight() - bandRangeSliderHeight,
+                                       getWidth(), bandRangeSliderHeight);
+        correlationRangeSlider.setBounds(getWidth() - bandRangeSliderHeight, 0, bandRangeSliderHeight,
+                                         getHeight() - bandRangeSliderHeight - ana::ui::gap.pixels());
+    }
+    else
+    {
+        frequencyRangeSlider.setBounds({});
+        correlationRangeSlider.setBounds({});
+    }
     syncRangeSliders();
     refreshControls();
 }
 
-void AnaCorrelationDisplayComponent::mouseDown(const juce::MouseEvent& event)
+void CorrelationView::mouseDown(const juce::MouseEvent& event)
 {
     if (event.originalComponent == this)
         processor.clearCorrelationSpectrum();
 }
 
-void AnaCorrelationDisplayComponent::mouseMove(const juce::MouseEvent& event)
+void CorrelationView::mouseMove(const juce::MouseEvent& event)
 {
     const auto plotBounds = getPlotBounds();
     const auto nextCursorInside = plotBounds.contains(event.position);
@@ -1688,38 +1971,39 @@ void AnaCorrelationDisplayComponent::mouseMove(const juce::MouseEvent& event)
     cursorPosition = event.position;
     if (cursorInside)
     {
-        const auto* low = processor.getParameters().getRawParameterValue(AnaAudioProcessor::correlationLowParameterId);
-        const auto* high = processor.getParameters().getRawParameterValue(AnaAudioProcessor::correlationHighParameterId);
+        const auto* low = processor.getParameters().getRawParameterValue(PluginProcessor::correlationLowParameterId);
+        const auto* high = processor.getParameters().getRawParameterValue(PluginProcessor::correlationHighParameterId);
         const auto lowFrequency = std::max(20.0f, low != nullptr ? low->load(std::memory_order_relaxed) : 20.0f);
         const auto highFrequency = std::max(lowFrequency + 1.0f,
             high != nullptr ? high->load(std::memory_order_relaxed) : 20000.0f);
         const auto normalisedX = juce::jlimit(0.0f, 1.0f,
             (cursorPosition.x - plotBounds.getX()) / plotBounds.getWidth());
         lastCursorFrequency = lowFrequency * std::pow(highFrequency / lowFrequency, normalisedX);
-        cursorReadoutLabel.setText(juce::String(lastCursorFrequency, 1), juce::dontSendNotification);
+        cursorReadoutLabel.setText(formatReadoutFrequency(lastCursorFrequency), juce::dontSendNotification);
         const auto* lowRangeParameter = processor.getParameters().getRawParameterValue(
-            AnaAudioProcessor::correlationRangeLowParameterId);
+            PluginProcessor::correlationRangeLowParameterId);
         const auto* highRangeParameter = processor.getParameters().getRawParameterValue(
-            AnaAudioProcessor::correlationRangeHighParameterId);
+            PluginProcessor::correlationRangeHighParameterId);
         const auto lowRange = lowRangeParameter != nullptr
             ? lowRangeParameter->load(std::memory_order_relaxed) : -1.0f;
         const auto highRange = std::max(lowRange + 0.01f,
             highRangeParameter != nullptr ? highRangeParameter->load(std::memory_order_relaxed) : 1.0f);
         const auto normalisedY = juce::jlimit(0.0f, 1.0f,
             (cursorPosition.y - plotBounds.getY()) / plotBounds.getHeight());
-        cursorVerticalReadoutLabel.setText(juce::String(highRange - normalisedY * (highRange - lowRange), 2),
+        cursorVerticalReadoutLabel.setText(formatCorrelationCoefficient(
+                                               highRange - normalisedY * (highRange - lowRange)),
                                            juce::dontSendNotification);
     }
     repaint();
 }
 
-void AnaCorrelationDisplayComponent::mouseExit(const juce::MouseEvent&)
+void CorrelationView::mouseExit(const juce::MouseEvent&)
 {
     cursorInside = false;
     repaint();
 }
 
-void AnaCorrelationDisplayComponent::timerCallback()
+void CorrelationView::timerCallback()
 {
     syncRangeSliders();
     refreshControls();
@@ -1730,9 +2014,9 @@ void AnaCorrelationDisplayComponent::timerCallback()
             offlineRenderPending = false;
             repaint();
             if (onOfflineUpdateStatus)
-                onOfflineUpdateStatus("UPDATED " + juce::Time::getCurrentTime().formatted("%d.%m.%Y %H:%M:%S"));
+                onOfflineUpdateStatus("UPDATED");
         }
-        if (const auto snapshot = processor.getOfflineScopeSnapshot();
+        if (const auto snapshot = processor.getOfflineAnalysisSnapshot();
             snapshot != nullptr && displayedOfflineRevision != snapshot->revision)
         {
             displayedOfflineRevision = snapshot->revision;
@@ -1749,9 +2033,9 @@ void AnaCorrelationDisplayComponent::timerCallback()
     }
 }
 
-void AnaCorrelationDisplayComponent::setCorrelationMode(const int mode)
+void CorrelationView::setCorrelationMode(const int mode)
 {
-    if (auto* parameter = processor.getParameters().getParameter(AnaAudioProcessor::correlationModeParameterId))
+    if (auto* parameter = processor.getParameters().getParameter(PluginProcessor::correlationModeParameterId))
         parameter->setValueNotifyingHost(parameter->convertTo0to1(static_cast<float>(mode)));
 
     if (! processor.isOfflineMode())
@@ -1759,10 +2043,10 @@ void AnaCorrelationDisplayComponent::setCorrelationMode(const int mode)
 
     offlineRenderPending = true;
     if (onOfflineUpdateStatus)
-        onOfflineUpdateStatus("UPDATING...");
+        onOfflineUpdateStatus("UPDATING 00");
 }
 
-void AnaCorrelationDisplayComponent::syncRangeSliders()
+void CorrelationView::syncRangeSliders()
 {
     const auto read = [this] (const char* id, const float fallback)
     {
@@ -1770,14 +2054,14 @@ void AnaCorrelationDisplayComponent::syncRangeSliders()
             return value->load(std::memory_order_relaxed);
         return fallback;
     };
-    const auto lowFrequency = read(AnaAudioProcessor::correlationLowParameterId, 20.0f);
-    const auto highFrequency = read(AnaAudioProcessor::correlationHighParameterId, 20000.0f);
-    const auto lowRange = read(AnaAudioProcessor::correlationRangeLowParameterId, -1.0f);
-    const auto highRange = read(AnaAudioProcessor::correlationRangeHighParameterId, 1.0f);
-    const auto* ranges = processor.getParameters().getRawParameterValue(AnaAudioProcessor::correlationRangesVisibleParameterId);
-    const auto* cursor = processor.getParameters().getRawParameterValue(AnaAudioProcessor::correlationCursorReadoutParameterId);
+    const auto lowFrequency = read(PluginProcessor::correlationLowParameterId, 20.0f);
+    const auto highFrequency = read(PluginProcessor::correlationHighParameterId, 20000.0f);
+    const auto lowRange = read(PluginProcessor::correlationRangeLowParameterId, -1.0f);
+    const auto highRange = read(PluginProcessor::correlationRangeHighParameterId, 1.0f);
+    const auto* ranges = processor.getParameters().getRawParameterValue(PluginProcessor::correlationRangesVisibleParameterId);
+    const auto* cursor = processor.getParameters().getRawParameterValue(PluginProcessor::correlationCursorReadoutParameterId);
     const auto showRanges = ranges == nullptr || ranges->load(std::memory_order_relaxed) >= 0.5f;
-    for (auto* control : std::array<AnaParameterControl*, 4> {
+    for (auto* control : std::array<ParameterControl*, 4> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
         control->setVisible(showRanges);
     cursorReadoutLabel.setVisible(cursor == nullptr || cursor->load(std::memory_order_relaxed) >= 0.5f);
@@ -1789,11 +2073,11 @@ void AnaCorrelationDisplayComponent::syncRangeSliders()
                                     (1.0f - std::min(lowRange, highRange)) * 0.5f);
 }
 
-void AnaCorrelationDisplayComponent::refreshControls()
+void CorrelationView::refreshControls()
 {
     const auto* zoom = processor.getParameters().getRawParameterValue(
-        AnaAudioProcessor::correlationZoomControlsParameterId);
-    const auto* mode = processor.getParameters().getRawParameterValue(AnaAudioProcessor::correlationModeParameterId);
+        PluginProcessor::correlationZoomControlsParameterId);
+    const auto* mode = processor.getParameters().getRawParameterValue(PluginProcessor::correlationModeParameterId);
     const auto amplitude = mode != nullptr && mode->load(std::memory_order_relaxed) >= 0.5f;
     phaseModeButton.setVisible(true);
     amplitudeModeButton.setVisible(true);
@@ -1804,7 +2088,7 @@ void AnaCorrelationDisplayComponent::refreshControls()
     correlationRangeSlider.setVisible(showZoom);
 }
 
-void AnaCorrelationDisplayComponent::updateFrequencyRangeFromSlider()
+void CorrelationView::updateFrequencyRangeFromSlider()
 {
     frequencyLowControl.getSlider().setValue(normalisedToFrequency(frequencyRangeSlider.getRangeStart()),
                                               juce::sendNotificationSync);
@@ -1812,7 +2096,7 @@ void AnaCorrelationDisplayComponent::updateFrequencyRangeFromSlider()
                                                juce::sendNotificationSync);
 }
 
-void AnaCorrelationDisplayComponent::updateCorrelationRangeFromSlider()
+void CorrelationView::updateCorrelationRangeFromSlider()
 {
     rangeHighControl.getSlider().setValue(1.0f - correlationRangeSlider.getRangeStart() * 2.0f,
                                           juce::sendNotificationSync);
@@ -1820,25 +2104,860 @@ void AnaCorrelationDisplayComponent::updateCorrelationRangeFromSlider()
                                          juce::sendNotificationSync);
 }
 
-juce::Rectangle<float> AnaCorrelationDisplayComponent::getPlotBounds() const noexcept
+juce::Rectangle<float> CorrelationView::getPlotBounds() const noexcept
 {
     auto bounds = getLocalBounds().toFloat();
-    bounds.removeFromBottom(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
-    bounds.removeFromRight(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
+    const auto* zoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::correlationZoomControlsParameterId);
+    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
+    if (showZoom)
+    {
+        bounds.removeFromBottom(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
+        bounds.removeFromRight(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
+    }
     return bounds;
 }
 
-float AnaCorrelationDisplayComponent::frequencyToNormalised(const float frequency) noexcept
+float CorrelationView::frequencyToNormalised(const float frequency) noexcept
 {
     return juce::jlimit(0.0f, 1.0f, std::log(std::max(20.0f, frequency) / 20.0f) / std::log(1000.0f));
 }
 
-float AnaCorrelationDisplayComponent::normalisedToFrequency(const float normalised) noexcept
+float CorrelationView::normalisedToFrequency(const float normalised) noexcept
 {
     return 20.0f * std::pow(1000.0f, juce::jlimit(0.0f, 1.0f, normalised));
 }
 
-AnaMultibandScopeComponent::AnaMultibandScopeComponent(AnaAudioProcessor& processorRef)
+MeterView::MeterView(PluginProcessor& processorRef)
+    : processor(processorRef)
+{
+    partWeights = processor.getLevelPartWeights();
+    peakModeButton.onClick = [this]
+    {
+        showPeakMeter = true;
+        peakModeButton.setToggleState(true, juce::dontSendNotification);
+        rmsModeButton.setToggleState(false, juce::dontSendNotification);
+        repaint();
+    };
+    rmsModeButton.onClick = [this]
+    {
+        showPeakMeter = false;
+        peakModeButton.setToggleState(false, juce::dontSendNotification);
+        rmsModeButton.setToggleState(true, juce::dontSendNotification);
+        repaint();
+    };
+    peakChannelModeButton.onClick = [this]
+    {
+        showMidSideMeters = ! showMidSideMeters;
+        peakChannelModeButton.setToggleState(showMidSideMeters, juce::dontSendNotification);
+        repaint();
+    };
+    historySviewButton.onClick = [this]
+    {
+        historySolo = ! historySolo;
+        historySviewButton.setToggleState(historySolo, juce::dontSendNotification);
+        resized();
+    };
+    historyHorizontalZoom.onRangeChanged = [this] { repaint(); };
+    historyVerticalZoom.onRangeChanged = [this] { repaint(); };
+    peakModeButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(peakModeButton);
+    addAndMakeVisible(rmsModeButton);
+    addAndMakeVisible(peakChannelModeButton);
+    addAndMakeVisible(historySviewButton);
+    addAndMakeVisible(historyHorizontalZoom);
+    addAndMakeVisible(historyVerticalZoom);
+    startTimerHz(30);
+}
+
+void MeterView::paint(juce::Graphics& graphics)
+{
+    graphics.fillAll(juce::Colours::black);
+
+    const auto minimumMeterColumnWidth = std::max(getMeterWidth() + 2, levelMeterReadoutWidth);
+    const auto parts = getPartBounds();
+    const auto visibleParts = getVisibleParts();
+    auto peakRmsBounds = parts[0];
+    auto lufsBounds = parts[1];
+    const auto historyBounds = (historySolo && visibleParts[2]
+        ? getLocalBounds() : parts[2]).toFloat();
+    const auto scaleSideWidth = levelScaleLabelWidth + ana::ui::gap.pixels();
+    const auto peakScalesVisible = peakRmsBounds.getWidth()
+        >= minimumMeterColumnWidth * 2 + ana::ui::gap.pixels() + scaleSideWidth * 2;
+    auto peakMeterHorizontalBounds = peakRmsBounds;
+    if (peakScalesVisible)
+        peakMeterHorizontalBounds.reduce(scaleSideWidth, 0);
+    const auto peakMeterWidth = std::max(1,
+        (peakMeterHorizontalBounds.getWidth() - ana::ui::gap.pixels()) / 2);
+    const auto lufsScalesVisible = lufsBounds.getWidth()
+        >= minimumMeterColumnWidth * 3 + ana::ui::gap.pixels() * 2 + scaleSideWidth * 2;
+    auto lufsMeterHorizontalBounds = lufsBounds;
+    if (lufsScalesVisible)
+        lufsMeterHorizontalBounds.reduce(scaleSideWidth, 0);
+    const auto lufsMeterWidth = std::max(1,
+        (lufsMeterHorizontalBounds.getWidth() - ana::ui::gap.pixels() * 2) / 3);
+    const auto peakChannelOffset = showMidSideMeters ? size_t { 2 } : size_t { 0 };
+
+    const auto displayFont = ana::ui::makeFont();
+    const auto readLevelScale = [this] (const char* parameterId, const float fallback)
+    {
+        if (const auto* value = processor.getParameters().getRawParameterValue(parameterId))
+            return value->load(std::memory_order_relaxed);
+        return fallback;
+    };
+    const auto peakLow = readLevelScale(PluginProcessor::levelPeakLowParameterId, -60.0f);
+    const auto peakHigh = std::max(peakLow + 0.1f,
+                                   readLevelScale(PluginProcessor::levelPeakHighParameterId, 0.0f));
+    const auto lufsLow = readLevelScale(PluginProcessor::levelLufsLowParameterId, -60.0f);
+    const auto lufsHigh = std::max(lufsLow + 0.1f,
+                                   readLevelScale(PluginProcessor::levelLufsHighParameterId, 0.0f));
+    const auto normalise = [] (const float value, const float low, const float high)
+    {
+        return juce::jlimit(0.0f, 1.0f, (value - low) / (high - low));
+    };
+    const auto drawScale = [&] (const juce::Rectangle<float> bounds, const float low, const float high,
+                                const bool drawLeftLabels, const bool drawRightLabels,
+                                const bool lufsScale)
+    {
+        graphics.setFont(displayFont);
+        const auto span = high - low;
+        const auto minorStep = span <= 12.0f ? 1 : span <= 24.0f ? 2 : span <= 48.0f ? 5 : 10;
+        const auto minimumLabelSpacing = static_cast<float>(ana::ui::baseFontSize
+            + ana::ui::gap.pixels() / 2);
+        const auto maximumLabelIntervals = std::max(2, 1 + static_cast<int>(std::floor(
+            bounds.getHeight() / std::max(1.0f, minimumLabelSpacing))));
+        const auto requiredMajorStep = span / static_cast<float>(maximumLabelIntervals);
+        const auto chooseMajorMultiplier = [] (const float minimumMultiplier)
+        {
+            for (const auto candidate : std::array<int, 8> { 1, 2, 3, 5, 10, 20, 50, 100 })
+                if (static_cast<float>(candidate) >= minimumMultiplier)
+                    return candidate;
+            return 100;
+        };
+        const auto majorStep = minorStep * chooseMajorMultiplier(
+            requiredMajorStep / static_cast<float>(minorStep));
+        const auto highestTick = static_cast<int>(std::floor(high / static_cast<float>(minorStep))) * minorStep;
+        const auto lowestTick = static_cast<int>(std::ceil(low / static_cast<float>(minorStep))) * minorStep;
+        for (auto tick = highestTick; tick >= lowestTick; tick -= minorStep)
+        {
+            const auto value = static_cast<float>(tick);
+            const auto y = bounds.getBottom() - normalise(value, low, high) * bounds.getHeight();
+            const auto isMajorTick = tick % majorStep == 0;
+            if (! isMajorTick)
+                continue;
+            const auto lineY = juce::roundToInt(y);
+            graphics.setColour(ana::ui::dark);
+            graphics.fillRect(juce::roundToInt(bounds.getX()), lineY,
+                              juce::roundToInt(bounds.getWidth()), 1);
+
+            const auto labelY = lineY - ana::ui::controlHeight / 2;
+            const auto label = lufsScale && tick <= -120 ? juce::String("-inf")
+                                                          : formatLevelScaleTick(tick);
+            if (drawLeftLabels)
+                graphics.drawText(label,
+                                  juce::roundToInt(bounds.getX()) - ana::ui::gap.pixels() - levelScaleLabelWidth,
+                                  labelY, levelScaleLabelWidth, ana::ui::controlHeight,
+                                  juce::Justification::centredRight, true);
+            if (drawRightLabels)
+                graphics.drawText(label,
+                                  juce::roundToInt(bounds.getRight()) + ana::ui::gap.pixels(),
+                                  labelY, levelScaleLabelWidth, ana::ui::controlHeight,
+                                  juce::Justification::centredLeft, true);
+        }
+    };
+    const auto drawPeakRmsMeter = [&] (juce::Rectangle<int> bounds, const size_t channel,
+                                       const bool drawLeftScale, const bool drawRightScale)
+    {
+        const auto showReadout = bounds.getHeight() >= ana::ui::controlHeight * 4;
+        auto readoutBounds = bounds.removeFromBottom(ana::ui::controlHeight);
+        ana::ui::gap.removeFromBottom(bounds);
+        const auto barFrame = bounds;
+        auto bar = barFrame.toFloat().reduced(1.0f, 0.0f);
+        if (bar.isEmpty())
+            return;
+        graphics.setColour(ana::ui::black);
+        graphics.fillRect(bar);
+        const auto meterValue = showPeakMeter
+            ? peakValues[channel] : rmsValues[channel];
+        const auto meterTop = bar.getBottom()
+            - normalise(meterValue, peakLow, peakHigh) * bar.getHeight();
+        graphics.setColour(ana::ui::light);
+        graphics.fillRect(bar.getX(), meterTop, bar.getWidth(), bar.getBottom() - meterTop);
+        graphics.setColour(ana::ui::accent);
+        graphics.fillRect(bar.getX(), meterTop, bar.getWidth(), 1.0f);
+        if (showPeakMeter)
+        {
+            const auto holdY = bar.getBottom()
+                - normalise(peakHoldValues[channel], peakLow, peakHigh) * bar.getHeight();
+            graphics.setColour(ana::ui::red);
+            graphics.fillRect(bar.getX(), holdY - 0.5f, bar.getWidth(), 2.0f);
+        }
+        drawScale(bar, peakLow, peakHigh, drawLeftScale, drawRightScale, false);
+        graphics.setColour(ana::ui::grey500);
+        graphics.drawRect(barFrame, 1);
+        if (showReadout)
+        {
+            graphics.setColour(ana::ui::grey500);
+            graphics.drawRect(readoutBounds, 1.0f);
+            graphics.setFont(displayFont);
+            graphics.setColour(ana::ui::white);
+            graphics.drawText(meterValue <= -119.95f ? juce::String("-inf")
+                                                     : formatReadoutLevel(meterValue), readoutTextBounds(readoutBounds),
+                              juce::Justification::centred, true);
+        }
+    };
+    const auto drawLufsMeter = [&] (juce::Rectangle<int> bounds, const juce::String& title,
+                                    const float value, const float maximum, const bool drawLeftScale,
+                                    const bool drawRightScale)
+    {
+        auto titleBounds = bounds.removeFromTop(ana::ui::controlHeight);
+        graphics.setFont(displayFont);
+        graphics.setColour(ana::ui::grey500);
+        graphics.drawRect(titleBounds, 1);
+        graphics.setColour(ana::ui::white);
+        graphics.drawText(title, titleBounds, juce::Justification::centred, true);
+        ana::ui::gap.removeFromTop(bounds);
+        auto maximumBounds = bounds.removeFromTop(ana::ui::controlHeight);
+        graphics.setColour(ana::ui::grey500);
+        graphics.drawRect(maximumBounds, 1.0f);
+        graphics.setColour(ana::ui::white);
+        graphics.drawText(maximum <= -119.95f ? juce::String("-inf") : formatLufsReadout(maximum),
+                          readoutTextBounds(maximumBounds), juce::Justification::centred, true);
+        ana::ui::gap.removeFromTop(bounds);
+        const auto showReadout = bounds.getHeight() >= ana::ui::controlHeight * 4;
+        auto readoutBounds = bounds.removeFromBottom(ana::ui::controlHeight);
+        ana::ui::gap.removeFromBottom(bounds);
+        const auto barFrame = bounds;
+        auto bar = barFrame.toFloat().reduced(1.0f, 0.0f);
+        if (bar.isEmpty())
+            return;
+        graphics.setColour(ana::ui::black);
+        graphics.fillRect(bar);
+        const auto fillRange = [&] (const float low, const float high, const juce::Colour colour)
+        {
+            const auto fillLow = juce::jlimit(low, high, value);
+            if (fillLow <= low)
+                return;
+            const auto top = bar.getBottom()
+                - normalise(fillLow, lufsLow, lufsHigh) * bar.getHeight();
+            const auto bottom = bar.getBottom()
+                - normalise(low, lufsLow, lufsHigh) * bar.getHeight();
+            graphics.setColour(colour);
+            graphics.fillRect(bar.getX(), top, bar.getWidth(), bottom - top);
+        };
+        fillRange(-60.0f, -23.0f, ana::ui::green);
+        fillRange(-23.0f, -14.0f, ana::ui::peach);
+        fillRange(-14.0f, 0.0f, ana::ui::red);
+        const auto markerY = bar.getBottom()
+            - normalise(value, lufsLow, lufsHigh) * bar.getHeight();
+        graphics.setColour(ana::ui::white);
+        graphics.fillRect(bar.getX(), markerY, bar.getWidth(), 1.0f);
+        drawScale(bar, lufsLow, lufsHigh, drawLeftScale, drawRightScale, true);
+        graphics.setColour(ana::ui::grey500);
+        graphics.drawRect(barFrame, 1);
+        if (showReadout)
+        {
+            graphics.setColour(ana::ui::grey500);
+            graphics.drawRect(readoutBounds, 1.0f);
+            graphics.setFont(displayFont);
+            graphics.setColour(ana::ui::white);
+            graphics.drawText(value <= -119.95f ? juce::String("-inf")
+                                                : formatLufsReadout(value), readoutTextBounds(readoutBounds),
+                              juce::Justification::centred, true);
+        }
+    };
+
+    if (! historySolo)
+    {
+        if (visibleParts[0])
+        {
+        peakRmsBounds.removeFromTop(ana::ui::controlHeight);
+        ana::ui::gap.removeFromTop(peakRmsBounds);
+        const auto peakGroupWidth = peakMeterHorizontalBounds.getWidth();
+        auto peakLabelBounds = peakRmsBounds.removeFromTop(ana::ui::controlHeight);
+        peakLabelBounds.setX(peakMeterHorizontalBounds.getX());
+        peakLabelBounds.setWidth(peakGroupWidth);
+        ana::ui::FixedGapRow peakLabelRow(peakLabelBounds);
+        const std::array<juce::String, 2> peakLabels = showMidSideMeters
+            ? std::array<juce::String, 2> { "M", "S" }
+            : std::array<juce::String, 2> { "L", "R" };
+        for (const auto& label : peakLabels)
+        {
+            auto labelBounds = peakLabelRow.takeLeft(peakMeterWidth);
+            graphics.setColour(ana::ui::grey500);
+            graphics.drawRect(labelBounds, 1.0f);
+            graphics.setFont(displayFont);
+            graphics.setColour(ana::ui::white);
+            graphics.drawText(label, labelBounds, juce::Justification::centred, true);
+        }
+        ana::ui::gap.removeFromTop(peakRmsBounds);
+        auto peakMaximumBounds = peakRmsBounds.removeFromTop(ana::ui::controlHeight);
+        peakMaximumBounds.setX(peakMeterHorizontalBounds.getX());
+        peakMaximumBounds.setWidth(peakGroupWidth);
+        ana::ui::FixedGapRow peakMaximumRow(peakMaximumBounds);
+        for (size_t channel = 0; channel < 2; ++channel)
+        {
+            const auto maximumBounds = peakMaximumRow.takeLeft(peakMeterWidth);
+            const auto valueIndex = peakChannelOffset + channel;
+            const auto maximum = showPeakMeter ? peakMaximumValues[valueIndex] : rmsMaximumValues[valueIndex];
+            graphics.setColour(ana::ui::grey500);
+            graphics.drawRect(maximumBounds, 1.0f);
+            graphics.setColour(ana::ui::white);
+            graphics.drawText(maximum <= -119.95f ? juce::String("-inf") : formatReadoutLevel(maximum),
+                              readoutTextBounds(maximumBounds), juce::Justification::centred, true);
+        }
+        ana::ui::gap.removeFromTop(peakRmsBounds);
+        peakRmsBounds.setX(peakMeterHorizontalBounds.getX());
+        peakRmsBounds.setWidth(peakGroupWidth);
+        ana::ui::FixedGapRow peakRow(peakRmsBounds);
+        drawPeakRmsMeter(peakRow.takeLeft(peakMeterWidth), peakChannelOffset, peakScalesVisible, false);
+        drawPeakRmsMeter(peakRow.takeLeft(peakMeterWidth), peakChannelOffset + 1, false, peakScalesVisible);
+        }
+
+        if (visibleParts[1])
+        {
+        const auto lufsGroupWidth = lufsMeterHorizontalBounds.getWidth();
+        auto loudnessHeader = lufsMeterHorizontalBounds.removeFromTop(ana::ui::controlHeight);
+        graphics.setColour(ana::ui::grey500);
+        graphics.drawRect(loudnessHeader, 1.0f);
+        graphics.setFont(displayFont);
+        graphics.setColour(ana::ui::white);
+        graphics.drawText("LOUDNESS", loudnessHeader, juce::Justification::centred, true);
+        lufsBounds.removeFromTop(ana::ui::controlHeight);
+        ana::ui::gap.removeFromTop(lufsBounds);
+        lufsBounds.setX(lufsMeterHorizontalBounds.getX());
+        lufsBounds.setWidth(lufsGroupWidth);
+        ana::ui::FixedGapRow lufsRow(lufsBounds);
+        drawLufsMeter(lufsRow.takeLeft(lufsMeterWidth), "M", momentaryLufs, momentaryMaximumLufs,
+                      lufsScalesVisible, false);
+        drawLufsMeter(lufsRow.takeLeft(lufsMeterWidth), "S", shortTermLufs, shortTermMaximumLufs, false, false);
+        drawLufsMeter(lufsRow.takeLeft(lufsMeterWidth), "I", integratedLufs, integratedMaximumLufs,
+                      false, lufsScalesVisible);
+        }
+
+        auto previousVisible = -1;
+        for (size_t index = 0; index < visibleParts.size(); ++index)
+        {
+            if (! visibleParts[index])
+                continue;
+            if (previousVisible < 0)
+            {
+                previousVisible = static_cast<int>(index);
+                continue;
+            }
+            const auto x = static_cast<float>(
+                (parts[static_cast<size_t>(previousVisible)].getRight()
+                 + parts[index].getX()) / 2);
+            const auto activeSeparator = hoveredPartSeparator == previousVisible
+                || draggedPartSeparator == previousVisible;
+            graphics.setColour(activeSeparator ? ana::ui::white : ana::ui::grey500);
+            graphics.fillRect(x, 0.0f, 1.0f, static_cast<float>(getHeight()));
+            previousVisible = static_cast<int>(index);
+        }
+    }
+
+    if (historyBounds.isEmpty())
+        return;
+
+    const auto* historyZoomParameter = processor.getParameters().getRawParameterValue(
+        PluginProcessor::levelHistoryZoomParameterId);
+    const auto historyZoomVisible = historyZoomParameter == nullptr
+        || historyZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto historyLayout = makeLevelHistoryLayout(historyBounds.toNearestInt(),
+                                                       historyZoomVisible);
+    graphics.setFont(displayFont);
+    graphics.setColour(ana::ui::grey500);
+    graphics.drawRect(historyLayout.header, 1.0f);
+    graphics.setColour(ana::ui::white);
+    graphics.drawText("HISTORY", historyLayout.header,
+                      juce::Justification::centred, true);
+    const auto drawHistoryMetrics = [&]
+    {
+        const auto drawMetric = [&] (const juce::String& label, const juce::String& readout,
+                                     const juce::Rectangle<int> labelBounds,
+                                     const juce::Rectangle<int> readoutBounds)
+        {
+            graphics.setColour(ana::ui::grey500);
+            graphics.drawRect(labelBounds, 1.0f);
+            graphics.drawRect(readoutBounds, 1.0f);
+            graphics.setColour(ana::ui::white);
+            graphics.drawText(label, labelBounds, juce::Justification::centred, true);
+            graphics.drawText(readout, readoutTextBounds(readoutBounds),
+                              juce::Justification::centred, true);
+        };
+        ana::ui::FixedGapRow metricLabels(historyLayout.metricLabelRow);
+        ana::ui::FixedGapRow metricReadouts(historyLayout.metricReadoutRow);
+        const auto truePeak = std::max(peakMaximumValues[0], peakMaximumValues[1]);
+        drawMetric("TP", truePeak <= -119.95f ? juce::String("-inf") : formatReadoutLevel(truePeak),
+                   metricLabels.takeLeft(historyMetricReadoutWidth),
+                   metricReadouts.takeLeft(historyMetricReadoutWidth));
+        drawMetric("LRA", formatReadoutLevel(loudnessRange),
+                   metricLabels.takeLeft(historyMetricReadoutWidth),
+                   metricReadouts.takeLeft(historyMetricReadoutWidth));
+    };
+
+    const auto historyEnabled = [this] (const char* parameterId)
+    {
+        const auto* value = processor.getParameters().getRawParameterValue(parameterId);
+        return value == nullptr || value->load(std::memory_order_relaxed) >= 0.5f;
+    };
+    const std::array<bool, 3> visibleHistorySeries {
+        historyEnabled(PluginProcessor::levelHistoryMomentaryParameterId),
+        historyEnabled(PluginProcessor::levelHistoryShortTermParameterId),
+        historyEnabled(PluginProcessor::levelHistoryIntegratedParameterId)
+    };
+    const auto historySize = loudnessHistories[0].size();
+    const auto plotBounds = historyLayout.plot.toFloat();
+    if (historySize < 2 || plotBounds.isEmpty())
+    {
+        drawHistoryMetrics();
+        return;
+    }
+
+    const auto visibleStart = juce::jlimit(0.0f, 0.999f, historyHorizontalZoom.getRangeStart());
+    const auto visibleEnd = juce::jlimit(visibleStart + 0.001f, 1.0f,
+                                         historyHorizontalZoom.getRangeEnd());
+    const auto firstPosition = visibleStart * static_cast<float>(historySize - 1);
+    const auto lastPosition = visibleEnd * static_cast<float>(historySize - 1);
+    const auto visibleLength = std::max(0.001f, lastPosition - firstPosition);
+    const auto visibleHigh = juce::jmap(historyVerticalZoom.getRangeStart(), lufsHigh, lufsLow);
+    const auto visibleLow = juce::jmap(historyVerticalZoom.getRangeEnd(), lufsHigh, lufsLow);
+    const auto historyPoint = [&] (const float position, const float value)
+    {
+        return juce::Point<float> {
+            plotBounds.getX() + (position - firstPosition) / visibleLength * plotBounds.getWidth(),
+            plotBounds.getBottom() - normalise(value, visibleLow, visibleHigh) * plotBounds.getHeight()
+        };
+    };
+    const auto drawHistorySeries = [&] (const size_t series, const juce::Colour colour,
+                                        const bool fill)
+    {
+        const auto& history = loudnessHistories[series];
+        if (! visibleHistorySeries[series] || history.size() != historySize)
+            return;
+        const auto valueAt = [&] (const float position)
+        {
+            const auto first = std::min(history.size() - 1,
+                static_cast<size_t>(std::floor(position)));
+            const auto second = std::min(history.size() - 1, first + 1);
+            return juce::jmap(position - static_cast<float>(first), history[first], history[second]);
+        };
+        juce::Path path;
+        path.startNewSubPath(historyPoint(firstPosition, valueAt(firstPosition)));
+        const auto firstIndex = static_cast<size_t>(std::ceil(firstPosition));
+        const auto lastIndex = static_cast<size_t>(std::floor(lastPosition));
+        for (auto index = firstIndex; index <= lastIndex && index < history.size(); ++index)
+            if (static_cast<float>(index) > firstPosition && static_cast<float>(index) < lastPosition)
+                path.lineTo(historyPoint(static_cast<float>(index), history[index]));
+        path.lineTo(historyPoint(lastPosition, valueAt(lastPosition)));
+        if (fill)
+        {
+            auto fillPath = path;
+            fillPath.lineTo(plotBounds.getRight(), plotBounds.getBottom());
+            fillPath.lineTo(plotBounds.getX(), plotBounds.getBottom());
+            fillPath.closeSubPath();
+            graphics.setColour(ana::ui::dark);
+            graphics.fillPath(fillPath);
+        }
+        graphics.setColour(colour);
+        graphics.strokePath(path, juce::PathStrokeType(1.0f));
+    };
+    drawHistorySeries(ana::lvls::MeterProcessor::integratedHistory, ana::ui::white, true);
+    drawHistorySeries(ana::lvls::MeterProcessor::shortTermHistory, ana::ui::peach, false);
+    drawHistorySeries(ana::lvls::MeterProcessor::momentaryHistory, ana::ui::red, false);
+    drawHistoryMetrics();
+
+}
+
+void MeterView::resized()
+{
+    const auto visibleParts = getVisibleParts();
+    if (! visibleParts[2])
+    {
+        historySolo = false;
+        historySviewButton.setToggleState(false, juce::dontSendNotification);
+    }
+    layoutPeakModeButtons();
+    const auto historyBounds = historySolo ? getLocalBounds() : getPartBounds()[2];
+    const auto* historyZoomParameter = processor.getParameters().getRawParameterValue(
+        PluginProcessor::levelHistoryZoomParameterId);
+    const auto historyZoomVisible = historyZoomParameter == nullptr
+        || historyZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto historyLayout = makeLevelHistoryLayout(historyBounds, historyZoomVisible);
+    historySviewButton.setVisible(visibleParts[2]);
+    historyHorizontalZoom.setVisible(visibleParts[2] && historyZoomVisible);
+    historyVerticalZoom.setVisible(visibleParts[2] && historyZoomVisible);
+    historySviewButton.setBounds(historyLayout.sviewButton);
+    historyHorizontalZoom.setBounds(historyLayout.horizontalZoom);
+    historyVerticalZoom.setBounds(historyLayout.verticalZoom);
+    repaint();
+}
+
+void MeterView::centerParts()
+{
+    partWeights.fill(1.0f);
+    processor.setLevelPartWeights(partWeights);
+    draggedPartSeparator = -1;
+    resized();
+}
+
+void MeterView::layoutPeakModeButtons()
+{
+    const auto showPeakControls = ! historySolo && getVisibleParts()[0];
+    peakModeButton.setVisible(showPeakControls);
+    rmsModeButton.setVisible(showPeakControls);
+    peakChannelModeButton.setVisible(showPeakControls);
+    if (! showPeakControls)
+        return;
+
+    const auto partBounds = getPartBounds()[0];
+    const auto minimumMeterColumnWidth = std::max(getMeterWidth() + 2, levelMeterReadoutWidth);
+    const auto scaleSideWidth = levelScaleLabelWidth + ana::ui::gap.pixels();
+    const auto scalesVisible = partBounds.getWidth()
+        >= minimumMeterColumnWidth * 2 + ana::ui::gap.pixels() + scaleSideWidth * 2;
+    auto headerBounds = partBounds;
+    if (scalesVisible)
+        headerBounds.reduce(scaleSideWidth, 0);
+    headerBounds = headerBounds.removeFromTop(ana::ui::controlHeight);
+    const auto availableButtonWidth = std::max(0,
+        headerBounds.getWidth() - ana::ui::gap.pixels() * 2);
+    const auto preferredWidth = peakModeButton.getPreferredWidth()
+        + rmsModeButton.getPreferredWidth() + peakChannelModeButton.getPreferredWidth();
+    const auto extraPerButton = std::max(0, availableButtonWidth - preferredWidth) / 3;
+    ana::ui::FixedGapRow buttonRow(headerBounds);
+    peakModeButton.setBounds(buttonRow.takeLeft(
+        peakModeButton.getPreferredWidth() + extraPerButton));
+    rmsModeButton.setBounds(buttonRow.takeLeft(
+        rmsModeButton.getPreferredWidth() + extraPerButton));
+    peakChannelModeButton.setBounds(buttonRow.remaining());
+}
+
+int MeterView::getMeterWidth() const noexcept
+{
+    const auto* parameter = processor.getParameters().getRawParameterValue(
+        PluginProcessor::levelMeterWidthParameterId);
+    return juce::jlimit(106, 180, juce::roundToInt(
+        parameter != nullptr ? parameter->load(std::memory_order_relaxed) : 106.0f));
+}
+
+std::array<bool, 3> MeterView::getVisibleParts() const noexcept
+{
+    const auto enabled = [this] (const char* parameterId)
+    {
+        const auto* value = processor.getParameters().getRawParameterValue(parameterId);
+        return value == nullptr || value->load(std::memory_order_relaxed) >= 0.5f;
+    };
+    return {
+        enabled(PluginProcessor::levelPeakVisibleParameterId),
+        enabled(PluginProcessor::levelLoudnessVisibleParameterId),
+        enabled(PluginProcessor::levelHistoryVisibleParameterId)
+    };
+}
+
+std::array<int, 3> MeterView::getMinimumPartWidths() const noexcept
+{
+    const auto meterColumnWidth = std::max(getMeterWidth() + 2, levelMeterReadoutWidth);
+    return {
+        meterColumnWidth * 2 + ana::ui::gap.pixels(),
+        meterColumnWidth * 3 + ana::ui::gap.pixels() * 2,
+        historyMinimumWidth
+    };
+}
+
+std::array<juce::Rectangle<int>, 3> MeterView::getPartBounds() const noexcept
+{
+    std::array<juce::Rectangle<int>, 3> bounds;
+    const auto visible = getVisibleParts();
+    const auto visibleCount = static_cast<int>(std::count(visible.begin(), visible.end(), true));
+    if (visibleCount == 0)
+        return bounds;
+
+    auto remaining = getLocalBounds();
+    const auto usableWidth = std::max(0, remaining.getWidth()
+        - ana::ui::gap.pixels() * (visibleCount - 1));
+    const auto minimumWidths = getMinimumPartWidths();
+    auto minimumTotal = 0;
+    auto totalWeight = 0.0f;
+    for (size_t index = 0; index < visible.size(); ++index)
+        if (visible[index])
+        {
+            minimumTotal += minimumWidths[index];
+            totalWeight += partWeights[index];
+        }
+    std::array<int, 3> widths {};
+
+    if (usableWidth < minimumTotal)
+    {
+        const auto scale = minimumTotal > 0
+            ? static_cast<float>(usableWidth) / static_cast<float>(minimumTotal) : 0.0f;
+        auto assignedWidth = 0;
+        auto lastVisible = size_t { 0 };
+        for (size_t index = 0; index < visible.size(); ++index)
+            if (visible[index])
+                lastVisible = index;
+        for (size_t index = 0; index < visible.size(); ++index)
+            if (visible[index])
+            {
+                widths[index] = index == lastVisible
+                    ? std::max(0, usableWidth - assignedWidth)
+                    : juce::roundToInt(static_cast<float>(minimumWidths[index]) * scale);
+                assignedWidth += widths[index];
+            }
+    }
+    else
+    {
+        std::array<bool, 3> fixed {};
+        auto remainingWidth = usableWidth;
+        auto remainingWeight = std::max(0.001f, totalWeight);
+
+        for (size_t pass = 0; pass < widths.size(); ++pass)
+        {
+            auto fixedOne = false;
+            for (size_t index = 0; index < widths.size(); ++index)
+            {
+                if (! visible[index] || fixed[index])
+                    continue;
+
+                const auto weightedWidth = static_cast<float>(remainingWidth)
+                    * partWeights[index] / remainingWeight;
+                if (weightedWidth >= static_cast<float>(minimumWidths[index]))
+                    continue;
+
+                widths[index] = minimumWidths[index];
+                remainingWidth -= widths[index];
+                remainingWeight -= partWeights[index];
+                fixed[index] = true;
+                fixedOne = true;
+            }
+
+            if (! fixedOne)
+                break;
+        }
+
+        auto lastFlexible = widths.size();
+        for (size_t index = 0; index < widths.size(); ++index)
+            if (visible[index] && ! fixed[index])
+                lastFlexible = index;
+
+        for (size_t index = 0; index < widths.size(); ++index)
+        {
+            if (! visible[index] || fixed[index])
+                continue;
+
+            if (index == lastFlexible)
+                widths[index] = remainingWidth;
+            else
+            {
+                widths[index] = juce::roundToInt(static_cast<float>(remainingWidth)
+                    * partWeights[index] / remainingWeight);
+                remainingWidth -= widths[index];
+                remainingWeight -= partWeights[index];
+            }
+        }
+    }
+
+    auto placed = 0;
+    for (size_t index = 0; index < bounds.size(); ++index)
+    {
+        if (! visible[index])
+            continue;
+        bounds[index] = remaining.removeFromLeft(std::min(widths[index], remaining.getWidth()));
+        ++placed;
+        if (placed < visibleCount)
+            ana::ui::gap.removeFromLeft(remaining);
+    }
+    return bounds;
+}
+
+int MeterView::findPartSeparator(const int x) const noexcept
+{
+    const auto parts = getPartBounds();
+    const auto visible = getVisibleParts();
+    auto previous = -1;
+    for (size_t index = 0; index < visible.size(); ++index)
+    {
+        if (! visible[index])
+            continue;
+        if (previous < 0)
+        {
+            previous = static_cast<int>(index);
+            continue;
+        }
+        const auto separatorX = (parts[static_cast<size_t>(previous)].getRight()
+                                 + parts[index].getX()) / 2;
+        if (std::abs(x - separatorX) <= ana::ui::gap.pixels())
+            return previous;
+        previous = static_cast<int>(index);
+    }
+
+    return -1;
+}
+
+void MeterView::mouseMove(const juce::MouseEvent& event)
+{
+    const auto nextHoveredSeparator = findPartSeparator(event.x);
+    if (hoveredPartSeparator == nextHoveredSeparator)
+        return;
+
+    hoveredPartSeparator = nextHoveredSeparator;
+    setMouseCursor(hoveredPartSeparator >= 0
+        ? juce::MouseCursor::LeftRightResizeCursor
+        : juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
+void MeterView::mouseExit(const juce::MouseEvent&)
+{
+    if (draggedPartSeparator >= 0)
+        return;
+
+    hoveredPartSeparator = -1;
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
+void MeterView::mouseDown(const juce::MouseEvent& event)
+{
+    if (event.originalComponent != this)
+        return;
+
+    const auto parts = getPartBounds();
+    draggedPartSeparator = findPartSeparator(event.x);
+    if (draggedPartSeparator < 0)
+    {
+        if (! historySolo && (parts[0].contains(event.getPosition()) || parts[1].contains(event.getPosition())))
+            processor.clearLevelMeter();
+        return;
+    }
+
+    draggedLeftPart = draggedPartSeparator;
+    draggedRightPart = -1;
+    const auto visible = getVisibleParts();
+    for (auto part = draggedLeftPart + 1; part < static_cast<int>(visible.size()); ++part)
+        if (visible[static_cast<size_t>(part)])
+        {
+            draggedRightPart = part;
+            break;
+        }
+    if (draggedRightPart < 0)
+    {
+        draggedPartSeparator = -1;
+        return;
+    }
+
+    dragStartX = event.x;
+    for (size_t part = 0; part < dragStartWidths.size(); ++part)
+        dragStartWidths[part] = parts[part].getWidth();
+    setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+}
+
+void MeterView::mouseDrag(const juce::MouseEvent& event)
+{
+    if (draggedPartSeparator < 0)
+        return;
+
+    const auto minimumPartWidths = getMinimumPartWidths();
+    auto widths = dragStartWidths;
+    const auto left = static_cast<size_t>(draggedLeftPart);
+    const auto right = static_cast<size_t>(draggedRightPart);
+    const auto pairWidth = dragStartWidths[left] + dragStartWidths[right];
+    const auto minimumLeft = std::min(minimumPartWidths[left], pairWidth);
+    const auto maximumLeft = std::max(minimumLeft, pairWidth - minimumPartWidths[right]);
+    widths[left] = juce::jlimit(minimumLeft, maximumLeft,
+                                dragStartWidths[left] + event.x - dragStartX);
+    widths[right] = pairWidth - widths[left];
+
+    const auto visibleParts = getVisibleParts();
+    for (size_t index = 0; index < partWeights.size(); ++index)
+        if (visibleParts[index])
+            partWeights[index] = static_cast<float>(widths[index]);
+    resized();
+}
+
+void MeterView::mouseUp(const juce::MouseEvent&)
+{
+    if (draggedPartSeparator >= 0)
+        processor.setLevelPartWeights(partWeights);
+
+    draggedLeftPart = -1;
+    draggedRightPart = -1;
+    draggedPartSeparator = -1;
+    setMouseCursor(hoveredPartSeparator >= 0
+        ? juce::MouseCursor::LeftRightResizeCursor
+        : juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
+void MeterView::timerCallback()
+{
+    if (draggedPartSeparator < 0)
+    {
+        const auto storedWeights = processor.getLevelPartWeights();
+        const auto localTotal = std::max(0.001f,
+            partWeights[0] + partWeights[1] + partWeights[2]);
+        auto weightsChanged = false;
+        for (size_t index = 0; index < partWeights.size(); ++index)
+            weightsChanged = weightsChanged
+                || std::abs(partWeights[index] / localTotal - storedWeights[index]) > 1.0e-4f;
+
+        if (weightsChanged)
+        {
+            partWeights = storedWeights;
+            resized();
+        }
+    }
+
+    auto* displayedMeter = &processor.getLevelMeter();
+    auto displayRevision = displayedMeter->getRevision();
+    auto offline = processor.isOfflineMode();
+    if (offline)
+    {
+        const auto snapshot = processor.getOfflineAnalysisSnapshot();
+        if (snapshot == nullptr || snapshot->meters == nullptr)
+            return;
+
+        displayedMeter = snapshot->meters.get();
+        displayRevision = snapshot->revision;
+    }
+
+    auto& lastRevision = offline ? displayedOfflineRevision : displayedRealtimeRevision;
+    if (displayRevision == lastRevision)
+        return;
+
+    lastRevision = displayRevision;
+    const auto values = displayedMeter->getValues();
+    peakValues = values.peakDecibels;
+    rmsValues = values.rmsDecibels;
+    peakMaximumValues = values.peakMaximumDecibels;
+    peakHoldValues = values.peakHoldDecibels;
+    rmsMaximumValues = values.rmsMaximumDecibels;
+    momentaryMaximumLufs = values.momentaryMaximumLufs;
+    shortTermMaximumLufs = values.shortTermMaximumLufs;
+    integratedMaximumLufs = values.integratedMaximumLufs;
+    loudnessRange = values.loudnessRange;
+    if (offline)
+    {
+        momentaryLufs = values.momentaryLufs;
+        shortTermLufs = values.shortTermLufs;
+        integratedLufs = values.integratedLufs;
+    }
+    else
+    {
+        momentaryLufs = values.momentaryLufs;
+        shortTermLufs = values.shortTermLufs;
+        integratedLufs = values.integratedLufs;
+    }
+    for (size_t series = 0; series < loudnessHistories.size(); ++series)
+        displayedMeter->copyHistory(series, loudnessHistories[series]);
+    repaint();
+}
+
+juce::Rectangle<float> MeterView::getPlotBounds() const noexcept
+{
+    return getLocalBounds().toFloat();
+}
+
+ScopeView::ScopeView(PluginProcessor& processorRef)
     : processor(processorRef)
 {
     setOpaque(false);
@@ -1850,7 +2969,7 @@ AnaMultibandScopeComponent::AnaMultibandScopeComponent(AnaAudioProcessor& proces
     {
         for (size_t modeIndex = 0; modeIndex < bandModeButtons[bandIndex].size(); ++modeIndex)
         {
-            auto button = std::make_unique<AnaScopeButton>(scopeModeButtonNames[modeIndex]);
+            auto button = std::make_unique<ControlButton>(scopeModeButtonNames[modeIndex]);
             button->onClick = [this, bandIndex, modeIndex]
             {
                 const auto mode = scopeModeButtonModes[modeIndex];
@@ -1867,12 +2986,12 @@ AnaMultibandScopeComponent::AnaMultibandScopeComponent(AnaAudioProcessor& proces
             bandModeButtons[bandIndex][modeIndex] = std::move(button);
         }
 
-        auto clearButton = std::make_unique<AnaScopeButton>("CLEAR");
+        auto clearButton = std::make_unique<ControlButton>("CLEAR");
         clearButton->onClick = [this, bandIndex] { clearBandHistory(bandIndex); };
         addAndMakeVisible(*clearButton);
         bandClearButtons[bandIndex] = std::move(clearButton);
 
-        auto singleViewButton = std::make_unique<AnaScopeButton>("SVIEW");
+        auto singleViewButton = std::make_unique<ControlButton>("SVIEW");
         singleViewButton->onClick = [this, bandIndex]
         {
             if (fullSourceView)
@@ -1914,23 +3033,24 @@ AnaMultibandScopeComponent::AnaMultibandScopeComponent(AnaAudioProcessor& proces
         addAndMakeVisible(*zoomSlider);
         bandZoomSliders[bandIndex] = std::move(zoomSlider);
 
-        auto zoomValueLabel = std::make_unique<juce::Label>();
+        auto zoomValueLabel = std::make_unique<EllipsisLabel>();
         zoomValueLabel->setFont(ana::ui::makeFont());
         zoomValueLabel->setJustificationType(juce::Justification::centred);
         zoomValueLabel->setColour(juce::Label::textColourId, ana::ui::white);
         zoomValueLabel->setColour(juce::Label::backgroundColourId, ana::ui::field);
         zoomValueLabel->setColour(juce::Label::outlineColourId, ana::ui::grey500);
         zoomValueLabel->setBorderSize(juce::BorderSize<int>(1));
+        zoomValueLabel->setTextVerticalOffset(readoutTextVerticalOffset);
         zoomValueLabel->setInterceptsMouseClicks(false, false);
         addAndMakeVisible(*zoomValueLabel);
         bandZoomValueLabels[bandIndex] = std::move(zoomValueLabel);
 
-        auto normalizeButton = std::make_unique<AnaScopeButton>("N");
+        auto normalizeButton = std::make_unique<ControlButton>("N");
         normalizeButton->onClick = [this, bandIndex] { normalizeBandWithZoom(bandIndex); };
         addAndMakeVisible(*normalizeButton);
         bandNormalizeButtons[bandIndex] = std::move(normalizeButton);
 
-        auto rangeSlider = std::make_unique<AnaRangeSlider>();
+        auto rangeSlider = std::make_unique<RangeSlider>();
         rangeSlider->onRangeChanged = [this] { repaint(); };
         addAndMakeVisible(*rangeSlider);
         bandRangeSliders[bandIndex] = std::move(rangeSlider);
@@ -1942,7 +3062,7 @@ AnaMultibandScopeComponent::AnaMultibandScopeComponent(AnaAudioProcessor& proces
     startTimerHz(60);
 }
 
-void AnaMultibandScopeComponent::setFrozen(const bool shouldFreeze)
+void ScopeView::setFrozen(const bool shouldFreeze)
 {
     if (frozen == shouldFreeze)
         return;
@@ -1957,7 +3077,7 @@ void AnaMultibandScopeComponent::setFrozen(const bool shouldFreeze)
     }
 }
 
-void AnaMultibandScopeComponent::clearHistory()
+void ScopeView::clearHistory()
 {
     if (showingOfflineSnapshot)
     {
@@ -1976,7 +3096,7 @@ void AnaMultibandScopeComponent::clearHistory()
     resetHistory();
 }
 
-void AnaMultibandScopeComponent::refreshWaveform()
+void ScopeView::refreshWaveform()
 {
     if (processor.isOfflineMode())
     {
@@ -1990,14 +3110,14 @@ void AnaMultibandScopeComponent::refreshWaveform()
             processor.setScopeBandNormalized(bandIndex, false);
 
         if (onOfflineUpdateStatus)
-            onOfflineUpdateStatus("UPDATING...");
+            onOfflineUpdateStatus("UPDATING 00");
         processor.requestOfflineAnalysis(offlineAnalysisColumnCount, true);
     }
 
     repaint();
 }
 
-void AnaMultibandScopeComponent::equalizeBandHeights()
+void ScopeView::equalizeBandHeights()
 {
     bandHeightWeights.fill(1.0f);
     draggedBandSeparator = -1;
@@ -2005,16 +3125,16 @@ void AnaMultibandScopeComponent::equalizeBandHeights()
     repaint();
 }
 
-void AnaMultibandScopeComponent::refreshDisplaySettings()
+void ScopeView::refreshDisplaySettings()
 {
-    if (! showingOfflineSnapshot && ! historyContainsRecordedData)
+    if (! showingOfflineSnapshot)
         resizeHistory(getWaveformColumnCount());
 
     refreshBandModeButtons();
     repaint();
 }
 
-void AnaMultibandScopeComponent::setFullSourceView(const bool shouldShowFullSource)
+void ScopeView::setFullSourceView(const bool shouldShowFullSource)
 {
     if (fullSourceView == shouldShowFullSource)
         return;
@@ -2031,7 +3151,7 @@ void AnaMultibandScopeComponent::setFullSourceView(const bool shouldShowFullSour
     repaint();
 }
 
-void AnaMultibandScopeComponent::timerCallback()
+void ScopeView::timerCallback()
 {
     const auto timeMilliseconds = processor.getScopeTimeMilliseconds();
     const auto waveformColumnCount = getWaveformColumnCount();
@@ -2073,7 +3193,7 @@ void AnaMultibandScopeComponent::timerCallback()
                 processor.setScopeBandNormalized(bandIndex, false);
 
             if (onOfflineUpdateStatus)
-                onOfflineUpdateStatus("UPDATING...");
+                onOfflineUpdateStatus("UPDATING 00");
             processor.requestOfflineAnalysis(offlineAnalysisColumnCount, true);
             repaint();
         }
@@ -2083,7 +3203,10 @@ void AnaMultibandScopeComponent::timerCallback()
 
         processor.requestOfflineAnalysis(offlineAnalysisColumnCount);
 
-        if (const auto snapshot = processor.getOfflineScopeSnapshot())
+        if (processor.getAnalyzerPageState() != static_cast<int>(AnalyzerPage::scope))
+            return;
+
+        if (const auto snapshot = processor.getOfflineAnalysisSnapshot())
         {
             if (! showingOfflineSnapshot
                 || offlineSnapshotRevision != snapshot->revision
@@ -2194,11 +3317,11 @@ void AnaMultibandScopeComponent::timerCallback()
         repaint();
 }
 
-void AnaMultibandScopeComponent::paint(juce::Graphics& graphics)
+void ScopeView::paint(juce::Graphics& graphics)
 {
     const auto activeBandCount = processor.getActiveSplitCount() + 1;
     const auto filledStyle = processor.isScopeFilledStyle();
-    graphics.setColour(ana::ui::white.withAlpha(processor.getScopeOpacity()));
+    graphics.setColour(ana::ui::opacityShade(processor.getScopeOpacity()));
 
     for (size_t bandIndex = 0; bandIndex < activeBandCount; ++bandIndex)
     {
@@ -2259,7 +3382,7 @@ void AnaMultibandScopeComponent::paint(juce::Graphics& graphics)
         }
     }
 
-    graphics.setColour(ana::ui::white.withAlpha(0.42f));
+    graphics.setColour(ana::ui::dark);
 
     for (size_t bandIndex = 0; bandIndex < activeBandCount; ++bandIndex)
     {
@@ -2293,7 +3416,7 @@ void AnaMultibandScopeComponent::paint(juce::Graphics& graphics)
         {
             graphics.setColour(ana::ui::accent);
             graphics.fillRect(0, juce::roundToInt(waveformBounds.getCentreY()), lineWidth, 1);
-            graphics.setColour(ana::ui::white.withAlpha(0.42f));
+            graphics.setColour(ana::ui::dark);
         }
     }
 
@@ -2308,7 +3431,7 @@ void AnaMultibandScopeComponent::paint(juce::Graphics& graphics)
     }
 }
 
-void AnaMultibandScopeComponent::resized()
+void ScopeView::resized()
 {
     const auto sizeChanged = lastComponentWidth != getWidth()
         || lastComponentHeight != getHeight();
@@ -2330,7 +3453,7 @@ void AnaMultibandScopeComponent::resized()
     repaint();
 }
 
-void AnaMultibandScopeComponent::resetHistory()
+void ScopeView::resetHistory()
 {
     showingOfflineSnapshot = false;
     offlineAnalysisColumnCount = 0;
@@ -2367,7 +3490,7 @@ void AnaMultibandScopeComponent::resetHistory()
     repaint();
 }
 
-void AnaMultibandScopeComponent::resizeHistory(const size_t newColumnCount)
+void ScopeView::resizeHistory(const size_t newColumnCount)
 {
     const auto targetColumnCount = std::max<size_t>(1, newColumnCount);
     const auto resizeEnvelopes = [targetColumnCount] (auto& envelopes)
@@ -2418,7 +3541,7 @@ void AnaMultibandScopeComponent::resizeHistory(const size_t newColumnCount)
     repaint();
 }
 
-void AnaMultibandScopeComponent::clearBandHistory(const size_t bandIndex)
+void ScopeView::clearBandHistory(const size_t bandIndex)
 {
     if (bandIndex >= historyBandCount)
         return;
@@ -2453,7 +3576,7 @@ void AnaMultibandScopeComponent::clearBandHistory(const size_t bandIndex)
     repaint(bandBounds);
 }
 
-void AnaMultibandScopeComponent::resetColumnAccumulator()
+void ScopeView::resetColumnAccumulator()
 {
     for (auto& band : columnMinimums)
         band.fill(std::numeric_limits<float>::max());
@@ -2463,7 +3586,7 @@ void AnaMultibandScopeComponent::resetColumnAccumulator()
     widebandColumnMaximums.fill(std::numeric_limits<float>::lowest());
 }
 
-void AnaMultibandScopeComponent::normalizeBandWithZoom(const size_t bandIndex)
+void ScopeView::normalizeBandWithZoom(const size_t bandIndex)
 {
     if (! processor.isOfflineMode()
         || ! showingOfflineSnapshot
@@ -2518,7 +3641,7 @@ void AnaMultibandScopeComponent::normalizeBandWithZoom(const size_t bandIndex)
     repaint();
 }
 
-void AnaMultibandScopeComponent::refreshBandModeButtons()
+void ScopeView::refreshBandModeButtons()
 {
     const auto activeBandCount = processor.getActiveSplitCount() + 1;
     const auto persistedSingleViewBand = fullSourceView ? -1 : processor.getScopeSingleViewBand();
@@ -2532,8 +3655,6 @@ void AnaMultibandScopeComponent::refreshBandModeButtons()
         processor.setScopeSingleViewBand(-1);
     }
 
-    constexpr int buttonWidth = bandButtonWidth;
-    constexpr int otherButtonWidth = 64;
     constexpr int buttonHeight = ana::ui::controlHeight;
     constexpr int zoomSliderWidth = bandZoomSliderWidth;
     constexpr int zoomValueWidth = bandZoomValueWidth;
@@ -2561,7 +3682,8 @@ void AnaMultibandScopeComponent::refreshBandModeButtons()
             : juce::Rectangle<int>();
         const auto showZoomSliders = isVisibleBand
             && shouldShowZoomSliders(bandIndex, activeBandCount);
-        const auto controlsY = laneBounds.getY() + ana::ui::gap.pixels();
+        const auto laneTopInset = laneBounds.getY() == 0 ? 0 : ana::ui::gap.pixels();
+        const auto controlsY = laneBounds.getY() + laneTopInset;
         ana::ui::FixedGapRow controlsRow({ 0, controlsY, getWidth(), buttonHeight });
 
         for (size_t modeIndex = 0; modeIndex < bandModeButtons[bandIndex].size(); ++modeIndex)
@@ -2572,14 +3694,14 @@ void AnaMultibandScopeComponent::refreshBandModeButtons()
                                   juce::dontSendNotification);
 
             if (isVisibleBand && showMonitorControls)
-                button.setBounds(controlsRow.takeLeft(buttonWidth));
+                button.setBounds(controlsRow.takeLeft(button.getPreferredWidth()));
         }
 
         auto& clearButton = *bandClearButtons[bandIndex];
         clearButton.setVisible(isVisibleBand && showOtherControls);
 
         if (isVisibleBand && showOtherControls)
-            clearButton.setBounds(controlsRow.takeLeft(otherButtonWidth));
+            clearButton.setBounds(controlsRow.takeLeft(clearButton.getPreferredWidth()));
 
         auto& singleViewButton = *bandSingleViewButtons[bandIndex];
         singleViewButton.setVisible(isVisibleBand && showOtherControls && ! fullSourceView);
@@ -2587,7 +3709,7 @@ void AnaMultibandScopeComponent::refreshBandModeButtons()
                                         juce::dontSendNotification);
 
         if (isVisibleBand && showOtherControls)
-            singleViewButton.setBounds(controlsRow.takeLeft(otherButtonWidth));
+            singleViewButton.setBounds(controlsRow.takeLeft(singleViewButton.getPreferredWidth()));
 
         auto& zoomSlider = *bandZoomSliders[bandIndex];
         auto& zoomValueLabel = *bandZoomValueLabels[bandIndex];
@@ -2607,16 +3729,17 @@ void AnaMultibandScopeComponent::refreshBandModeButtons()
 
         if (isVisibleBand && showZoomControls)
         {
-            const auto buttonY = laneBounds.getY() + ana::ui::gap.pixels();
+            const auto buttonY = controlsY;
             const auto sliderX = showZoomSliders
                 ? std::max(0, getWidth() - zoomSliderWidth)
                 : getWidth();
             const auto zoomValueX = sliderX - (showZoomSliders ? ana::ui::gap.pixels() : 0)
                 - zoomValueWidth;
-            const auto normalizeButtonX = zoomValueX - ana::ui::gap.pixels() - buttonWidth;
+            const auto normalizeButtonWidth = normalizeButton.getPreferredWidth();
+            const auto normalizeButtonX = zoomValueX - ana::ui::gap.pixels() - normalizeButtonWidth;
 
             zoomValueLabel.setBounds(zoomValueX, buttonY, zoomValueWidth, buttonHeight);
-            normalizeButton.setBounds(normalizeButtonX, buttonY, buttonWidth, buttonHeight);
+            normalizeButton.setBounds(normalizeButtonX, buttonY, normalizeButtonWidth, buttonHeight);
 
             if (showZoomSliders)
             {
@@ -2633,7 +3756,7 @@ void AnaMultibandScopeComponent::refreshBandModeButtons()
     }
 }
 
-juce::Rectangle<float> AnaMultibandScopeComponent::getBandBounds(
+juce::Rectangle<float> ScopeView::getBandBounds(
     const size_t bandIndex, const size_t activeBandCount) const noexcept
 {
     if (activeBandCount == 0 || bandIndex >= activeBandCount)
@@ -2685,7 +3808,7 @@ juce::Rectangle<float> AnaMultibandScopeComponent::getBandBounds(
              std::max(0.0f, bottom - top) };
 }
 
-bool AnaMultibandScopeComponent::shouldShowZoomSliders(
+bool ScopeView::shouldShowZoomSliders(
     const size_t bandIndex, const size_t activeBandCount) const noexcept
 {
     return processor.areScopeZoomControlsVisible()
@@ -2693,7 +3816,7 @@ bool AnaMultibandScopeComponent::shouldShowZoomSliders(
             >= static_cast<float>(minimumBandHeight);
 }
 
-bool AnaMultibandScopeComponent::hasVisibleZoomSliders() const noexcept
+bool ScopeView::hasVisibleZoomSliders() const noexcept
 {
     const auto activeBandCount = processor.getActiveSplitCount() + 1;
     for (size_t bandIndex = 0; bandIndex < activeBandCount; ++bandIndex)
@@ -2703,7 +3826,7 @@ bool AnaMultibandScopeComponent::hasVisibleZoomSliders() const noexcept
     return false;
 }
 
-size_t AnaMultibandScopeComponent::getWaveformColumnCount() const noexcept
+size_t ScopeView::getWaveformColumnCount() const noexcept
 {
     const auto drawableWidth = hasVisibleZoomSliders()
         ? getWidth() - waveformRightInset
@@ -2711,7 +3834,7 @@ size_t AnaMultibandScopeComponent::getWaveformColumnCount() const noexcept
     return static_cast<size_t>(std::max(1, drawableWidth));
 }
 
-int AnaMultibandScopeComponent::findBandSeparator(
+int ScopeView::findBandSeparator(
     const int y, const size_t activeBandCount) const noexcept
 {
     if (fullSourceView || singleViewBand >= 0)
@@ -2730,7 +3853,7 @@ int AnaMultibandScopeComponent::findBandSeparator(
     return -1;
 }
 
-void AnaMultibandScopeComponent::mouseMove(const juce::MouseEvent& event)
+void ScopeView::mouseMove(const juce::MouseEvent& event)
 {
     const auto activeBandCount = processor.getActiveSplitCount() + 1;
     setMouseCursor(findBandSeparator(event.y, activeBandCount) >= 0
@@ -2738,13 +3861,13 @@ void AnaMultibandScopeComponent::mouseMove(const juce::MouseEvent& event)
         : juce::MouseCursor::NormalCursor);
 }
 
-void AnaMultibandScopeComponent::mouseExit(const juce::MouseEvent&)
+void ScopeView::mouseExit(const juce::MouseEvent&)
 {
     if (draggedBandSeparator < 0)
         setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
-void AnaMultibandScopeComponent::mouseDown(const juce::MouseEvent& event)
+void ScopeView::mouseDown(const juce::MouseEvent& event)
 {
     draggedBandSeparator = findBandSeparator(event.y, processor.getActiveSplitCount() + 1);
 
@@ -2752,7 +3875,7 @@ void AnaMultibandScopeComponent::mouseDown(const juce::MouseEvent& event)
         setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
 }
 
-void AnaMultibandScopeComponent::mouseDrag(const juce::MouseEvent& event)
+void ScopeView::mouseDrag(const juce::MouseEvent& event)
 {
     const auto activeBandCount = processor.getActiveSplitCount() + 1;
 
@@ -2789,14 +3912,14 @@ void AnaMultibandScopeComponent::mouseDrag(const juce::MouseEvent& event)
     repaint();
 }
 
-void AnaMultibandScopeComponent::mouseUp(const juce::MouseEvent& event)
+void ScopeView::mouseUp(const juce::MouseEvent& event)
 {
     draggedBandSeparator = -1;
     mouseMove(event);
 }
 
-std::array<float, ana::OfflineScopeSnapshot::numChannelModes>
-AnaMultibandScopeComponent::getRealtimeModeSamples(const size_t bandIndex,
+std::array<float, ana::OfflineAnalysisSnapshot::numChannelModes>
+ScopeView::getRealtimeModeSamples(const size_t bandIndex,
                                                    const size_t sampleIndex) const noexcept
 {
     const auto left = incomingSamples[bandIndex][0][sampleIndex];
@@ -2804,15 +3927,15 @@ AnaMultibandScopeComponent::getRealtimeModeSamples(const size_t bandIndex,
     return { left, right, 0.5f * (left + right), 0.5f * (left - right) };
 }
 
-std::array<float, ana::OfflineScopeSnapshot::numChannelModes>
-AnaMultibandScopeComponent::getRealtimeWidebandModeSamples(const size_t sampleIndex) const noexcept
+std::array<float, ana::OfflineAnalysisSnapshot::numChannelModes>
+ScopeView::getRealtimeWidebandModeSamples(const size_t sampleIndex) const noexcept
 {
     const auto left = incomingSamples.wideband[0][sampleIndex];
     const auto right = incomingSamples.wideband[1][sampleIndex];
     return { left, right, 0.5f * (left + right), 0.5f * (left - right) };
 }
 
-void AnaMultibandScopeComponent::appendHistoryColumn(const size_t activeBandCount)
+void ScopeView::appendHistoryColumn(const size_t activeBandCount)
 {
     if (historyEnvelopes.front().front().minimums.empty())
         return;
@@ -2856,8 +3979,8 @@ void AnaMultibandScopeComponent::appendHistoryColumn(const size_t activeBandCoun
     historyContainsRecordedData = true;
 }
 
-void AnaMultibandScopeComponent::renderOfflineSnapshot(
-    std::shared_ptr<const ana::OfflineScopeSnapshot> snapshot)
+void ScopeView::renderOfflineSnapshot(
+    std::shared_ptr<const ana::OfflineAnalysisSnapshot> snapshot)
 {
     if (snapshot == nullptr)
         return;
@@ -2880,34 +4003,34 @@ void AnaMultibandScopeComponent::renderOfflineSnapshot(
 
         if (onOfflineUpdateStatus)
             onOfflineUpdateStatus(
-                "UPDATED " + juce::Time::getCurrentTime().formatted("%d.%m.%Y %H:%M:%S"));
+                "UPDATED");
     }
 
     repaint();
 }
 
-AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& processorRef)
+SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     : processor(processorRef),
-      styleControl(processorRef.getParameters(), AnaAudioProcessor::scopeStyleParameterId,
+      styleControl(processorRef.getParameters(), PluginProcessor::scopeStyleParameterId,
                    "STYLE",
                    [] (const double value)
                    {
                        return value < 0.5 ? juce::String("FILLED") : juce::String("OUTLINE");
                    }),
-      opacityControl(processorRef.getParameters(), AnaAudioProcessor::scopeOpacityParameterId,
+      opacityControl(processorRef.getParameters(), PluginProcessor::scopeOpacityParameterId,
                      "OPACITY",
                      [] (const double value)
                      {
                          return juce::String(juce::roundToInt(value));
                      }),
-      timeControl(processorRef.getParameters(), AnaAudioProcessor::scopeTimeParameterId,
+      timeControl(processorRef.getParameters(), PluginProcessor::scopeTimeParameterId,
                   "TIME",
                   [] (const double value)
                   {
                       const auto seconds = value / 1000.0;
                       return juce::String(seconds, seconds < 10.0 ? 1 : 0);
                   }),
-      timeNoteControl(processorRef.getParameters(), AnaAudioProcessor::scopeNoteLengthParameterId,
+      timeNoteControl(processorRef.getParameters(), PluginProcessor::scopeNoteLengthParameterId,
                       "TIME",
                       [] (const double value)
                       {
@@ -2918,38 +4041,54 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
                           return choices[juce::jlimit(0, choices.size() - 1,
                                                      juce::roundToInt(value))];
                       }),
-      timeBaseControl(processorRef.getParameters(), AnaAudioProcessor::scopeTimeBaseParameterId,
+      timeBaseControl(processorRef.getParameters(), PluginProcessor::scopeTimeBaseParameterId,
                       "TIME-BASE",
                       [] (const double value)
                       {
                           return value < 0.5 ? juce::String("MS") : juce::String("NOTE");
                   }),
-      frequencyBlockSizeControl(processorRef.getParameters(), AnaAudioProcessor::frequencyBlockSizeParameterId,
-                                "BLOCK-SIZE", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      frequencyOverlapControl(processorRef.getParameters(), AnaAudioProcessor::frequencyOverlapParameterId,
+      frequencyBlockSizeControl(processorRef.getParameters(), PluginProcessor::frequencyBlockSizeParameterId,
+                                "BLOCK-SIZE", formatBlockSizeChoice),
+      frequencyOverlapControl(processorRef.getParameters(), PluginProcessor::frequencyOverlapParameterId,
                               "OVERLAP", [] (const double value) { return juce::String(juce::roundToInt(value * 100.0)); }),
-      frequencyAverageTimeControl(processorRef.getParameters(), AnaAudioProcessor::frequencyAverageTimeParameterId,
+      frequencyAverageTimeControl(processorRef.getParameters(), PluginProcessor::frequencyAverageTimeParameterId,
                                   "AVG-TIME", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      frequencyFirstSpectrumTypeControl(processorRef.getParameters(), AnaAudioProcessor::frequencyFirstSpectrumTypeParameterId,
-                                        "1ST-SPEC-TYPE", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      frequencySecondSpectrumTypeControl(processorRef.getParameters(), AnaAudioProcessor::frequencySecondSpectrumTypeParameterId,
-                                         "2ND-SPEC-TYPE", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      frequencySlopeControl(processorRef.getParameters(), AnaAudioProcessor::frequencySlopeParameterId,
+      frequencySmoothingControl(processorRef.getParameters(), PluginProcessor::frequencySmoothingParameterId,
+                                "SMOOTHING", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
+      frequencyFirstSpectrumTypeControl(processorRef.getParameters(), PluginProcessor::frequencyFirstSpectrumTypeParameterId,
+                                        "1ST-TYPE", formatSpectrumTypeChoice),
+      frequencySecondSpectrumTypeControl(processorRef.getParameters(), PluginProcessor::frequencySecondSpectrumTypeParameterId,
+                                         "2ND-TYPE", formatSpectrumTypeChoice),
+      frequencySlopeControl(processorRef.getParameters(), PluginProcessor::frequencySlopeParameterId,
                             "SLOPE", [] (const double value) { return juce::String(value, 1); }),
-      correlationBlockSizeControl(processorRef.getParameters(), AnaAudioProcessor::correlationBlockSizeParameterId,
-                                  "BLOCK-SIZE", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      correlationOverlapControl(processorRef.getParameters(), AnaAudioProcessor::correlationOverlapParameterId,
+      correlationBlockSizeControl(processorRef.getParameters(), PluginProcessor::correlationBlockSizeParameterId,
+                                  "BLOCK-SIZE", formatBlockSizeChoice),
+      correlationOverlapControl(processorRef.getParameters(), PluginProcessor::correlationOverlapParameterId,
                                 "OVERLAP", [] (const double value) { return juce::String(juce::roundToInt(value * 100.0)); }),
-      correlationAverageTimeControl(processorRef.getParameters(), AnaAudioProcessor::correlationAverageTimeParameterId,
+      correlationAverageTimeControl(processorRef.getParameters(), PluginProcessor::correlationAverageTimeParameterId,
                                     "AVG-TIME", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      correlationSmoothingControl(processorRef.getParameters(), AnaAudioProcessor::correlationSmoothingParameterId,
+      correlationSmoothingControl(processorRef.getParameters(), PluginProcessor::correlationSmoothingParameterId,
                                   "SMOOTHING", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      correlationFirstSpectrumTypeControl(processorRef.getParameters(), AnaAudioProcessor::correlationFirstSpectrumTypeParameterId,
-                                          "1ST-GRAPH-TYPE", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
-      correlationSecondSpectrumTypeControl(processorRef.getParameters(), AnaAudioProcessor::correlationSecondSpectrumTypeParameterId,
-                                           "2ND-GRAPH-TYPE", [] (const double value) { return juce::String(juce::roundToInt(value)); })
+      correlationFirstSpectrumTypeControl(processorRef.getParameters(), PluginProcessor::correlationFirstSpectrumTypeParameterId,
+                                          "1ST-TYPE", formatSpectrumTypeChoice),
+      correlationSecondSpectrumTypeControl(processorRef.getParameters(), PluginProcessor::correlationSecondSpectrumTypeParameterId,
+                                           "2ND-TYPE", formatSpectrumTypeChoice),
+      levelMeterWidthControl(processorRef.getParameters(), PluginProcessor::levelMeterWidthParameterId,
+                             "METER-WIDTH", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
+      levelPeakHighControl(processorRef.getParameters(), PluginProcessor::levelPeakHighParameterId,
+                            "PEAK/RMS-HIGH", [] (const double value) { return juce::String(value, 1); }),
+      levelPeakLowControl(processorRef.getParameters(), PluginProcessor::levelPeakLowParameterId,
+                           "PEAK/RMS-LOW", [] (const double value) { return juce::String(value, 1); }),
+      levelRmsWindowControl(processorRef.getParameters(), PluginProcessor::levelRmsWindowParameterId,
+                            "RMS-WINDOW", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
+      levelPeakHoldTimeControl(processorRef.getParameters(), PluginProcessor::levelPeakHoldTimeParameterId,
+                               "PEAK-HOLD", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
+      levelLufsHighControl(processorRef.getParameters(), PluginProcessor::levelLufsHighParameterId,
+                            "LUFS-HIGH", [] (const double value) { return juce::String(value, 1); }),
+      levelLufsLowControl(processorRef.getParameters(), PluginProcessor::levelLufsLowParameterId,
+                           "LUFS-LOW", [] (const double value) { return juce::String(value, 1); })
 {
-    setOpaque(false);
+    setOpaque(true);
     settingsViewport.setViewedComponent(&settingsContent, false);
     settingsViewport.setScrollBarsShown(true, false, true, false);
     settingsViewport.setScrollBarThickness(ana::ui::gap.pixels());
@@ -2958,29 +4097,28 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
     settingsViewport.setMouseClickGrabsKeyboardFocus(false);
     addAndMakeVisible(settingsViewport);
 
-    const auto configureHeading = [this] (juce::Label& label, const juce::String& text)
+    const auto configureHeading = [this] (EllipsisLabel& label, const juce::String& text)
     {
         label.setText(text, juce::dontSendNotification);
         label.setFont(ana::ui::makeFont());
         label.setJustificationType(juce::Justification::centredLeft);
         label.setColour(juce::Label::textColourId, ana::ui::white);
-        label.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        label.setDrawBackground(false);
         label.setColour(juce::Label::outlineColourId, ana::ui::grey500);
         label.setBorderSize(juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
         label.setInterceptsMouseClicks(false, false);
         settingsContent.addAndMakeVisible(label);
     };
-    configureHeading(headingLabel, "SETTINGS");
-    configureHeading(generalHeadingLabel, "GENERAL");
-    configureHeading(controlsVisibilityHeadingLabel, "CONTROLS VISIBILITY");
+    configureHeading(generalHeadingLabel, "CROSSOVER");
+    configureHeading(controlsVisibilityHeadingLabel, "VIEW");
     configureHeading(realtimeHeadingLabel, "REALTIME");
 
-    for (auto* component : std::array<juce::Component*, 37> {
+    for (auto* component : std::array<juce::Component*, 54> {
              &addCrossoverButton, &removeCrossoverButton, &equalHeightButton,
              &styleControl, &opacityControl, &zoomControlsButton,
              &monitorControlsButton, &otherControlsButton, &timeControl,
              &timeNoteControl, &timeBaseControl, &frequencyBlockSizeControl,
-             &frequencyOverlapControl, &frequencyAverageTimeControl,
+             &frequencyOverlapControl, &frequencyAverageTimeControl, &frequencySmoothingControl,
              &frequencyFilledDisplayButton, &frequencySecondSpectrumButton,
              &frequencyFirstSpectrumTypeControl, &frequencySecondSpectrumTypeControl,
              &frequencyAntiAliasButton, &frequencySlopeControl, &frequencyHostClearButton,
@@ -2991,7 +4129,15 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
              &correlationSecondSpectrumTypeControl,
              &correlationFilledDisplayButton, &correlationSecondSpectrumButton, &correlationHostClearButton,
              &correlationRangesButton, &correlationCursorButton,
-             &correlationZoomControlsButton })
+             &correlationZoomControlsButton, &levelMeterWidthControl,
+             &levelPeakHighControl, &levelPeakLowControl,
+             &levelRmsWindowControl, &levelPeakHoldTimeControl,
+             &levelLufsHighControl, &levelLufsLowControl,
+             &levelHostResetButton, &centerLevelPartsButton,
+             &levelPeakVisibleButton, &levelLoudnessVisibleButton,
+             &levelHistoryVisibleButton, &levelHistoryMomentaryButton,
+             &levelHistoryShortTermButton, &levelHistoryIntegratedButton,
+             &levelHistoryZoomButton })
         settingsContent.addAndMakeVisible(*component);
 
     addAndMakeVisible(focusedParameterControl);
@@ -3002,6 +4148,11 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
         if (onEqualBandHeights)
             onEqualBandHeights();
     };
+    centerLevelPartsButton.onClick = [this]
+    {
+        if (onCenterLevelParts)
+            onCenterLevelParts();
+    };
     const auto displaySettingChanged = [this]
     {
         if (onDisplaySettingsChanged)
@@ -3009,57 +4160,130 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
     };
     styleControl.onValueChanged = displaySettingChanged;
     opacityControl.onValueChanged = displaySettingChanged;
-    for (auto* button : std::array<AnaScopeButton*, 3> {
+    for (auto* button : std::array<ControlButton*, 3> {
              &zoomControlsButton, &monitorControlsButton, &otherControlsButton })
     {
         button->setClickingTogglesState(true);
         button->onClick = displaySettingChanged;
     }
     zoomControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::scopeZoomControlsParameterId, zoomControlsButton);
+        processor.getParameters(), PluginProcessor::scopeZoomControlsParameterId, zoomControlsButton);
     monitorControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::scopeMonitorControlsParameterId, monitorControlsButton);
+        processor.getParameters(), PluginProcessor::scopeMonitorControlsParameterId, monitorControlsButton);
     otherControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::scopeOtherControlsParameterId, otherControlsButton);
-    for (auto* button : std::array<AnaScopeButton*, 8> {
+        processor.getParameters(), PluginProcessor::scopeOtherControlsParameterId, otherControlsButton);
+    for (auto* button : std::array<ControlButton*, 8> {
              &frequencyFilledDisplayButton, &frequencySecondSpectrumButton,
              &frequencyAntiAliasButton, &frequencyHostClearButton, &frequencyRangesButton,
              &frequencyCursorButton, &frequencyMonitorControlsButton, &frequencyZoomControlsButton })
+    {
         button->setClickingTogglesState(true);
+        button->onClick = displaySettingChanged;
+    }
     frequencyFilledDisplayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencyFilledDisplayParameterId, frequencyFilledDisplayButton);
+        processor.getParameters(), PluginProcessor::frequencyFilledDisplayParameterId, frequencyFilledDisplayButton);
     frequencySecondSpectrumAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencySecondSpectrumParameterId, frequencySecondSpectrumButton);
+        processor.getParameters(), PluginProcessor::frequencySecondSpectrumParameterId, frequencySecondSpectrumButton);
     frequencyAntiAliasAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencyAntiAliasParameterId, frequencyAntiAliasButton);
+        processor.getParameters(), PluginProcessor::frequencyAntiAliasParameterId, frequencyAntiAliasButton);
     frequencyRangesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencyRangesVisibleParameterId, frequencyRangesButton);
+        processor.getParameters(), PluginProcessor::frequencyRangesVisibleParameterId, frequencyRangesButton);
     frequencyHostClearAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencyHostClearParameterId, frequencyHostClearButton);
+        processor.getParameters(), PluginProcessor::frequencyHostClearParameterId, frequencyHostClearButton);
     frequencyCursorAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencyCursorReadoutParameterId, frequencyCursorButton);
+        processor.getParameters(), PluginProcessor::frequencyCursorReadoutParameterId, frequencyCursorButton);
     frequencyMonitorControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencyMonitorControlsParameterId, frequencyMonitorControlsButton);
+        processor.getParameters(), PluginProcessor::frequencyMonitorControlsParameterId, frequencyMonitorControlsButton);
     frequencyZoomControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::frequencyZoomControlsParameterId, frequencyZoomControlsButton);
-    for (auto* button : std::array<AnaScopeButton*, 6> {
+        processor.getParameters(), PluginProcessor::frequencyZoomControlsParameterId, frequencyZoomControlsButton);
+    for (auto* button : std::array<ControlButton*, 6> {
         &correlationFilledDisplayButton, &correlationHostClearButton, &correlationRangesButton,
         &correlationCursorButton, &correlationZoomControlsButton,
         &correlationSecondSpectrumButton })
+    {
         button->setClickingTogglesState(true);
+        button->onClick = displaySettingChanged;
+    }
     correlationFilledDisplayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::correlationFilledDisplayParameterId, correlationFilledDisplayButton);
+        processor.getParameters(), PluginProcessor::correlationFilledDisplayParameterId, correlationFilledDisplayButton);
     correlationSecondSpectrumAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::correlationSecondSpectrumParameterId, correlationSecondSpectrumButton);
+        processor.getParameters(), PluginProcessor::correlationSecondSpectrumParameterId, correlationSecondSpectrumButton);
     correlationHostClearAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::correlationHostClearParameterId, correlationHostClearButton);
+        processor.getParameters(), PluginProcessor::correlationHostClearParameterId, correlationHostClearButton);
     correlationRangesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::correlationRangesVisibleParameterId, correlationRangesButton);
+        processor.getParameters(), PluginProcessor::correlationRangesVisibleParameterId, correlationRangesButton);
     correlationCursorAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::correlationCursorReadoutParameterId, correlationCursorButton);
+        processor.getParameters(), PluginProcessor::correlationCursorReadoutParameterId, correlationCursorButton);
     correlationZoomControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        processor.getParameters(), AnaAudioProcessor::correlationZoomControlsParameterId, correlationZoomControlsButton);
-    const auto requestChoice = [this] (AnaParameterControl& control)
+        processor.getParameters(), PluginProcessor::correlationZoomControlsParameterId, correlationZoomControlsButton);
+    levelHostResetButton.setClickingTogglesState(true);
+    levelHostResetButton.onClick = displaySettingChanged;
+    levelHostResetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelHostResetParameterId, levelHostResetButton);
+    for (const auto& [button, parameterId] : std::array {
+             std::pair { &levelPeakVisibleButton, PluginProcessor::levelPeakVisibleParameterId },
+             std::pair { &levelLoudnessVisibleButton, PluginProcessor::levelLoudnessVisibleParameterId },
+             std::pair { &levelHistoryVisibleButton, PluginProcessor::levelHistoryVisibleParameterId } })
+    {
+        button->setClickingTogglesState(true);
+        button->onClick = [this, displaySettingChanged, button, parameterId]
+        {
+            const auto anyVisible = levelPeakVisibleButton.getToggleState()
+                || levelLoudnessVisibleButton.getToggleState()
+                || levelHistoryVisibleButton.getToggleState();
+            if (! anyVisible)
+            {
+                if (auto* parameter = processor.getParameters().getParameter(parameterId))
+                    parameter->setValueNotifyingHost(1.0f);
+                button->setToggleState(true, juce::dontSendNotification);
+            }
+            processor.clearLevelMeter();
+            displaySettingChanged();
+        };
+    }
+    levelPeakVisibleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelPeakVisibleParameterId, levelPeakVisibleButton);
+    levelLoudnessVisibleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelLoudnessVisibleParameterId,
+        levelLoudnessVisibleButton);
+    levelHistoryVisibleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelHistoryVisibleParameterId,
+        levelHistoryVisibleButton);
+    for (const auto& [button, parameterId] : std::array {
+             std::pair { &levelHistoryMomentaryButton, PluginProcessor::levelHistoryMomentaryParameterId },
+             std::pair { &levelHistoryShortTermButton, PluginProcessor::levelHistoryShortTermParameterId },
+             std::pair { &levelHistoryIntegratedButton, PluginProcessor::levelHistoryIntegratedParameterId } })
+    {
+        button->setClickingTogglesState(true);
+        button->onClick = [this, displaySettingChanged, button, parameterId]
+        {
+            const auto anyVisible = levelHistoryMomentaryButton.getToggleState()
+                || levelHistoryShortTermButton.getToggleState()
+                || levelHistoryIntegratedButton.getToggleState();
+            if (! anyVisible)
+            {
+                if (auto* parameter = processor.getParameters().getParameter(parameterId))
+                    parameter->setValueNotifyingHost(1.0f);
+                button->setToggleState(true, juce::dontSendNotification);
+            }
+            displaySettingChanged();
+        };
+    }
+    levelHistoryMomentaryAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelHistoryMomentaryParameterId,
+        levelHistoryMomentaryButton);
+    levelHistoryShortTermAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelHistoryShortTermParameterId,
+        levelHistoryShortTermButton);
+    levelHistoryIntegratedAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelHistoryIntegratedParameterId,
+        levelHistoryIntegratedButton);
+    levelHistoryZoomButton.setClickingTogglesState(true);
+    levelHistoryZoomButton.onClick = displaySettingChanged;
+    levelHistoryZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.getParameters(), PluginProcessor::levelHistoryZoomParameterId,
+        levelHistoryZoomButton);
+    const auto requestChoice = [this] (ParameterControl& control)
     {
         if (onChoiceRequested)
             onChoiceRequested(control);
@@ -3074,18 +4298,35 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
     correlationFirstSpectrumTypeControl.onChoiceRequested = requestChoice;
     correlationSecondSpectrumTypeControl.onChoiceRequested = requestChoice;
 
-    const auto focusControl = [this] (AnaParameterControl& control)
+    const auto focusControl = [this] (ParameterControl& control)
     {
         focusParameterControl(control);
     };
     opacityControl.onFocusRequested = focusControl;
     timeControl.onFocusRequested = focusControl;
     frequencyAverageTimeControl.onFocusRequested = focusControl;
+    frequencySmoothingControl.onFocusRequested = focusControl;
     frequencySlopeControl.onFocusRequested = focusControl;
     frequencyOverlapControl.onFocusRequested = focusControl;
     correlationOverlapControl.onFocusRequested = focusControl;
     correlationAverageTimeControl.onFocusRequested = focusControl;
     correlationSmoothingControl.onFocusRequested = focusControl;
+    levelMeterWidthControl.onFocusRequested = focusControl;
+    levelPeakHighControl.onFocusRequested = focusControl;
+    levelPeakLowControl.onFocusRequested = focusControl;
+    levelRmsWindowControl.onFocusRequested = focusControl;
+    levelPeakHoldTimeControl.onFocusRequested = focusControl;
+    levelLufsHighControl.onFocusRequested = focusControl;
+    levelLufsLowControl.onFocusRequested = focusControl;
+    levelMeterWidthControl.onValueChanged = displaySettingChanged;
+    levelPeakHighControl.onValueChanged = displaySettingChanged;
+    levelPeakLowControl.onValueChanged = displaySettingChanged;
+    levelRmsWindowControl.onValueChanged = displaySettingChanged;
+    levelPeakHoldTimeControl.onValueChanged = displaySettingChanged;
+    levelLufsHighControl.onValueChanged = displaySettingChanged;
+    levelLufsLowControl.onValueChanged = displaySettingChanged;
+    frequencySmoothingControl.onValueChanged = displaySettingChanged;
+    correlationSmoothingControl.onValueChanged = displaySettingChanged;
     frequencyOverlapControl.getSlider().valueFromTextFunction = [] (const juce::String& text)
     {
         return text.getDoubleValue() * 0.01;
@@ -3122,6 +4363,7 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
         if (updatingFocusedParameterControl || focusedParameterTarget == nullptr)
             return;
 
+        focusedParameterTarget->commitPendingEditor();
         auto& target = focusedParameterTarget->getSlider();
         const auto value = target.getNormalisableRange().convertFrom0to1(focusedParameterControl.getValue());
         target.setValue(value, juce::sendNotificationSync);
@@ -3130,9 +4372,9 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
 
     for (size_t index = 0; index < crossoverControls.size(); ++index)
     {
-        auto control = std::make_unique<AnaParameterControl>(
+        auto control = std::make_unique<ParameterControl>(
             processor.getParameters(),
-            AnaAudioProcessor::crossoverParameterIds[index],
+            PluginProcessor::crossoverParameterIds[index],
             "XOVER-" + juce::String(static_cast<int>(index + 1)),
             [] (const double value) { return formatFrequency(value); });
         control->getSlider().valueFromTextFunction = [] (const juce::String& text)
@@ -3154,7 +4396,7 @@ AnaCrossoverSettingsComponent::AnaCrossoverSettingsComponent(AnaAudioProcessor& 
     startTimerHz(15);
 }
 
-AnaCrossoverSettingsComponent::~AnaCrossoverSettingsComponent()
+SettingsPanel::~SettingsPanel()
 {
     settingsContent.removeMouseListener(this);
     settingsViewport.setViewedComponent(nullptr, false);
@@ -3162,37 +4404,36 @@ AnaCrossoverSettingsComponent::~AnaCrossoverSettingsComponent()
     focusedParameterControl.setLookAndFeel(nullptr);
 }
 
-void AnaCrossoverSettingsComponent::setAnalyzerPage(const AnaAnalyzerPage page)
+void SettingsPanel::setAnalyzerPage(const AnalyzerPage page)
 {
     if (analyzerPage == page)
         return;
 
     analyzerPage = page;
-    generalHeadingLabel.setText(page == AnaAnalyzerPage::scope ? "GENERAL"
-                               : page == AnaAnalyzerPage::frequency ? "FREQ" : "CORR",
+    generalHeadingLabel.setText(page == AnalyzerPage::scope ? "CROSSOVER" : "MAIN",
                                 juce::dontSendNotification);
     clearFocusedParameterControl();
     refreshExternalState();
     resized();
 }
 
-void AnaCrossoverSettingsComponent::paint(juce::Graphics& graphics)
+void SettingsPanel::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(ana::ui::grey800.withAlpha(0.97f));
-    graphics.setColour(ana::ui::accent);
-    graphics.drawRect(getLocalBounds(), 1);
+    graphics.fillAll(ana::ui::black);
 }
 
-void AnaCrossoverSettingsComponent::resized()
+void SettingsPanel::resized()
 {
     constexpr int headingHeight = ana::ui::controlHeight;
     constexpr int rowHeight = ana::ui::controlHeight;
     const auto& fixedGap = ana::ui::gap;
-    const auto scopePage = analyzerPage == AnaAnalyzerPage::scope;
-    const auto frequencyPage = analyzerPage == AnaAnalyzerPage::frequency;
+    const auto scopePage = analyzerPage == AnalyzerPage::scope;
+    const auto frequencyPage = analyzerPage == AnalyzerPage::frequency;
+    const auto levelPage = analyzerPage == AnalyzerPage::level;
     const auto contentHeight = scopePage
-        ? 18 * rowHeight + 18 * fixedGap.pixels()
-        : frequencyPage ? 17 * rowHeight + 16 * fixedGap.pixels() : 15 * rowHeight + 14 * fixedGap.pixels();
+        ? 17 * rowHeight + 16 * fixedGap.pixels()
+        : frequencyPage ? 17 * rowHeight + 16 * fixedGap.pixels()
+        : levelPage ? 16 * rowHeight + 15 * fixedGap.pixels() : 14 * rowHeight + 13 * fixedGap.pixels();
     auto innerBounds = getLocalBounds().reduced(fixedGap.pixels());
     const auto potentiometerBounds = innerBounds.removeFromBottom(rowHeight);
     fixedGap.removeFromBottom(innerBounds);
@@ -3206,13 +4447,56 @@ void AnaCrossoverSettingsComponent::resized()
         - scrollbarReserve);
     settingsContent.setSize(contentWidth, std::max(contentHeight, viewportBounds.getHeight()));
     focusedParameterControl.setBounds(viewportBounds.getX(), potentiometerBounds.getY(),
-                                      contentWidth, rowHeight);
+                                      viewportBounds.getWidth(), rowHeight);
     auto area = settingsContent.getLocalBounds();
+    const auto placeButton = [&] (ControlButton& button)
+    {
+        button.setBounds(area.removeFromTop(rowHeight));
+    };
 
-    headingLabel.setBounds(area.removeFromTop(headingHeight));
-    fixedGap.removeFromTop(area);
     generalHeadingLabel.setBounds(area.removeFromTop(headingHeight));
     fixedGap.removeFromTop(area);
+
+    if (levelPage)
+    {
+        levelRmsWindowControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        levelPeakHoldTimeControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        placeButton(levelHostResetButton);
+        fixedGap.removeFromTop(area);
+        controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
+        fixedGap.removeFromTop(area);
+        levelMeterWidthControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        placeButton(centerLevelPartsButton);
+        fixedGap.removeFromTop(area);
+        levelPeakHighControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        levelPeakLowControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        levelLufsHighControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        levelLufsLowControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        placeButton(levelPeakVisibleButton);
+        fixedGap.removeFromTop(area);
+        placeButton(levelLoudnessVisibleButton);
+        fixedGap.removeFromTop(area);
+        placeButton(levelHistoryVisibleButton);
+        fixedGap.removeFromTop(area);
+        auto historyButtons = area.removeFromTop(rowHeight);
+        const auto historyButtonWidth = std::max(0,
+            (historyButtons.getWidth() - fixedGap.pixels() * 2) / 3);
+        levelHistoryMomentaryButton.setBounds(historyButtons.removeFromLeft(historyButtonWidth));
+        fixedGap.removeFromLeft(historyButtons);
+        levelHistoryShortTermButton.setBounds(historyButtons.removeFromLeft(historyButtonWidth));
+        fixedGap.removeFromLeft(historyButtons);
+        levelHistoryIntegratedButton.setBounds(historyButtons);
+        fixedGap.removeFromTop(area);
+        placeButton(levelHistoryZoomButton);
+        return;
+    }
 
     if (frequencyPage)
     {
@@ -3222,29 +4506,31 @@ void AnaCrossoverSettingsComponent::resized()
         fixedGap.removeFromTop(area);
         frequencyAverageTimeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
-        frequencyFilledDisplayButton.setBounds(area.removeFromTop(rowHeight));
+        frequencySmoothingControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
-        frequencySecondSpectrumButton.setBounds(area.removeFromTop(rowHeight));
+        controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
+        fixedGap.removeFromTop(area);
+        placeButton(frequencyFilledDisplayButton);
+        fixedGap.removeFromTop(area);
+        placeButton(frequencySecondSpectrumButton);
         fixedGap.removeFromTop(area);
         frequencyFirstSpectrumTypeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
         frequencySecondSpectrumTypeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
-        frequencyAntiAliasButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(frequencyAntiAliasButton);
         fixedGap.removeFromTop(area);
         frequencySlopeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
-        frequencyHostClearButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(frequencyHostClearButton);
         fixedGap.removeFromTop(area);
-        controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
+        placeButton(frequencyRangesButton);
         fixedGap.removeFromTop(area);
-        frequencyRangesButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(frequencyCursorButton);
         fixedGap.removeFromTop(area);
-        frequencyCursorButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(frequencyMonitorControlsButton);
         fixedGap.removeFromTop(area);
-        frequencyMonitorControlsButton.setBounds(area.removeFromTop(rowHeight));
-        fixedGap.removeFromTop(area);
-        frequencyZoomControlsButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(frequencyZoomControlsButton);
         return;
     }
 
@@ -3258,28 +4544,29 @@ void AnaCrossoverSettingsComponent::resized()
         fixedGap.removeFromTop(area);
         correlationSmoothingControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
-        correlationFilledDisplayButton.setBounds(area.removeFromTop(rowHeight));
+        controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
         fixedGap.removeFromTop(area);
-        correlationSecondSpectrumButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(correlationFilledDisplayButton);
+        fixedGap.removeFromTop(area);
+        placeButton(correlationSecondSpectrumButton);
         fixedGap.removeFromTop(area);
         correlationFirstSpectrumTypeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
         correlationSecondSpectrumTypeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
-        correlationHostClearButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(correlationHostClearButton);
         fixedGap.removeFromTop(area);
-        controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
+        placeButton(correlationRangesButton);
         fixedGap.removeFromTop(area);
-        correlationRangesButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(correlationCursorButton);
         fixedGap.removeFromTop(area);
-        correlationCursorButton.setBounds(area.removeFromTop(rowHeight));
-        fixedGap.removeFromTop(area);
-        correlationZoomControlsButton.setBounds(area.removeFromTop(rowHeight));
+        placeButton(correlationZoomControlsButton);
         return;
     }
 
     auto crossoverButtons = area.removeFromTop(rowHeight);
-    const auto crossoverButtonWidth = std::max(0, crossoverButtons.getWidth() - fixedGap.pixels()) / 2;
+    const auto crossoverButtonWidth = std::max(0,
+        (crossoverButtons.getWidth() - fixedGap.pixels()) / 2);
     addCrossoverButton.setBounds(crossoverButtons.removeFromLeft(crossoverButtonWidth));
     fixedGap.removeFromLeft(crossoverButtons);
     removeCrossoverButton.setBounds(crossoverButtons);
@@ -3291,23 +4578,6 @@ void AnaCrossoverSettingsComponent::resized()
         fixedGap.removeFromTop(area);
     }
 
-    fixedGap.removeFromTop(area);
-    equalHeightButton.setBounds(area.removeFromTop(rowHeight));
-    fixedGap.removeFromTop(area);
-    styleControl.setBounds(area.removeFromTop(rowHeight));
-    fixedGap.removeFromTop(area);
-    opacityControl.setBounds(area.removeFromTop(rowHeight));
-    fixedGap.removeFromTop(area);
-
-    controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
-    fixedGap.removeFromTop(area);
-    zoomControlsButton.setBounds(area.removeFromTop(rowHeight));
-    fixedGap.removeFromTop(area);
-    monitorControlsButton.setBounds(area.removeFromTop(rowHeight));
-    fixedGap.removeFromTop(area);
-    otherControlsButton.setBounds(area.removeFromTop(rowHeight));
-    fixedGap.removeFromTop(area);
-
     realtimeHeadingLabel.setBounds(area.removeFromTop(headingHeight));
     fixedGap.removeFromTop(area);
     const auto timeBounds = area.removeFromTop(rowHeight);
@@ -3315,9 +4585,24 @@ void AnaCrossoverSettingsComponent::resized()
     timeNoteControl.setBounds(timeBounds);
     fixedGap.removeFromTop(area);
     timeBaseControl.setBounds(area.removeFromTop(rowHeight));
+    fixedGap.removeFromTop(area);
+
+    controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
+    fixedGap.removeFromTop(area);
+    placeButton(equalHeightButton);
+    fixedGap.removeFromTop(area);
+    styleControl.setBounds(area.removeFromTop(rowHeight));
+    fixedGap.removeFromTop(area);
+    opacityControl.setBounds(area.removeFromTop(rowHeight));
+    fixedGap.removeFromTop(area);
+    placeButton(zoomControlsButton);
+    fixedGap.removeFromTop(area);
+    placeButton(monitorControlsButton);
+    fixedGap.removeFromTop(area);
+    placeButton(otherControlsButton);
 }
 
-void AnaCrossoverSettingsComponent::mouseDown(const juce::MouseEvent& event)
+void SettingsPanel::mouseDown(const juce::MouseEvent& event)
 {
     if (event.originalComponent != &settingsContent && event.originalComponent != this)
         return;
@@ -3326,13 +4611,13 @@ void AnaCrossoverSettingsComponent::mouseDown(const juce::MouseEvent& event)
     clearFocusedParameterControl();
 }
 
-void AnaCrossoverSettingsComponent::timerCallback()
+void SettingsPanel::timerCallback()
 {
     refreshExternalState();
     syncFocusedParameterControl();
 }
 
-void AnaCrossoverSettingsComponent::changeActiveSplitCount(const int delta)
+void SettingsPanel::changeActiveSplitCount(const int delta)
 {
     const auto currentCount = static_cast<int>(processor.getActiveSplitCount());
     const auto newCount = juce::jlimit(0, static_cast<int>(crossoverControls.size()), currentCount + delta);
@@ -3348,7 +4633,7 @@ void AnaCrossoverSettingsComponent::changeActiveSplitCount(const int delta)
     refreshExternalState();
 }
 
-void AnaCrossoverSettingsComponent::constrainFrequency(const size_t crossoverIndex)
+void SettingsPanel::constrainFrequency(const size_t crossoverIndex)
 {
     if (constrainingFrequency || crossoverIndex >= processor.getActiveSplitCount())
         return;
@@ -3369,11 +4654,13 @@ void AnaCrossoverSettingsComponent::constrainFrequency(const size_t crossoverInd
                     juce::sendNotificationSync);
 }
 
-void AnaCrossoverSettingsComponent::refreshExternalState()
+void SettingsPanel::refreshExternalState()
 {
-    const auto scopePage = analyzerPage == AnaAnalyzerPage::scope;
-    const auto frequencyPage = analyzerPage == AnaAnalyzerPage::frequency;
-    const auto correlationPage = analyzerPage == AnaAnalyzerPage::correlation;
+    const auto scopePage = analyzerPage == AnalyzerPage::scope;
+    const auto frequencyPage = analyzerPage == AnalyzerPage::frequency;
+    const auto correlationPage = analyzerPage == AnalyzerPage::correlation;
+    const auto levelPage = analyzerPage == AnalyzerPage::level;
+    controlsVisibilityHeadingLabel.setVisible(scopePage || frequencyPage || correlationPage || levelPage);
     for (auto* component : std::array<juce::Component*, 11> {
              &addCrossoverButton, &removeCrossoverButton, &equalHeightButton,
              &styleControl, &opacityControl, &zoomControlsButton,
@@ -3384,8 +4671,9 @@ void AnaCrossoverSettingsComponent::refreshExternalState()
         control->setVisible(scopePage);
     realtimeHeadingLabel.setVisible(scopePage);
 
-    for (auto* component : std::array<juce::Component*, 14> {
+    for (auto* component : std::array<juce::Component*, 15> {
              &frequencyBlockSizeControl, &frequencyOverlapControl, &frequencyAverageTimeControl,
+             &frequencySmoothingControl,
              &frequencyFilledDisplayButton, &frequencySecondSpectrumButton,
              &frequencyFirstSpectrumTypeControl, &frequencySecondSpectrumTypeControl,
              &frequencyAntiAliasButton, &frequencySlopeControl, &frequencyHostClearButton,
@@ -3401,6 +4689,17 @@ void AnaCrossoverSettingsComponent::refreshExternalState()
              &correlationHostClearButton, &correlationRangesButton,
              &correlationCursorButton, &correlationZoomControlsButton })
         component->setVisible(correlationPage);
+
+    for (auto* component : std::array<juce::Component*, 15> {
+             &levelMeterWidthControl, &levelPeakHighControl, &levelPeakLowControl,
+             &levelRmsWindowControl, &levelPeakHoldTimeControl,
+             &levelLufsHighControl, &levelLufsLowControl,
+             &levelHostResetButton, &levelPeakVisibleButton,
+             &levelLoudnessVisibleButton, &levelHistoryVisibleButton,
+             &levelHistoryMomentaryButton, &levelHistoryShortTermButton,
+             &levelHistoryIntegratedButton, &levelHistoryZoomButton })
+        component->setVisible(levelPage);
+    centerLevelPartsButton.setVisible(levelPage);
 
     if (! scopePage)
         return;
@@ -3427,7 +4726,7 @@ void AnaCrossoverSettingsComponent::refreshExternalState()
     }
 }
 
-void AnaCrossoverSettingsComponent::focusParameterControl(AnaParameterControl& control)
+void SettingsPanel::focusParameterControl(ParameterControl& control)
 {
     if (! control.isInteractionEnabled() || ! control.supportsFocusedPotentiometer())
         return;
@@ -3442,7 +4741,7 @@ void AnaCrossoverSettingsComponent::focusParameterControl(AnaParameterControl& c
     syncFocusedParameterControl();
 }
 
-void AnaCrossoverSettingsComponent::clearFocusedParameterControl()
+void SettingsPanel::clearFocusedParameterControl()
 {
     if (focusedParameterTarget != nullptr)
         focusedParameterTarget->setSelected(false);
@@ -3451,7 +4750,7 @@ void AnaCrossoverSettingsComponent::clearFocusedParameterControl()
     focusedParameterControl.setEnabled(false);
 }
 
-void AnaCrossoverSettingsComponent::dismissParameterEditors()
+void SettingsPanel::dismissParameterEditors()
 {
     styleControl.commitPendingEditor();
     opacityControl.commitPendingEditor();
@@ -3461,6 +4760,7 @@ void AnaCrossoverSettingsComponent::dismissParameterEditors()
     frequencyBlockSizeControl.commitPendingEditor();
     frequencyOverlapControl.commitPendingEditor();
     frequencyAverageTimeControl.commitPendingEditor();
+    frequencySmoothingControl.commitPendingEditor();
     frequencyFirstSpectrumTypeControl.commitPendingEditor();
     frequencySecondSpectrumTypeControl.commitPendingEditor();
     frequencySlopeControl.commitPendingEditor();
@@ -3468,12 +4768,19 @@ void AnaCrossoverSettingsComponent::dismissParameterEditors()
     correlationOverlapControl.commitPendingEditor();
     correlationAverageTimeControl.commitPendingEditor();
     correlationSmoothingControl.commitPendingEditor();
+    levelMeterWidthControl.commitPendingEditor();
+    levelPeakHighControl.commitPendingEditor();
+    levelPeakLowControl.commitPendingEditor();
+    levelRmsWindowControl.commitPendingEditor();
+    levelPeakHoldTimeControl.commitPendingEditor();
+    levelLufsHighControl.commitPendingEditor();
+    levelLufsLowControl.commitPendingEditor();
 
     for (auto& control : crossoverControls)
         control->commitPendingEditor();
 }
 
-void AnaCrossoverSettingsComponent::syncFocusedParameterControl()
+void SettingsPanel::syncFocusedParameterControl()
 {
     if (focusedParameterTarget == nullptr
         || ! focusedParameterTarget->isInteractionEnabled()
@@ -3490,33 +4797,50 @@ void AnaCrossoverSettingsComponent::syncFocusedParameterControl()
     }
 }
 
-AnaAudioProcessorEditor::AnaAudioProcessorEditor(AnaAudioProcessor& processorRef)
+PluginEditor::PluginEditor(PluginProcessor& processorRef)
     : AudioProcessorEditor(&processorRef)
 #if JucePlugin_Enable_ARA
     , AudioProcessorEditorARAExtension(&processorRef)
 #endif
     , audioProcessor(processorRef),
       scopeDisplay(processorRef),
-      crossoverSettings(processorRef),
+      settingsComponent(processorRef),
       frequencyDisplay(processorRef),
-      correlationDisplay(processorRef)
+      correlationDisplay(processorRef),
+      levelDisplay(processorRef)
 {
-    for (auto* component : std::array<juce::Component*, 17> {
-             &scopeDisplay, &crossoverSettings, &frequencyDisplay, &correlationDisplay,
-             &offlineUpdateLabel, &frequencyButton, &phaseButton,
-             &scopeButton, &settingsButton, &realtimeButton, &offlineButton, &sourceButton,
-             &takeButton, &refreshButton, &fullSourceButton, &clearButton, &freezeButton })
+    for (auto* component : std::array<juce::Component*, 21> {
+             &scopeDisplay, &settingsComponent, &frequencyDisplay, &correlationDisplay, &levelDisplay,
+             &offlineUpdateLabel, &frequencyButton, &correlationButton,
+             &levelButton, &scopeButton, &settingsButton, &realtimeButton, &offlineButton, &sourceButton,
+             &takeButton, &refreshButton, &fullSourceButton, &clearButton, &freezeButton,
+             &controlsButton, &mixolveButton })
         addAndMakeVisible(*component);
 
-    frequencyButton.onClick = [this] { showAnalyzerPage(AnaAnalyzerPage::frequency, false); };
-    phaseButton.onClick = [this] { showAnalyzerPage(AnaAnalyzerPage::correlation, false); };
-    scopeButton.onClick = [this] { showAnalyzerPage(AnaAnalyzerPage::scope, false); };
+    frequencyButton.onClick = [this] { showAnalyzerPage(AnalyzerPage::frequency, showingAnalyzerSettings); };
+    correlationButton.onClick = [this] { showAnalyzerPage(AnalyzerPage::correlation, showingAnalyzerSettings); };
+    levelButton.onClick = [this] { showAnalyzerPage(AnalyzerPage::level, showingAnalyzerSettings); };
+    scopeButton.onClick = [this] { showAnalyzerPage(AnalyzerPage::scope, showingAnalyzerSettings); };
     settingsButton.onClick = [this] { showAnalyzerSettings(! showingAnalyzerSettings); };
+    controlsButton.setClickingTogglesState(true);
+    controlsButton.setToggleState(false, juce::dontSendNotification);
+    controlsButton.onClick = [this]
+    {
+        mainControlsVisible = controlsButton.getToggleState();
+        resized();
+    };
+    controlsButton.setTooltip("CONTROLS");
+    mixolveButton.setTooltip("MIXOLVE");
+    settingsButton.setTooltip("SETTINGS");
+    freezeButton.setTooltip("FREEZE");
+    refreshButton.setTooltip("REFRESH");
+    mixolveButton.onClick = [this] { showAboutPopup(); };
 
     offlineUpdateLabel.setFont(ana::ui::makeFont());
     offlineUpdateLabel.setJustificationType(juce::Justification::centred);
+    offlineUpdateLabel.setMinimumHorizontalScale(1.0f);
     offlineUpdateLabel.setColour(juce::Label::textColourId, ana::ui::white);
-    offlineUpdateLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+    offlineUpdateLabel.setColour(juce::Label::backgroundColourId, ana::ui::field);
     offlineUpdateLabel.setColour(juce::Label::outlineColourId, ana::ui::grey500);
     offlineUpdateLabel.setBorderSize(
         juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
@@ -3530,9 +4854,20 @@ AnaAudioProcessorEditor::AnaAudioProcessorEditor(AnaAudioProcessor& processorRef
     {
         offlineUpdateLabel.setText(status, juce::dontSendNotification);
     };
-    crossoverSettings.onDisplaySettingsChanged = [this] { scopeDisplay.refreshDisplaySettings(); };
-    crossoverSettings.onEqualBandHeights = [this] { scopeDisplay.equalizeBandHeights(); };
-    crossoverSettings.onChoiceRequested = [this] (AnaParameterControl& control)
+    settingsComponent.onDisplaySettingsChanged = [this]
+    {
+        scopeDisplay.refreshDisplaySettings();
+        frequencyDisplay.resized();
+        frequencyDisplay.repaint();
+        correlationDisplay.resized();
+        correlationDisplay.repaint();
+        levelDisplay.resized();
+        if (audioProcessor.isOfflineMode())
+            scopeDisplay.refreshWaveform();
+    };
+    settingsComponent.onEqualBandHeights = [this] { scopeDisplay.equalizeBandHeights(); };
+    settingsComponent.onCenterLevelParts = [this] { levelDisplay.centerParts(); };
+    settingsComponent.onChoiceRequested = [this] (ParameterControl& control)
     {
         showChoicePrompt(control);
     };
@@ -3540,10 +4875,12 @@ AnaAudioProcessorEditor::AnaAudioProcessorEditor(AnaAudioProcessor& processorRef
     freezeButton.setClickingTogglesState(true);
     freezeButton.onClick = [this]
     {
-        if (activePage == AnaAnalyzerPage::frequency)
+        if (activePage == AnalyzerPage::frequency)
             audioProcessor.getFrequencySpectrum().setFrozen(freezeButton.getToggleState());
-        else if (activePage == AnaAnalyzerPage::correlation)
+        else if (activePage == AnalyzerPage::correlation)
             audioProcessor.getCorrelationSpectrum().setFrozen(freezeButton.getToggleState());
+        else if (activePage == AnalyzerPage::level)
+            audioProcessor.getLevelMeter().setFrozen(freezeButton.getToggleState());
         else
         {
             scopeFrozen = freezeButton.getToggleState();
@@ -3559,10 +4896,12 @@ AnaAudioProcessorEditor::AnaAudioProcessorEditor(AnaAudioProcessor& processorRef
     };
     clearButton.onClick = [this]
     {
-        if (activePage == AnaAnalyzerPage::frequency)
+        if (activePage == AnalyzerPage::frequency)
             audioProcessor.clearFrequencySpectrum();
-        else if (activePage == AnaAnalyzerPage::correlation)
+        else if (activePage == AnalyzerPage::correlation)
             audioProcessor.clearCorrelationSpectrum();
+        else if (activePage == AnalyzerPage::level)
+            audioProcessor.clearLevelMeter();
         else
             scopeDisplay.clearHistory();
     };
@@ -3573,12 +4912,18 @@ AnaAudioProcessorEditor::AnaAudioProcessorEditor(AnaAudioProcessor& processorRef
     sourceButton.onClick = [this] { showOfflineSourcePrompt(); };
     takeButton.onClick = [this] { showOfflineTakePrompt(); };
 
-    showAnalyzerPage(static_cast<AnaAnalyzerPage>(audioProcessor.getAnalyzerPageState()),
+    showAnalyzerPage(static_cast<AnalyzerPage>(audioProcessor.getAnalyzerPageState()),
                      false);
     timerCallback();
     startTimerHz(15);
     setResizable(true, false);
     setResizeLimits(minimumEditorWidth, minimumEditorHeight, maximumEditorSize, maximumEditorSize);
+    rightEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
+        this, getConstrainer(), juce::ResizableEdgeComponent::rightEdge);
+    bottomEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
+        this, getConstrainer(), juce::ResizableEdgeComponent::bottomEdge);
+    addAndMakeVisible(*rightEdgeResizer);
+    addAndMakeVisible(*bottomEdgeResizer);
     const auto savedSize = audioProcessor.getLastEditorSize();
     setSize(juce::jlimit(minimumEditorWidth, maximumEditorSize,
                          savedSize.x > 0 ? savedSize.x : defaultEditorWidth),
@@ -3586,18 +4931,18 @@ AnaAudioProcessorEditor::AnaAudioProcessorEditor(AnaAudioProcessor& processorRef
                          savedSize.y > 0 ? savedSize.y : defaultEditorHeight));
 }
 
-AnaAudioProcessorEditor::~AnaAudioProcessorEditor()
+PluginEditor::~PluginEditor()
 {
     if (getWidth() > 0 && getHeight() > 0)
         audioProcessor.setLastEditorSize(getWidth(), getHeight());
 }
 
-void AnaAudioProcessorEditor::showAnalyzerSettings(const bool shouldShowSettings)
+void PluginEditor::showAnalyzerSettings(const bool shouldShowSettings)
 {
     showAnalyzerPage(activePage, shouldShowSettings);
 }
 
-void AnaAudioProcessorEditor::showAnalyzerPage(const AnaAnalyzerPage page,
+void PluginEditor::showAnalyzerPage(const AnalyzerPage page,
                                                const bool shouldShowSettings)
 {
     if (! shouldShowSettings)
@@ -3605,32 +4950,37 @@ void AnaAudioProcessorEditor::showAnalyzerPage(const AnaAnalyzerPage page,
 
     activePage = page;
     audioProcessor.setAnalyzerPageState(static_cast<int>(page));
+    scopeButton.setToggleState(page == AnalyzerPage::scope, juce::dontSendNotification);
+    frequencyButton.setToggleState(page == AnalyzerPage::frequency, juce::dontSendNotification);
+    correlationButton.setToggleState(page == AnalyzerPage::correlation, juce::dontSendNotification);
+    levelButton.setToggleState(page == AnalyzerPage::level, juce::dontSendNotification);
     showingAnalyzerSettings = shouldShowSettings;
-    scopeButton.setToggleState(page == AnaAnalyzerPage::scope, juce::dontSendNotification);
-    frequencyButton.setToggleState(page == AnaAnalyzerPage::frequency, juce::dontSendNotification);
-    phaseButton.setToggleState(page == AnaAnalyzerPage::correlation, juce::dontSendNotification);
-    settingsButton.setToggleState(shouldShowSettings, juce::dontSendNotification);
-    scopeDisplay.setVisible(page == AnaAnalyzerPage::scope);
-    frequencyDisplay.setVisible(page == AnaAnalyzerPage::frequency);
-    correlationDisplay.setVisible(page == AnaAnalyzerPage::correlation);
-    fullSourceButton.setEnabled(page == AnaAnalyzerPage::scope);
-    freezeButton.setToggleState(page == AnaAnalyzerPage::frequency
+    settingsButton.setEnabled(true);
+    settingsButton.setToggleState(showingAnalyzerSettings, juce::dontSendNotification);
+    scopeDisplay.setVisible(page == AnalyzerPage::scope);
+    frequencyDisplay.setVisible(page == AnalyzerPage::frequency);
+    correlationDisplay.setVisible(page == AnalyzerPage::correlation);
+    levelDisplay.setVisible(page == AnalyzerPage::level);
+    fullSourceButton.setEnabled(page == AnalyzerPage::scope);
+    freezeButton.setToggleState(page == AnalyzerPage::frequency
                                     ? audioProcessor.getFrequencySpectrum().isFrozen()
-                                    : page == AnaAnalyzerPage::correlation
+                                    : page == AnalyzerPage::correlation
                                         ? audioProcessor.getCorrelationSpectrum().isFrozen()
+                                    : page == AnalyzerPage::level
+                                        ? audioProcessor.getLevelMeter().isFrozen()
                                     : scopeFrozen,
                                 juce::dontSendNotification);
-    crossoverSettings.setAnalyzerPage(page);
-    crossoverSettings.setVisible(shouldShowSettings);
+    settingsComponent.setAnalyzerPage(page);
+    settingsComponent.setVisible(showingAnalyzerSettings);
 
-    if (shouldShowSettings)
-        crossoverSettings.toFront(false);
+    if (showingAnalyzerSettings)
+        settingsComponent.toFront(false);
 
     resized();
     repaint();
 }
 
-void AnaAudioProcessorEditor::showChoicePrompt(AnaParameterControl& control)
+void PluginEditor::showChoicePrompt(ParameterControl& control)
 {
     const auto choices = control.getChoiceNames();
 
@@ -3638,7 +4988,7 @@ void AnaAudioProcessorEditor::showChoicePrompt(AnaParameterControl& control)
         return;
 
     const auto anchorBounds = getLocalArea(&control, control.getValueBounds());
-    juce::Component::SafePointer<AnaParameterControl> safeControl(&control);
+    juce::Component::SafePointer<ParameterControl> safeControl(&control);
     showChoicePrompt(anchorBounds, choices, control.getSelectedChoiceIndex(),
         [safeControl] (const int selectedIndex)
         {
@@ -3647,7 +4997,7 @@ void AnaAudioProcessorEditor::showChoicePrompt(AnaParameterControl& control)
         });
 }
 
-void AnaAudioProcessorEditor::showChoicePrompt(
+void PluginEditor::showChoicePrompt(
     const juce::Rectangle<int> anchorBounds,
     juce::StringArray choices,
     const int selectedIndex,
@@ -3657,7 +5007,7 @@ void AnaAudioProcessorEditor::showChoicePrompt(
         return;
 
     dismissChoicePrompt();
-    choicePrompt = std::make_unique<AnaChoicePrompt>(
+    choicePrompt = std::make_unique<ChoicePopup>(
         anchorBounds,
         std::move(choices),
         selectedIndex,
@@ -3668,7 +5018,7 @@ void AnaAudioProcessorEditor::showChoicePrompt(
     choicePrompt->toFront(true);
 }
 
-void AnaAudioProcessorEditor::showOfflineSourcePrompt()
+void PluginEditor::showOfflineSourcePrompt()
 {
     refreshOfflineSelectionButtons();
     juce::StringArray names { "ALL" };
@@ -3702,7 +5052,7 @@ void AnaAudioProcessorEditor::showOfflineSourcePrompt()
                      });
 }
 
-void AnaAudioProcessorEditor::showOfflineTakePrompt()
+void PluginEditor::showOfflineTakePrompt()
 {
     refreshOfflineSelectionButtons();
     juce::StringArray names;
@@ -3740,9 +5090,17 @@ void AnaAudioProcessorEditor::showOfflineTakePrompt()
                      });
 }
 
-void AnaAudioProcessorEditor::refreshOfflineSelectionButtons()
+void PluginEditor::refreshOfflineSelectionButtons()
 {
-    offlineSourceTakeChoices = audioProcessor.getOfflineSourceTakeChoices();
+    auto latestChoices = audioProcessor.getOfflineSourceTakeChoices();
+    const auto choicesChanged = latestChoices != offlineSourceTakeChoices;
+    offlineSourceTakeChoices = std::move(latestChoices);
+    if (choicesChanged && audioProcessor.isOfflineMode() && ! offlineSourceTakeChoices.empty())
+    {
+        offlineUpdateStatusMinimumEndMilliseconds =
+            juce::Time::getMillisecondCounterHiRes() + 250.0;
+        offlineUpdateLabel.setText("UPDATING 00", juce::dontSendNotification);
+    }
     auto sourceId = audioProcessor.getSelectedOfflineSourceId();
     auto takeId = audioProcessor.getSelectedOfflineTakeId();
     auto selectedTakeNumber = 0;
@@ -3803,12 +5161,34 @@ void AnaAudioProcessorEditor::refreshOfflineSelectionButtons()
         : "TAKE: NONE");
 }
 
-void AnaAudioProcessorEditor::dismissChoicePrompt()
+void PluginEditor::dismissChoicePrompt()
 {
     choicePrompt.reset();
 }
 
-void AnaAudioProcessorEditor::timerCallback()
+void PluginEditor::showAboutPopup()
+{
+    dismissChoicePrompt();
+    dismissAboutPopup();
+    aboutPopup = std::make_unique<AboutPopup>(
+        [safeEditor = juce::Component::SafePointer<PluginEditor>(this)]
+        {
+            if (safeEditor != nullptr)
+                safeEditor->dismissAboutPopup();
+        });
+    addAndMakeVisible(*aboutPopup);
+    aboutPopup->setBounds(getLocalBounds());
+    aboutPopup->toFront(true);
+    aboutPopup->grabKeyboardFocus();
+}
+
+void PluginEditor::dismissAboutPopup()
+{
+    aboutPopup.reset();
+    repaint();
+}
+
+void PluginEditor::timerCallback()
 {
     const auto offline = audioProcessor.isOfflineMode();
     realtimeButton.setToggleState(! offline, juce::dontSendNotification);
@@ -3819,19 +5199,39 @@ void AnaAudioProcessorEditor::timerCallback()
     if (offline && offlineSourceTakeChoices.empty())
         offlineUpdateLabel.setText("NO FILES", juce::dontSendNotification);
     else if (offline && offlineUpdateLabel.getText() == "NO FILES")
-        offlineUpdateLabel.setText("UPDATING...", juce::dontSendNotification);
+        offlineUpdateLabel.setText("UPDATING 00", juce::dontSendNotification);
     else if (! offline && offlineUpdateLabel.getText() == "NO FILES")
         offlineUpdateLabel.setText({}, juce::dontSendNotification);
+    if (offline && ! offlineSourceTakeChoices.empty())
+    {
+        const auto progress = juce::jlimit(0, 100, audioProcessor.getOfflineAnalysisProgress());
+        const auto minimumStatusTimeActive = juce::Time::getMillisecondCounterHiRes()
+            < offlineUpdateStatusMinimumEndMilliseconds;
+        if (progress < 100 || minimumStatusTimeActive)
+        {
+            const auto displayedProgress = progress >= 100 ? 99 : progress;
+            offlineUpdateLabel.setText(
+                "UPDATING " + juce::String(displayedProgress).paddedLeft('0', 2),
+                juce::dontSendNotification);
+        }
+        else if (offlineUpdateLabel.getText().startsWith("UPDATING"))
+        {
+            offlineUpdateLabel.setText("UPDATED", juce::dontSendNotification);
+        }
+    }
     sourceButton.setEnabled(offline && sourceButton.isEnabled());
     takeButton.setEnabled(offline && takeButton.isEnabled());
     refreshButton.setEnabled(offline);
     clearButton.setEnabled(! offline);
     freezeButton.setEnabled(! offline);
-    fullSourceButton.setEnabled(activePage == AnaAnalyzerPage::scope);
-    freezeButton.setToggleState(activePage == AnaAnalyzerPage::frequency
+    fullSourceButton.setEnabled(activePage == AnalyzerPage::scope);
+    settingsButton.setEnabled(true);
+    freezeButton.setToggleState(activePage == AnalyzerPage::frequency
                                     ? audioProcessor.getFrequencySpectrum().isFrozen()
-                                    : activePage == AnaAnalyzerPage::correlation
+                                    : activePage == AnalyzerPage::correlation
                                         ? audioProcessor.getCorrelationSpectrum().isFrozen()
+                                    : activePage == AnalyzerPage::level
+                                        ? audioProcessor.getLevelMeter().isFrozen()
                                     : scopeFrozen,
                                 juce::dontSendNotification);
 
@@ -3843,12 +5243,12 @@ void AnaAudioProcessorEditor::timerCallback()
     }
 }
 
-void AnaAudioProcessorEditor::paint(juce::Graphics& graphics)
+void PluginEditor::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(juce::Colours::black);
 }
 
-void AnaAudioProcessorEditor::resized()
+void PluginEditor::resized()
 {
     if (getWidth() > 0 && getHeight() > 0)
     {
@@ -3859,46 +5259,99 @@ void AnaAudioProcessorEditor::resized()
 
     auto area = getLocalBounds().reduced(ana::ui::gap.pixels());
     auto controlsRow = area.removeFromTop(ana::ui::controlHeight);
-    auto modeArea = controlsRow.removeFromLeft(
-        std::min(225, juce::roundToInt(static_cast<float>(controlsRow.getWidth()) * 0.34f)));
-    const auto modeButtonWidth = std::max(0, modeArea.getWidth() - ana::ui::gap.pixels() * 2) / 3;
-    frequencyButton.setBounds(modeArea.removeFromLeft(modeButtonWidth));
-    ana::ui::gap.removeFromLeft(modeArea);
-    phaseButton.setBounds(modeArea.removeFromLeft(modeButtonWidth));
-    ana::ui::gap.removeFromLeft(modeArea);
-    scopeButton.setBounds(modeArea);
+    const std::array<ControlButton*, 4> modeButtons {
+        &frequencyButton, &correlationButton, &levelButton, &scopeButton
+    };
+    for (auto* button : modeButtons)
+    {
+        button->setVisible(true);
+        button->setBounds(controlsRow.removeFromLeft(
+            std::min(button->getPreferredWidth(), controlsRow.getWidth())));
+        if (button != modeButtons.back())
+            ana::ui::gap.removeFromLeft(controlsRow);
+    }
+    ana::ui::gap.removeFromLeft(controlsRow);
+    controlsButton.setBounds(controlsRow.removeFromLeft(
+        std::min(controlsButton.getPreferredWidth(), controlsRow.getWidth())));
 
+    mixolveButton.setVisible(true);
+    mixolveButton.setBounds(controlsRow.removeFromRight(
+        std::min(mixolveButton.getPreferredWidth(), controlsRow.getWidth())));
+    ana::ui::gap.removeFromRight(controlsRow);
+    settingsButton.setVisible(true);
+    settingsButton.setBounds(controlsRow.removeFromRight(
+        std::min(settingsButton.getPreferredWidth(), controlsRow.getWidth())));
+    ana::ui::gap.removeFromRight(controlsRow);
     ana::ui::gap.removeFromLeft(controlsRow);
 
-    ana::ui::FixedGapRow actionRow(controlsRow);
-    realtimeButton.setBounds(actionRow.takeLeft(86));
-    clearButton.setBounds(actionRow.takeLeft(60));
-    freezeButton.setBounds(actionRow.takeLeft(72));
-    fullSourceButton.setBounds(actionRow.takeLeft(60));
-    offlineButton.setBounds(actionRow.takeLeft(76));
-    sourceButton.setBounds(actionRow.takeLeft(76));
-    takeButton.setBounds(actionRow.takeLeft(68));
-    refreshButton.setBounds(actionRow.takeLeft(76));
+    const std::array<juce::Component*, 9> collapsibleControls {
+        &realtimeButton, &clearButton, &freezeButton, &fullSourceButton,
+        &offlineButton, &sourceButton, &takeButton, &refreshButton, &offlineUpdateLabel
+    };
+    const std::array<int, 9> controlWidths {
+        realtimeButton.getPreferredWidth(), clearButton.getPreferredWidth(),
+        freezeButton.getPreferredWidth(), fullSourceButton.getPreferredWidth(),
+        offlineButton.getPreferredWidth(), sourceButton.getPreferredWidth(),
+        takeButton.getPreferredWidth(), refreshButton.getPreferredWidth(),
+        ana::ui::textControlWidth(11)
+    };
+    auto keepPlacing = mainControlsVisible;
+    auto placedAny = false;
+    for (size_t index = 0; index < collapsibleControls.size(); ++index)
+    {
+        auto* component = collapsibleControls[index];
+        const auto requiredWidth = controlWidths[index]
+            + (placedAny ? ana::ui::gap.pixels() : 0);
+        if (! keepPlacing || controlsRow.getWidth() < requiredWidth)
+        {
+            keepPlacing = false;
+            component->setVisible(false);
+            continue;
+        }
 
-    const auto updateWidth = std::max(0, actionRow.remaining().getWidth() - 95 - ana::ui::gap.pixels());
-    offlineUpdateLabel.setBounds(actionRow.takeLeft(updateWidth));
-    settingsButton.setBounds(actionRow.remaining());
+        if (placedAny)
+            ana::ui::gap.removeFromLeft(controlsRow);
+        component->setVisible(true);
+        component->setBounds(controlsRow.removeFromLeft(controlWidths[index]));
+        placedAny = true;
+    }
 
     ana::ui::gap.removeFromTop(area);
     scopeDisplay.setBounds(area);
     frequencyDisplay.setBounds(area);
     correlationDisplay.setBounds(area);
+    levelDisplay.setBounds(area);
 
     const auto popupWidth = std::min(area.getWidth(),
         std::min(420, std::max(320, juce::roundToInt(static_cast<float>(area.getWidth()) * 0.42f))));
-    crossoverSettings.setBounds(area.removeFromRight(popupWidth));
+    settingsComponent.setBounds(area.removeFromRight(popupWidth));
 
     if (showingAnalyzerSettings)
-        crossoverSettings.toFront(false);
+        settingsComponent.toFront(false);
+
+    if (rightEdgeResizer != nullptr)
+    {
+        rightEdgeResizer->setBounds(getWidth() - ana::ui::gap.pixels(), 0,
+                                    ana::ui::gap.pixels(),
+                                    std::max(0, getHeight() - ana::ui::gap.pixels()));
+        rightEdgeResizer->toFront(false);
+    }
+    if (bottomEdgeResizer != nullptr)
+    {
+        bottomEdgeResizer->setBounds(0, getHeight() - ana::ui::gap.pixels(),
+                                     std::max(0, getWidth() - ana::ui::gap.pixels()),
+                                     ana::ui::gap.pixels());
+        bottomEdgeResizer->toFront(false);
+    }
 
     if (choicePrompt != nullptr)
     {
         choicePrompt->setBounds(getLocalBounds());
         choicePrompt->toFront(true);
+    }
+    if (aboutPopup != nullptr)
+    {
+        aboutPopup->setBounds(getLocalBounds());
+        aboutPopup->toFront(true);
     }
 }

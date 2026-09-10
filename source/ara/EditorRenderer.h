@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AraPlaybackRenderer.h"
+#include "PlaybackRenderer.h"
 
 #if JucePlugin_Enable_ARA
 
@@ -19,21 +19,10 @@ public:
                    ProcessingLock& processingLock);
     ~EditorRenderer() override;
 
-    void requestOfflineAnalysis(size_t activeSplitCount,
-                                const dsp::Crossover::SplitFrequencies& frequencies,
-                                size_t columnCount,
-                                int frequencyBlockSize,
-                                float frequencyOverlap,
-                                float frequencyAveragingTimeMilliseconds,
-                                int correlationBlockSize,
-                                float correlationOverlap,
-                                float correlationAveragingTimeMilliseconds,
-                                const juce::String& sourceId,
-                                const juce::String& takeId,
-                                const std::vector<OfflineSourceTakeChoice>& sourceTakeChoices,
-                                bool forceRefresh = false);
-    std::shared_ptr<const OfflineScopeSnapshot> getOfflineSnapshot() const;
+    void requestOfflineAnalysis(OfflineAnalysisRequest request, bool forceRefresh = false);
+    std::shared_ptr<const OfflineAnalysisSnapshot> getOfflineSnapshot() const;
     std::vector<OfflineSourceTakeChoice> getOfflineSourceTakeChoices() const;
+    int getAnalysisProgress() const noexcept { return analysisProgress.load(std::memory_order_acquire); }
 
 protected:
     void didAddPlaybackRegion(ARA::PlugIn::PlaybackRegion* playbackRegion) noexcept override;
@@ -42,24 +31,6 @@ protected:
     void willRemoveRegionSequence(ARA::PlugIn::RegionSequence* regionSequence) noexcept override;
 
 private:
-    struct AnalysisRequest
-    {
-        dsp::Crossover::SplitFrequencies frequencies {};
-        size_t activeSplitCount = 0;
-        size_t columnCount = 512;
-        int frequencyBlockSize = 4096;
-        float frequencyOverlap = 0.75f;
-        float frequencyAveragingTimeMilliseconds = 500.0f;
-        int correlationBlockSize = 4096;
-        float correlationOverlap = 0.75f;
-        float correlationAveragingTimeMilliseconds = 500.0f;
-        juce::String sourceId;
-        juce::String takeId;
-        std::vector<OfflineSourceTakeChoice> sourceTakeChoices;
-        uint64_t regionGeneration = 0;
-        uint64_t revision = 0;
-    };
-
     void didAddPlaybackRegionToRegionSequence(juce::ARARegionSequence* regionSequence,
                                                juce::ARAPlaybackRegion* playbackRegion) override;
     void willRemovePlaybackRegionFromRegionSequence(juce::ARARegionSequence* regionSequence,
@@ -68,17 +39,18 @@ private:
     void regionsChanged();
     void scheduleLatestAnalysis();
     std::vector<juce::ARAPlaybackRegion*> collectPlaybackRegions() const;
-    std::shared_ptr<OfflineScopeSnapshot> buildOfflineSnapshot(const AnalysisRequest& request);
+    std::shared_ptr<OfflineAnalysisSnapshot> buildOfflineSnapshot(const OfflineAnalysisRequest& request);
 
     ProcessingLock& lock;
     ARA::PlugIn::DocumentController* araDocumentController = nullptr;
     std::set<juce::ARARegionSequence*> listenedRegionSequences;
     mutable juce::CriticalSection analysisLock;
-    std::optional<AnalysisRequest> pendingAnalysis;
-    std::shared_ptr<const OfflineScopeSnapshot> offlineSnapshot;
+    std::optional<OfflineAnalysisRequest> pendingAnalysis;
+    std::shared_ptr<const OfflineAnalysisSnapshot> offlineSnapshot;
     mutable std::vector<OfflineSourceTakeChoice> cachedOfflineSourceTakeChoices;
-    AnalysisRequest latestAnalysisSettings;
+    OfflineAnalysisRequest latestAnalysisSettings;
     std::atomic<uint64_t> latestAnalysisRevision { 0 };
+    std::atomic<int> analysisProgress { 100 };
     std::atomic<uint64_t> regionGeneration { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EditorRenderer)

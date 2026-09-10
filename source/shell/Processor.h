@@ -1,15 +1,19 @@
 #pragma once
 
-#include "../scope/MultibandWaveformProcessor.h"
-#include "../freq/FrequencySpectrumProcessor.h"
-#include "../corr/StereoCorrelationProcessor.h"
+#include "../scop/MultibandWaveformProcessor.h"
+#include "../ara/OfflineAnalysisData.h"
+#include "../freq/SpectrumProcessor.h"
+#include "../corr/StereoProcessor.h"
+#include "../lvls/MeterProcessor.h"
 
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <vector>
 
-class AnaAudioProcessor final : public juce::AudioProcessor,
-                                private juce::VST3ClientExtensions
+class PluginProcessor final : public juce::AudioProcessor,
+                                private juce::VST3ClientExtensions,
+                                private juce::Timer
 #if JucePlugin_Enable_ARA
                               , public juce::AudioProcessorARAExtension
 #endif
@@ -26,6 +30,7 @@ public:
     static constexpr const char* frequencyBlockSizeParameterId = "frequencyBlockSize";
     static constexpr const char* frequencyOverlapParameterId = "frequencyOverlap";
     static constexpr const char* frequencyAverageTimeParameterId = "frequencyAverageTime";
+    static constexpr const char* frequencySmoothingParameterId = "frequencySmoothing";
     static constexpr const char* frequencyFilledDisplayParameterId = "frequencyFilledDisplay";
     static constexpr const char* frequencySecondSpectrumParameterId = "frequencySecondSpectrum";
     static constexpr const char* frequencyFirstSpectrumTypeParameterId = "frequencyFirstSpectrumType";
@@ -60,6 +65,21 @@ public:
     static constexpr const char* correlationHighParameterId = "correlationHigh";
     static constexpr const char* correlationRangeLowParameterId = "correlationRangeLow";
     static constexpr const char* correlationRangeHighParameterId = "correlationRangeHigh";
+    static constexpr const char* levelMeterWidthParameterId = "levelMeterWidth";
+    static constexpr const char* levelPeakHighParameterId = "levelPeakHigh";
+    static constexpr const char* levelPeakLowParameterId = "levelPeakLow";
+    static constexpr const char* levelRmsWindowParameterId = "levelRmsWindow";
+    static constexpr const char* levelPeakHoldTimeParameterId = "levelPeakHoldTime";
+    static constexpr const char* levelLufsHighParameterId = "levelLufsHigh";
+    static constexpr const char* levelLufsLowParameterId = "levelLufsLow";
+    static constexpr const char* levelHostResetParameterId = "levelHostReset";
+    static constexpr const char* levelPeakVisibleParameterId = "levelPeakVisible";
+    static constexpr const char* levelLoudnessVisibleParameterId = "levelLoudnessVisible";
+    static constexpr const char* levelHistoryVisibleParameterId = "levelHistoryVisible";
+    static constexpr const char* levelHistoryMomentaryParameterId = "levelHistoryMomentary";
+    static constexpr const char* levelHistoryShortTermParameterId = "levelHistoryShortTerm";
+    static constexpr const char* levelHistoryIntegratedParameterId = "levelHistoryIntegrated";
+    static constexpr const char* levelHistoryZoomParameterId = "levelHistoryZoom";
     static constexpr const char* offlineModeParameterId = "offlineMode";
     static constexpr const char* activeSplitCountParameterId = "activeSplitCount";
     static constexpr const char* editorWidthStateKey = "ana.editor.width";
@@ -69,6 +89,9 @@ public:
     static constexpr const char* scopeSingleViewStateKey = "ana.scope.singleView";
     static constexpr const char* scopeFullSourceStateKey = "ana.scope.fullSource";
     static constexpr const char* analyzerPageStateKey = "ana.analyzer.page";
+    inline static constexpr std::array<const char*, 3> levelPartWeightStateKeys {
+        "ana.level.part1", "ana.level.part2", "ana.level.part3"
+    };
     inline static constexpr std::array<const char*, ana::dsp::Crossover::numSplits> crossoverParameterIds {
         "xover1", "xover2", "xover3", "xover4", "xover5"
     };
@@ -85,8 +108,8 @@ public:
         "scopeBand4Normalize", "scopeBand5Normalize", "scopeBand6Normalize"
     };
 
-    AnaAudioProcessor();
-    ~AnaAudioProcessor() override;
+    PluginProcessor();
+    ~PluginProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -113,17 +136,21 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     ana::MultibandScope& getMultibandScope() noexcept { return multibandScope; }
-    ana::freq::FrequencySpectrumProcessor& getFrequencySpectrum() noexcept { return frequencySpectrum; }
-    const ana::freq::FrequencySpectrumProcessor& getFrequencySpectrum() const noexcept { return frequencySpectrum; }
+    ana::freq::SpectrumProcessor& getFrequencySpectrum() noexcept { return frequencySpectrum; }
+    const ana::freq::SpectrumProcessor& getFrequencySpectrum() const noexcept { return frequencySpectrum; }
     void clearFrequencySpectrum() noexcept { frequencySpectrum.requestClear(); }
-    ana::corr::StereoCorrelationProcessor& getCorrelationSpectrum() noexcept { return correlationProcessor; }
-    const ana::corr::StereoCorrelationProcessor& getCorrelationSpectrum() const noexcept { return correlationProcessor; }
+    ana::corr::StereoProcessor& getCorrelationSpectrum() noexcept { return correlationProcessor; }
+    const ana::corr::StereoProcessor& getCorrelationSpectrum() const noexcept { return correlationProcessor; }
     void clearCorrelationSpectrum() noexcept { correlationProcessor.requestClear(); }
+    ana::lvls::MeterProcessor& getLevelMeter() noexcept { return levelMeter; }
+    const ana::lvls::MeterProcessor& getLevelMeter() const noexcept { return levelMeter; }
+    void clearLevelMeter() noexcept { levelMeter.requestClear(); }
     juce::AudioProcessorValueTreeState& getParameters() noexcept { return parameters; }
     bool isOfflineMode() const noexcept;
     bool isARAAvailable() const noexcept;
+    int getOfflineAnalysisProgress() const noexcept;
     void requestOfflineAnalysis(size_t columnCount, bool forceRefresh = false);
-    std::shared_ptr<const ana::OfflineScopeSnapshot> getOfflineScopeSnapshot() const;
+    std::shared_ptr<const ana::OfflineAnalysisSnapshot> getOfflineAnalysisSnapshot() const;
     std::vector<ana::OfflineSourceTakeChoice> getOfflineSourceTakeChoices() const;
     juce::String getSelectedOfflineSourceId() const;
     juce::String getSelectedOfflineTakeId() const;
@@ -140,12 +167,12 @@ public:
     bool isScopeBandNormalized(size_t bandIndex) const noexcept;
     ana::dsp::Crossover::SplitFrequencies getCrossoverFrequencies() const noexcept;
     juce::Point<int> getLastEditorSize() const noexcept;
+    std::array<float, 3> getLevelPartWeights() const noexcept;
     int getScopeSingleViewBand() const noexcept;
     bool isScopeFullSourceView() const noexcept;
-    bool isFrequencyPageSelected() const noexcept;
     int getAnalyzerPageState() const noexcept;
     void setLastEditorSize(int width, int height) noexcept;
-    void setFrequencyPageSelected(bool shouldSelectFrequency);
+    void setLevelPartWeights(const std::array<float, 3>& weights);
     void setAnalyzerPageState(int page);
     void setActiveSplitCount(size_t splitCount);
     void setOfflineMode(bool shouldUseOfflineMode);
@@ -158,15 +185,22 @@ public:
     void setScopeBandNormalized(size_t bandIndex, bool shouldNormalize);
 
 private:
+    void setOfflineSelection(juce::String& currentValue,
+                             const char* stateKey,
+                             const juce::String& newValue);
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     juce::VST3ClientExtensions* getVST3ClientExtensions() override;
     void setIHostApplication(Steinberg::FUnknown* hostApplication) override;
     std::vector<ana::OfflineSourceTakeChoice> getReaperSourceTakeChoices() const;
+    int getReaperProjectStateChangeCount() const;
+    void updateRealtimeTakeChoices();
+    void timerCallback() override;
 
     juce::AudioProcessorValueTreeState parameters;
     ana::MultibandScope multibandScope;
-    ana::freq::FrequencySpectrumProcessor frequencySpectrum;
-    ana::corr::StereoCorrelationProcessor correlationProcessor;
+    ana::freq::SpectrumProcessor frequencySpectrum;
+    ana::corr::StereoProcessor correlationProcessor;
+    ana::lvls::MeterProcessor levelMeter;
     std::atomic<double> hostTempoBpm { 120.0 };
     bool hostWasPlaying = false;
     std::atomic<int> lastEditorWidth { 0 };
@@ -176,4 +210,6 @@ private:
     juce::String selectedOfflineTakeId;
     mutable juce::CriticalSection reaperHostLock;
     void* reaperHostApplication = nullptr;
+    std::atomic<int> realtimeTakeProjectState { -1 };
+    std::atomic<bool> realtimeTakeChoicesInitialised { false };
 };

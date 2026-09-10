@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../fft/StereoFftStream.h"
+#include "../shared/StereoFftStream.h"
 
 #include <JuceHeader.h>
 
@@ -11,7 +11,7 @@
 
 namespace ana::freq
 {
-class FrequencySpectrumProcessor
+class SpectrumProcessor
 {
 public:
     enum class Channel { stereo, left, right, mid, side };
@@ -20,7 +20,7 @@ public:
     static constexpr int maximumFftSize = fft::StereoFftStream::maximumFftSize;
     static constexpr int maximumBinCount = maximumFftSize / 2 + 1;
 
-    FrequencySpectrumProcessor();
+    SpectrumProcessor();
 
     void prepare(double newSampleRate);
     void reset();

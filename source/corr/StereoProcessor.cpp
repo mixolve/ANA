@@ -1,22 +1,22 @@
-#include "StereoCorrelationProcessor.h"
+#include "StereoProcessor.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace ana::corr
 {
-StereoCorrelationProcessor::StereoCorrelationProcessor()
+StereoProcessor::StereoProcessor()
 {
     reset();
 }
 
-void StereoCorrelationProcessor::prepare(const double newSampleRate) noexcept
+void StereoProcessor::prepare(const double newSampleRate) noexcept
 {
     fftStream.prepare(newSampleRate);
     reset();
 }
 
-void StereoCorrelationProcessor::reset() noexcept
+void StereoProcessor::reset() noexcept
 {
     fftStream.reset();
     phaseAverage.fill(1.0f);
@@ -32,22 +32,22 @@ void StereoCorrelationProcessor::reset() noexcept
     revision.fetch_add(1, std::memory_order_release);
 }
 
-void StereoCorrelationProcessor::requestClear() noexcept
+void StereoProcessor::requestClear() noexcept
 {
     clearRequested.store(true, std::memory_order_release);
 }
 
-void StereoCorrelationProcessor::setFrozen(const bool shouldFreeze) noexcept
+void StereoProcessor::setFrozen(const bool shouldFreeze) noexcept
 {
     frozen.store(shouldFreeze, std::memory_order_release);
 }
 
-bool StereoCorrelationProcessor::isFrozen() const noexcept
+bool StereoProcessor::isFrozen() const noexcept
 {
     return frozen.load(std::memory_order_acquire);
 }
 
-void StereoCorrelationProcessor::processBlock(const juce::AudioBuffer<float>& buffer, const int blockSize,
+void StereoProcessor::processBlock(const juce::AudioBuffer<float>& buffer, const int blockSize,
                                                const float overlap, const float averagingTimeMilliseconds) noexcept
 {
     if (clearRequested.exchange(false, std::memory_order_acq_rel))
@@ -63,7 +63,7 @@ void StereoCorrelationProcessor::processBlock(const juce::AudioBuffer<float>& bu
                            });
 }
 
-void StereoCorrelationProcessor::copyCorrelation(const Mode mode, const DisplayType type,
+void StereoProcessor::copyCorrelation(const Mode mode, const DisplayType type,
                                                   std::vector<float>& destination, int& fftSize) const
 {
     fftSize = publishedFftSize.load(std::memory_order_acquire);
@@ -76,17 +76,17 @@ void StereoCorrelationProcessor::copyCorrelation(const Mode mode, const DisplayT
         destination[static_cast<size_t>(index)] = source[static_cast<size_t>(index)].load(std::memory_order_acquire);
 }
 
-double StereoCorrelationProcessor::getSampleRate() const noexcept
+double StereoProcessor::getSampleRate() const noexcept
 {
     return fftStream.getSampleRate();
 }
 
-uint64_t StereoCorrelationProcessor::getRevision() const noexcept
+uint64_t StereoProcessor::getRevision() const noexcept
 {
     return revision.load(std::memory_order_acquire);
 }
 
-void StereoCorrelationProcessor::publish(const fft::StereoFftFrame& frame,
+void StereoProcessor::publish(const fft::StereoFftFrame& frame,
                                          const float averagingTimeMilliseconds) noexcept
 {
     const auto fftSize = frame.size;
