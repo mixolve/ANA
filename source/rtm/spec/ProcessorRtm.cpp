@@ -32,7 +32,7 @@ void storeChannels(AtomicChannels& channels, const float value) noexcept
 }
 }
 
-void SpecProcessor::resetRtState() noexcept
+void SpecProcessor::resetRtmState() noexcept
 {
     fillChannels(averageLevels, minimumDecibels);
     storeChannels(publishedAverageLevels, minimumDecibels);
@@ -48,14 +48,14 @@ void SpecProcessor::resetMapState() noexcept
     publishedMapFftSize.store(0, std::memory_order_release);
 }
 
-void SpecProcessor::requestRtReset() noexcept
+void SpecProcessor::requestRtmReset() noexcept
 {
-    rtResetRequested.store(true, std::memory_order_release);
+    rtmResetRequested.store(true, std::memory_order_release);
 }
 
-void SpecProcessor::setRtMapMode(const bool shouldUseMap) noexcept
+void SpecProcessor::setRtmMapMode(const bool shouldUseMap) noexcept
 {
-    rtMapMode.store(shouldUseMap, std::memory_order_release);
+    rtmMapMode.store(shouldUseMap, std::memory_order_release);
 }
 
 void SpecProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
@@ -68,25 +68,25 @@ void SpecProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
         return;
 
     const auto clear = clearRequested.exchange(false, std::memory_order_acq_rel);
-    const auto resetRt = rtResetRequested.exchange(false, std::memory_order_acq_rel);
+    const auto resetRtm = rtmResetRequested.exchange(false, std::memory_order_acq_rel);
     if (clear)
         reset();
-    else if (resetRt)
+    else if (resetRtm)
     {
         fftStream.reset();
         mapFftStream.reset();
-        resetRtState();
+        resetRtmState();
         resetMapState();
         revision.fetch_add(1, std::memory_order_release);
         mapRevision.fetch_add(1, std::memory_order_release);
     }
 
-    const auto useMap = rtMapMode.load(std::memory_order_acquire);
+    const auto useMap = rtmMapMode.load(std::memory_order_acquire);
     if (processingMapMode != useMap)
     {
         fftStream.reset();
         mapFftStream.reset();
-        resetRtState();
+        resetRtmState();
         resetMapState();
         revision.fetch_add(1, std::memory_order_release);
         mapRevision.fetch_add(1, std::memory_order_release);
@@ -154,7 +154,7 @@ void SpecProcessor::publish(const fft::StereoFftFrame& frame,
     const auto fftSize = frame.size;
     if (lastFrameSize != fftSize)
     {
-        resetRtState();
+        resetRtmState();
         resetMaximums();
         lastFrameSize = fftSize;
     }

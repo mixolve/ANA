@@ -74,7 +74,7 @@ private:
     fft::StereoFftStream fftStream;
     ModeBinValues averages {};
     ModeBinValues minimums {};
-    std::array<MinimumWindowState, modeCount> rtMinimumStates;
+    std::array<MinimumWindowState, modeCount> rtmMinimumStates;
     AtomicModeBinValues publishedAverages {};
     AtomicModeBinValues publishedMinimums {};
     std::atomic<int> publishedFftSize { 0 };

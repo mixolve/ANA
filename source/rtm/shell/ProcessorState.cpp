@@ -321,7 +321,7 @@ void PluginProcessor::setAnalyzerPageState(const ana::AnalyzerPage page)
 
     activeAnalyzerPage.store(page, std::memory_order_release);
     if (page == ana::AnalyzerPage::spec)
-        specProcessor.requestRtReset();
+        specProcessor.requestRtmReset();
     parameters.state.setProperty(analyzerPageStateKey, static_cast<int>(page), nullptr);
     updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
 }

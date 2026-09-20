@@ -249,7 +249,7 @@ SpecView::SpecView(PluginProcessor& processorRef)
 
 
     viewMode = processor.isSpecMapView() ? ViewMode::map : ViewMode::frequency;
-    processor.getSpecProcessor().setRtMapMode(viewMode == ViewMode::map);
+    processor.getSpecProcessor().setRtmMapMode(viewMode == ViewMode::map);
     freqButton.setToggleState(viewMode == ViewMode::frequency, juce::dontSendNotification);
     mapButton.setToggleState(viewMode == ViewMode::map, juce::dontSendNotification);
     freqButton.onClick = [this] { setViewMode(ViewMode::frequency); };
@@ -560,8 +560,8 @@ float SpecView::getSnapshotGain(const size_t snapshotIndex) const noexcept
 
 void SpecView::clearSpectrogram()
 {
-    rtMapWriteColumn = 0;
-    std::fill(rtSpectrogramLevels.begin(), rtSpectrogramLevels.end(), ana::spec::SpecProcessor::minimumDecibels);
+    rtmMapWriteColumn = 0;
+    std::fill(rtmSpectrogramLevels.begin(), rtmSpectrogramLevels.end(), ana::spec::SpecProcessor::minimumDecibels);
     if (spectrogramImage.isValid())
         spectrogramImage.clear(spectrogramImage.getBounds(), juce::Colours::black);
     repaint();
@@ -980,7 +980,7 @@ void SpecView::timerCallback()
     if (viewMode == ViewMode::map && mapImageRebuildPending)
     {
         mapImageRebuildPending = false;
-        rebuildRtSpectrogramImage();
+        rebuildRtmSpectrogramImage();
         repaint();
     }
 
@@ -1051,7 +1051,7 @@ void SpecView::setViewMode(const ViewMode nextViewMode)
 
     viewMode = nextViewMode;
     processor.setSpecMapView(viewMode == ViewMode::map);
-    processor.getSpecProcessor().setRtMapMode(viewMode == ViewMode::map);
+    processor.getSpecProcessor().setRtmMapMode(viewMode == ViewMode::map);
     cursorInside = false;
     if (viewMode == ViewMode::map)
     {
@@ -1075,13 +1075,13 @@ void SpecView::resetSpectrogramImage()
     if (spectrogramImage.isValid()
         && spectrogramImage.getWidth() == width
         && spectrogramImage.getHeight() == height
-        && rtSpectrogramLevels.size() == static_cast<size_t>(width * height))
+        && rtmSpectrogramLevels.size() == static_cast<size_t>(width * height))
         return;
 
     const auto oldWidth = spectrogramImage.isValid() ? spectrogramImage.getWidth() : 0;
     const auto oldHeight = spectrogramImage.isValid() ? spectrogramImage.getHeight() : 0;
-    auto oldLevels = std::move(rtSpectrogramLevels);
-    rtSpectrogramLevels.assign(static_cast<size_t>(width * height), ana::spec::SpecProcessor::minimumDecibels);
+    auto oldLevels = std::move(rtmSpectrogramLevels);
+    rtmSpectrogramLevels.assign(static_cast<size_t>(width * height), ana::spec::SpecProcessor::minimumDecibels);
     if (oldWidth > 0 && oldHeight > 0
         && oldLevels.size() == static_cast<size_t>(oldWidth * oldHeight))
     {
@@ -1095,20 +1095,20 @@ void SpecView::resetSpectrogramImage()
                 const auto sourceX = juce::jlimit(0, oldWidth - 1,
                     juce::roundToInt(static_cast<float>(x) * static_cast<float>(oldWidth - 1)
                                      / static_cast<float>(std::max(1, width - 1))));
-                rtSpectrogramLevels[static_cast<size_t>(y * width + x)] =
+                rtmSpectrogramLevels[static_cast<size_t>(y * width + x)] =
                     oldLevels[static_cast<size_t>(sourceY * oldWidth + sourceX)];
             }
         }
     }
 
     spectrogramImage = juce::Image(juce::Image::RGB, width, height, true);
-    rebuildRtSpectrogramImage();
+    rebuildRtmSpectrogramImage();
 }
 
-void SpecView::rebuildRtSpectrogramImage()
+void SpecView::rebuildRtmSpectrogramImage()
 {
     if (! spectrogramImage.isValid()
-        || rtSpectrogramLevels.size()
+        || rtmSpectrogramLevels.size()
             != static_cast<size_t>(spectrogramImage.getWidth() * spectrogramImage.getHeight()))
         return;
 
@@ -1145,7 +1145,7 @@ void SpecView::rebuildRtSpectrogramImage()
         const auto rowOffset = static_cast<size_t>(y * width);
         for (int x = 0; x < width; ++x)
         {
-            const auto rawValue = rtSpectrogramLevels[rowOffset + static_cast<size_t>(x)];
+            const auto rawValue = rtmSpectrogramLevels[rowOffset + static_cast<size_t>(x)];
             const auto level = juce::jlimit(0.0f, 1.0f,
                 (rawValue + slopeOffset - lowRange) / (highRange - lowRange));
             pixels.setPixelColour(x, y, spectrogramColour(level));
@@ -1212,16 +1212,16 @@ void SpecView::appendSpectrogramFrame()
     auto targetX = width - 1;
     if (leftToRight)
     {
-        if (rtMapWriteColumn >= width)
+        if (rtmMapWriteColumn >= width)
             clearSpectrogram();
-        targetX = juce::jlimit(0, width - 1, rtMapWriteColumn);
+        targetX = juce::jlimit(0, width - 1, rtmMapWriteColumn);
     }
     else if (width > 1)
     {
         spectrogramImage.moveImageSection(0, 0, 1, 0, width - 1, height);
         for (int y = 0; y < height; ++y)
         {
-            auto* row = rtSpectrogramLevels.data() + static_cast<size_t>(y * width);
+            auto* row = rtmSpectrogramLevels.data() + static_cast<size_t>(y * width);
             std::move(row + 1, row + width, row);
         }
     }
@@ -1257,7 +1257,7 @@ void SpecView::appendSpectrogramFrame()
                 secondSpectrum, binFrequency, lowerBandFrequency, frequency,
                 upperBandFrequency, highQuality));
 
-        rtSpectrogramLevels[static_cast<size_t>(y * width + targetX)] = rawValue;
+        rtmSpectrogramLevels[static_cast<size_t>(y * width + targetX)] = rawValue;
         const auto slopeOffset = frequency > 0.0f
             ? slope * std::log2(frequency / specSlopeReferenceFrequency) : 0.0f;
         const auto displayValue = rawValue + slopeOffset;
@@ -1267,7 +1267,7 @@ void SpecView::appendSpectrogramFrame()
     }
 
     if (leftToRight)
-        ++rtMapWriteColumn;
+        ++rtmMapWriteColumn;
 
     renderedMapRangeLow = lowRange;
     renderedMapRangeHigh = highRange;

@@ -71,7 +71,7 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 if (clearOnPlay != nullptr && clearOnPlay->load(std::memory_order_relaxed) >= 0.5f)
                     specProcessor.requestClear();
                 else
-                    specProcessor.requestRtReset();
+                    specProcessor.requestRtmReset();
             }
             specProcessor.processBlock(
                 buffer, fftSizes[static_cast<size_t>(fftSizeIndex)],

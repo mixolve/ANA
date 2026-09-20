@@ -1,8 +1,8 @@
 #include "View.h"
 #include "shared/lvls/Settings.h"
 #include "shared/lvls/Processor.h"
-#if ANA_VARIANT_RT
-#include "rt/shell/Processor.h"
+#if ANA_VARIANT_RTM
+#include "rtm/shell/Processor.h"
 #else
 #include "ara/shell/Processor.h"
 #endif
@@ -795,7 +795,7 @@ void LvlsView::mouseDown(const juce::MouseEvent& event)
     draggedPartSeparator = findPartSeparator(event.x);
     if (draggedPartSeparator < 0)
     {
-       #if ANA_VARIANT_RT
+       #if ANA_VARIANT_RTM
         if (! processor.getLvlsProcessor().isFrozen()
             && ! historySolo
             && (parts[0].contains(event.getPosition()) || parts[1].contains(event.getPosition())))
@@ -881,7 +881,7 @@ void LvlsView::timerCallback()
         }
     }
 
-   #if ANA_VARIANT_RT
+   #if ANA_VARIANT_RTM
     auto* displayedLvls = &processor.getLvlsProcessor();
     const auto displayRevision = displayedLvls->getRevision();
    #else

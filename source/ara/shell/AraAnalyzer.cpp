@@ -134,7 +134,7 @@ struct SpectrogramMapWriter
         auto& bucket = *bucketPtr;
         ++bucket.frameCount;
 
-        // Match rt SPEC channel definitions; MAP uses real-FFT magnitude scaled by 1/N.
+        // Match RTM SPEC channel definitions; MAP uses real-FFT magnitude scaled by 1/N.
         std::vector<ChannelValues> binLevels(binCount);
         for (size_t bin = 0; bin < binCount; ++bin)
         {

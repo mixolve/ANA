@@ -23,7 +23,7 @@ public:
     static constexpr int maximumBinCount = maximumFftSize / 2 + 1;
     static constexpr float minimumDecibels = -300.0f;
 
-    // Time Overlap oversamples STFT frames without changing rt MAP scroll cadence.
+    // Time Overlap oversamples STFT frames without changing RTM MAP scroll cadence.
     static constexpr int mapBaseRasterOversampling = 8;
     static constexpr int mapTimeOverlapChoiceCount = 5;
     static int mapBaseHopSizeForFftSize(int fftSize) noexcept

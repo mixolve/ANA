@@ -133,14 +133,14 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
         processor.getParameters(), PluginProcessor::scopMonitorControlsParameterId, scopSettings.monitorControlsButton);
     scopSettings.toolsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopToolsParameterId, scopSettings.toolsButton);
-   #if ANA_VARIANT_RT
+   #if ANA_VARIANT_RTM
     scopSettings.leftToRightButton.setClickingTogglesState(true);
     scopSettings.leftToRightButton.onClick = displaySettingChanged;
     scopSettings.leftToRightAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopLeftToRightParameterId,
         scopSettings.leftToRightButton);
     scopSettings.leftToRightButton.setTooltip(
-        "Draw RT SCOP from left to right; clear and restart at the left edge after reaching the right edge");
+        "Draw RTM SCOP from left to right; clear and restart at the left edge after reaching the right edge");
    #endif
     for (auto* button : std::array<ControlButton*, 10> {
              &specSettings.filledDisplayButton, &specSettings.secondGraphButton,
@@ -164,7 +164,7 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     specSettings.mapLeftToRightAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.getParameters(), PluginProcessor::specMapLeftToRightParameterId, specSettings.mapLeftToRightButton);
     specSettings.mapLeftToRightButton.setTooltip(
-        "Draw rt SPEC MAP from left to right; clear and restart at the left edge after reaching the right edge");
+        "Draw RTM SPEC MAP from left to right; clear and restart at the left edge after reaching the right edge");
     specSettings.rangesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.getParameters(), PluginProcessor::specRangesVisibleParameterId, specSettings.rangesButton);
     specSettings.clearOnPlayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -216,7 +216,7 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
                     parameter->setValueNotifyingHost(1.0f);
                 button->setToggleState(true, juce::dontSendNotification);
             }
-           #if ANA_VARIANT_RT
+           #if ANA_VARIANT_RTM
             processor.clearLvlsProcessor();
            #endif
             displaySettingChanged();
@@ -475,13 +475,13 @@ void SettingsPanel::resized()
     const auto scopPage = analyzerPage == ana::AnalyzerPage::scop;
     const auto specPage = analyzerPage == ana::AnalyzerPage::spec;
     const auto specMapPage = specPage && analyzerViewMode == "MAP";
-   #if ANA_VARIANT_RT
-    const auto rtSpecMapPage = specMapPage;
+   #if ANA_VARIANT_RTM
+    const auto rtmSpecMapPage = specMapPage;
    #else
-    constexpr auto rtSpecMapPage = false;
+    constexpr auto rtmSpecMapPage = false;
    #endif
     const auto lvlsPage = analyzerPage == ana::AnalyzerPage::lvls;
-   #if ANA_VARIANT_RT
+   #if ANA_VARIANT_RTM
     constexpr auto scopRowCount = 18;
    #else
     constexpr auto scopRowCount = 17;
@@ -489,7 +489,7 @@ void SettingsPanel::resized()
     const auto pageContentHeight = scopPage
         ? scopRowCount * rowHeight + (scopRowCount - 1) * fixedGap.pixels()
         : specPage ? (specMapPage
-            ? (rtSpecMapPage
+            ? (rtmSpecMapPage
                 ? 15 * rowHeight + 14 * fixedGap.pixels()
                 : 14 * rowHeight + 13 * fixedGap.pixels())
             : 18 * rowHeight + 17 * fixedGap.pixels())
@@ -607,7 +607,7 @@ void SettingsPanel::resized()
             fixedGap.removeFromTop(area);
             placeButton(specSettings.highQualityRenderingButton);
             fixedGap.removeFromTop(area);
-            if (rtSpecMapPage)
+            if (rtmSpecMapPage)
             {
                 placeButton(specSettings.mapLeftToRightButton);
                 fixedGap.removeFromTop(area);
@@ -735,7 +735,7 @@ void SettingsPanel::resized()
     fixedGap.removeFromTop(area);
     scopSettings.opacityControl.setBounds(area.removeFromTop(rowHeight));
     fixedGap.removeFromTop(area);
-   #if ANA_VARIANT_RT
+   #if ANA_VARIANT_RTM
     placeButton(scopSettings.leftToRightButton);
     fixedGap.removeFromTop(area);
    #else
@@ -826,10 +826,10 @@ void SettingsPanel::constrainFrequency(const size_t crossoverIndex)
 
 void SettingsPanel::refreshExternalState()
 {
-   #if ANA_VARIANT_RT
-    constexpr auto rtControlsEnabled = true;
+   #if ANA_VARIANT_RTM
+    constexpr auto rtmControlsEnabled = true;
    #else
-    constexpr auto rtControlsEnabled = false;
+    constexpr auto rtmControlsEnabled = false;
    #endif
     const auto scopPage = analyzerPage == ana::AnalyzerPage::scop;
     const auto specPage = analyzerPage == ana::AnalyzerPage::spec;
@@ -838,22 +838,22 @@ void SettingsPanel::refreshExternalState()
     const auto lvlsPage = analyzerPage == ana::AnalyzerPage::lvls;
 
     // ARA exposes only controls used by its offline analysis workflow.
-    scopSettings.timeControl.setInteractionEnabled(rtControlsEnabled, true);
-    scopSettings.timeNoteControl.setInteractionEnabled(rtControlsEnabled, true);
-    scopSettings.timeBaseControl.setInteractionEnabled(rtControlsEnabled, true);
-    specSettings.averageTimeControl.setInteractionEnabled(rtControlsEnabled, true);
-    specSettings.firstGraphTypeControl.setInteractionEnabled(rtControlsEnabled, true);
-    specSettings.secondGraphTypeControl.setInteractionEnabled(rtControlsEnabled, true);
-    corrSettings.averageTimeControl.setInteractionEnabled(rtControlsEnabled, true);
-    corrSettings.firstGraphTypeControl.setInteractionEnabled(rtControlsEnabled, true);
-    corrSettings.secondGraphTypeControl.setInteractionEnabled(rtControlsEnabled, true);
-    lvlsSettings.rmsWindowControl.setInteractionEnabled(rtControlsEnabled, true);
-    lvlsSettings.peakHoldControl.setInteractionEnabled(rtControlsEnabled, true);
-    specSettings.clearOnPlayButton.setEnabled(rtControlsEnabled);
-    specSettings.secondGraphButton.setEnabled(rtControlsEnabled);
-    corrSettings.clearOnPlayButton.setEnabled(rtControlsEnabled);
-    corrSettings.secondGraphButton.setEnabled(rtControlsEnabled);
-    lvlsSettings.clearOnPlayButton.setEnabled(rtControlsEnabled);
+    scopSettings.timeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    scopSettings.timeNoteControl.setInteractionEnabled(rtmControlsEnabled, true);
+    scopSettings.timeBaseControl.setInteractionEnabled(rtmControlsEnabled, true);
+    specSettings.averageTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    specSettings.firstGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    specSettings.secondGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    corrSettings.averageTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    corrSettings.firstGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    corrSettings.secondGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    lvlsSettings.rmsWindowControl.setInteractionEnabled(rtmControlsEnabled, true);
+    lvlsSettings.peakHoldControl.setInteractionEnabled(rtmControlsEnabled, true);
+    specSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
+    specSettings.secondGraphButton.setEnabled(rtmControlsEnabled);
+    corrSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
+    corrSettings.secondGraphButton.setEnabled(rtmControlsEnabled);
+    lvlsSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
     controlsVisibilityHeadingLabel.setVisible(scopPage || specPage || corrPage || lvlsPage);
     for (auto* component : std::array<juce::Component*, 12> {
              &scopSettings.addCrossoverButton, &scopSettings.removeCrossoverButton, &scopSettings.equalHeightButton,
@@ -862,7 +862,7 @@ void SettingsPanel::refreshExternalState()
              &scopSettings.timeNoteControl, &scopSettings.timeBaseControl,
              &scopSettings.leftToRightButton })
         component->setVisible(scopPage);
-   #if ! ANA_VARIANT_RT
+   #if ! ANA_VARIANT_RTM
     scopSettings.leftToRightButton.setVisible(false);
    #endif
     for (auto& control : scopSettings.crossoverControls)
@@ -876,7 +876,7 @@ void SettingsPanel::refreshExternalState()
     specSettings.rangeLowControl.setVisible(specMapPage);
     specSettings.rangeHighControl.setVisible(specMapPage);
     specSettings.highQualityRenderingButton.setVisible(specMapPage);
-    specSettings.mapLeftToRightButton.setVisible(specMapPage && rtControlsEnabled);
+    specSettings.mapLeftToRightButton.setVisible(specMapPage && rtmControlsEnabled);
     specSettings.clearOnPlayButton.setVisible(specPage);
     specSettings.rangesButton.setVisible(specPage);
     specSettings.cursorButton.setVisible(specPage);

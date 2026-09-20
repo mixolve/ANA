@@ -41,9 +41,9 @@ private:
     void clearBandHistory(size_t bandIndex);
     void appendHistoryColumn(size_t activeBandCount);
     void refreshBandModeButtons();
-    ana::scop::AnalysisChannelSamples getRtAnalysisChannelSamples(
+    ana::scop::AnalysisChannelSamples getRtmAnalysisChannelSamples(
         size_t bandIndex, size_t sampleIndex) const noexcept;
-    ana::scop::AnalysisChannelSamples getRtWidebandAnalysisChannelSamples(
+    ana::scop::AnalysisChannelSamples getRtmWidebandAnalysisChannelSamples(
         size_t sampleIndex) const noexcept;
     juce::Rectangle<float> getBandBounds(size_t bandIndex, size_t activeBandCount) const noexcept;
     bool shouldShowZoomSliders(size_t bandIndex, size_t activeBandCount) const noexcept;
@@ -61,7 +61,7 @@ private:
     std::array<std::unique_ptr<EllipsisLabel>, ana::MultibandScop::numBands> bandZoomValueLabels;
     ana::ScopHistory history;
     std::array<float, ana::MultibandScop::numBands> bandHeightWeights;
-    double rtResumeTimeMilliseconds = 0.0;
+    double rtmResumeTimeMilliseconds = 0.0;
     size_t leftToRightColumn = 0;
     int renderedLeftToRight = -1;
     bool frozen = false;

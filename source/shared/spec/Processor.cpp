@@ -1,5 +1,5 @@
-#if ANA_VARIANT_RT
-#include "rt/spec/Processor.h"
+#if ANA_VARIANT_RTM
+#include "rtm/spec/Processor.h"
 #else
 #include "ara/spec/Processor.h"
 #endif
@@ -39,8 +39,8 @@ void SpecProcessor::reset()
 {
     fftStream.reset();
     mapFftStream.reset();
-   #if ANA_VARIANT_RT
-    resetRtState();
+   #if ANA_VARIANT_RTM
+    resetRtmState();
     resetMapState();
    #else
     resetAraAccumulators();
@@ -51,13 +51,13 @@ void SpecProcessor::reset()
     storeChannels(publishedMaximumLevels, minimumDecibels);
 
     publishedFftSize.store(0, std::memory_order_release);
-   #if ANA_VARIANT_RT
+   #if ANA_VARIANT_RTM
     publishedMapFftSize.store(0, std::memory_order_release);
    #endif
     lastFrameSize = 0;
     clearRevision.fetch_add(1, std::memory_order_release);
     revision.fetch_add(1, std::memory_order_release);
-   #if ANA_VARIANT_RT
+   #if ANA_VARIANT_RTM
     mapRevision.fetch_add(1, std::memory_order_release);
    #endif
 }

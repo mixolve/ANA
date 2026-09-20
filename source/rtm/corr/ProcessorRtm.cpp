@@ -79,7 +79,7 @@ void CorrProcessor::publish(const fft::StereoFftFrame& frame,
     {
         fillModeBins(averages, 1.0f);
         fillModeBins(minimums, 1.0f);
-        for (auto& state : rtMinimumStates)
+        for (auto& state : rtmMinimumStates)
             resetMinimumWindowState(state);
         lastFrameSize = fftSize;
     }
@@ -100,7 +100,7 @@ void CorrProcessor::publish(const fft::StereoFftFrame& frame,
         publishedAverages[modeIndexValue][binIndex].store(average, std::memory_order_relaxed);
     }
 
-    updateMinimumWindow(frame, mode, rtMinimumStates[modeIndexValue],
+    updateMinimumWindow(frame, mode, rtmMinimumStates[modeIndexValue],
                         minimums[modeIndexValue], publishedMinimums[modeIndexValue]);
 
     publishedFftSize.store(fftSize, std::memory_order_release);

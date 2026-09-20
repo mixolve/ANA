@@ -1,5 +1,5 @@
-#if ANA_VARIANT_RT
-#include "rt/corr/Processor.h"
+#if ANA_VARIANT_RTM
+#include "rtm/corr/Processor.h"
 #else
 #include "ara/corr/Processor.h"
 #endif
@@ -57,10 +57,10 @@ void CorrProcessor::prepare(const double newSampleRate) noexcept
 void CorrProcessor::reset() noexcept
 {
     fftStream.reset();
-   #if ANA_VARIANT_RT
+   #if ANA_VARIANT_RTM
     fillModeBins(averages, 1.0f);
     fillModeBins(minimums, 1.0f);
-    for (auto& state : rtMinimumStates)
+    for (auto& state : rtmMinimumStates)
         resetMinimumWindowState(state);
    #else
     resetAraAccumulators();

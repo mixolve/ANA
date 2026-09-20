@@ -22,7 +22,7 @@ public:
     static constexpr int maximumBinCount = maximumFftSize / 2 + 1;
     static constexpr float minimumDecibels = -300.0f;
 
-    // Time Overlap oversamples STFT frames without changing rt MAP scroll cadence.
+    // Time Overlap oversamples STFT frames without changing RTM MAP scroll cadence.
     static constexpr int mapBaseRasterOversampling = 8;
     static constexpr int mapTimeOverlapChoiceCount = 5;
     static int mapBaseHopSizeForFftSize(int fftSize) noexcept
@@ -46,8 +46,8 @@ public:
     void requestClear() noexcept;
     void setFrozen(bool shouldFreeze) noexcept;
     bool isFrozen() const noexcept;
-    void requestRtReset() noexcept;
-    void setRtMapMode(bool shouldUseMap) noexcept;
+    void requestRtmReset() noexcept;
+    void setRtmMapMode(bool shouldUseMap) noexcept;
     void processBlock(const juce::AudioBuffer<float>& buffer,
                       int fftSize,
                       float fftOverlap,
@@ -66,7 +66,7 @@ private:
                  float averagingTimeMilliseconds) noexcept;
     void publishMap(const fft::StereoFftFrame& frame) noexcept;
     void resetMaximums() noexcept;
-    void resetRtState() noexcept;
+    void resetRtmState() noexcept;
     void resetMapState() noexcept;
 
     using BinValues = std::array<float, maximumBinCount>;
@@ -90,8 +90,8 @@ private:
     std::atomic<uint64_t> clearRevision { 0 };
     std::atomic<bool> clearRequested { false };
     std::atomic<bool> frozen { false };
-    std::atomic<bool> rtResetRequested { false };
-    std::atomic<bool> rtMapMode { false };
+    std::atomic<bool> rtmResetRequested { false };
+    std::atomic<bool> rtmMapMode { false };
     bool processingMapMode = false;
     int processingMapTimeOverlapChoice = -1;
     int mapAccumulatedFrameCount = 0;

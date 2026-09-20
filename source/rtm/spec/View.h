@@ -75,7 +75,7 @@ private:
     void updateCursorReadouts();
     void appendSpectrogramFrame();
     void resetSpectrogramImage();
-    void rebuildRtSpectrogramImage();
+    void rebuildRtmSpectrogramImage();
     void scheduleMapImageRebuild() noexcept;
     juce::Rectangle<float> getPlotBounds() const noexcept;
     void drawSpec(juce::Graphics& graphics, const std::vector<float>& spec,
@@ -101,7 +101,7 @@ private:
     std::vector<float> secondarySpec;
     std::vector<SpectrumSnapshot> snapshots;
     juce::Image spectrogramImage;
-    std::vector<float> rtSpectrogramLevels;
+    std::vector<float> rtmSpectrogramLevels;
     ViewMode viewMode = ViewMode::frequency;
     uint64_t displayedRevision = 0;
     uint64_t displayedClearRevision = 0;
@@ -116,6 +116,6 @@ private:
     int renderedMapHighQuality = -1;
     int renderedMapLeftToRight = -1;
     int renderedMapFrequencyScale = -1;
-    int rtMapWriteColumn = 0;
+    int rtmMapWriteColumn = 0;
     bool mapImageRebuildPending = false;
 };

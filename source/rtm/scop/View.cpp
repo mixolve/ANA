@@ -339,7 +339,7 @@ void ScopView::timerCallback()
     if (frozen)
         return;
 
-    if (juce::Time::getMillisecondCounterHiRes() < rtResumeTimeMilliseconds)
+    if (juce::Time::getMillisecondCounterHiRes() < rtmResumeTimeMilliseconds)
     {
         history.readCursor = processor.getMultibandScop().getWriteCursor();
         history.columnSampleProgress = 0.0;
@@ -374,10 +374,10 @@ void ScopView::timerCallback()
 
     for (size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
     {
-        history.accumulateWideband(getRtWidebandAnalysisChannelSamples(sampleIndex));
+        history.accumulateWideband(getRtmWidebandAnalysisChannelSamples(sampleIndex));
 
         for (size_t bandIndex = 0; bandIndex < activeBandCount; ++bandIndex)
-            history.accumulateBand(bandIndex, getRtAnalysisChannelSamples(bandIndex, sampleIndex));
+            history.accumulateBand(bandIndex, getRtmAnalysisChannelSamples(bandIndex, sampleIndex));
 
         history.columnSampleProgress += 1.0;
         const auto columnsToAppend = static_cast<size_t>(history.columnSampleProgress / samplesPerColumn);
@@ -500,7 +500,7 @@ void ScopView::resized()
     lastComponentHeight = getHeight();
     if (sizeChanged && history.containsRecordedData)
     {
-        rtResumeTimeMilliseconds = juce::Time::getMillisecondCounterHiRes() + 120.0;
+        rtmResumeTimeMilliseconds = juce::Time::getMillisecondCounterHiRes() + 120.0;
         history.readCursor = processor.getMultibandScop().getWriteCursor();
         history.columnSampleProgress = 0.0;
         history.resetColumnAccumulator();
@@ -813,7 +813,7 @@ void ScopView::mouseUp(const juce::MouseEvent& event)
 }
 
 ana::scop::AnalysisChannelSamples
-ScopView::getRtAnalysisChannelSamples(const size_t bandIndex,
+ScopView::getRtmAnalysisChannelSamples(const size_t bandIndex,
                                                    const size_t sampleIndex) const noexcept
 {
     const auto left = incomingSamples[bandIndex][0][sampleIndex];
@@ -822,7 +822,7 @@ ScopView::getRtAnalysisChannelSamples(const size_t bandIndex,
 }
 
 ana::scop::AnalysisChannelSamples
-ScopView::getRtWidebandAnalysisChannelSamples(const size_t sampleIndex) const noexcept
+ScopView::getRtmWidebandAnalysisChannelSamples(const size_t sampleIndex) const noexcept
 {
     const auto left = incomingSamples.wideband[0][sampleIndex];
     const auto right = incomingSamples.wideband[1][sampleIndex];
