@@ -1,6 +1,7 @@
 #include "Editor.h"
 #include "Processor.h"
 #include "shared/shell/Theme.h"
+#include "shared/shell/AuxiliaryWindowFocus.h"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,7 @@ constexpr int maximumEditorSize = 32768;
 constexpr int minimumEditorWidth = 800;
 constexpr int defaultEditorWidth = minimumEditorWidth;
 constexpr int defaultEditorHeight = minimumEditorHeight;
+constexpr int editorResizeHandleThickness = ana::ui::gap.pixels();
 constexpr int settingsWindowWidth = 300;
 constexpr int defaultSettingsWindowHeight = 800;
 constexpr int minimumSettingsWindowHeight = 300;
@@ -472,10 +474,10 @@ private:
     LongPressGesture gainPress;
     EllipsisLabel numberLabel;
     EllipsisLabel gainLabel;
-    ControlButton cameraButton { "camera.circle" };
-    ControlButton colourButton { "paintpalette" };
-    ControlButton transferButton { "square.and.arrow.up.circle" };
-    ControlButton visibilityButton { "eye.slash.circle" };
+    ControlButton cameraButton { "camera" };
+    ControlButton colourButton { "palette" };
+    ControlButton transferButton { "arrows-up-down" };
+    ControlButton visibilityButton { "eye-off" };
 };
 class SnapshotsWindowContent final : public juce::Component
 {
@@ -995,8 +997,8 @@ private:
 
     SpecView& specView;
     ControlButton addButton { "plus" };
-    ControlButton bulkImportButton { "square.and.arrow.down" };
-    ControlButton closeButton { "xmark.circle" };
+    ControlButton bulkImportButton { "arrows-down" };
+    ControlButton closeButton { "x" };
     FocusedPotentiometer gainPotentiometer;
     juce::Component rowsContent;
     juce::Viewport rowsViewport;
@@ -1027,6 +1029,14 @@ public:
         : juce::DocumentWindow(juce::String(), backgroundColour, 0, false),
           side(sideIn)
     {
+    }
+
+    ~HostShortcutDocumentWindow() override
+    {
+       #if JUCE_MAC
+        if (previousKeyWindow != nullptr)
+            setAuxiliaryTextInputActive(*this, false, previousKeyWindow);
+       #endif
     }
 
     juce::BorderSize<int> getBorderThickness() const override
@@ -1065,8 +1075,12 @@ protected:
             return;
 
         passShortcutsToHost = shouldPassShortcuts;
+       #if JUCE_MAC
+        setAuxiliaryTextInputActive(*this, ! shouldPassShortcuts, previousKeyWindow);
+       #else
         if (isOnDesktop())
             recreateDesktopWindow();
+       #endif
     }
 
     juce::BorderSize<int> getContentComponentBorder() const override
@@ -1077,8 +1091,12 @@ protected:
     int getDesktopWindowStyleFlags() const override
     {
         auto flags = juce::DocumentWindow::getDesktopWindowStyleFlags();
+       #if JUCE_MAC
+        flags |= juce::ComponentPeer::windowIgnoresKeyPresses;
+       #else
         if (passShortcutsToHost)
             flags |= juce::ComponentPeer::windowIgnoresKeyPresses;
+       #endif
         return flags;
     }
 
@@ -1101,6 +1119,9 @@ private:
     Side side;
     int activeTextInputs = 0;
     bool passShortcutsToHost = true;
+   #if JUCE_MAC
+    void* previousKeyWindow = nullptr;
+   #endif
     bool hasBeenShown = false;
 };
 
@@ -1271,6 +1292,8 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
     settingsButton.setTooltip("SETTINGS");
     freezeButton.setTooltip("FREEZE");
     refreshButton.setTooltip("REFRESH");
+    fullSourceButton.setTooltip("FULL");
+    clearButton.setTooltip("CLEAR");
     aboutButton.onClick = [this] { showAboutPopup(); };
 
     araUpdateLabel.setFont(ana::ui::makeFont());
@@ -1347,13 +1370,23 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
     timerCallback();
     startTimerHz(15);
     setResizable(true, false);
-    setResizeLimits(minimumEditorWidth, minimumEditorHeight, maximumEditorSize, maximumEditorSize);
+    leftEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
+        this, getConstrainer(), juce::ResizableEdgeComponent::leftEdge);
     rightEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
         this, getConstrainer(), juce::ResizableEdgeComponent::rightEdge);
+    topEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
+        this, getConstrainer(), juce::ResizableEdgeComponent::topEdge);
     bottomEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
         this, getConstrainer(), juce::ResizableEdgeComponent::bottomEdge);
+    leftEdgeResizer->setAlwaysOnTop(true);
+    rightEdgeResizer->setAlwaysOnTop(true);
+    topEdgeResizer->setAlwaysOnTop(true);
+    bottomEdgeResizer->setAlwaysOnTop(true);
+    addAndMakeVisible(*leftEdgeResizer);
     addAndMakeVisible(*rightEdgeResizer);
+    addAndMakeVisible(*topEdgeResizer);
     addAndMakeVisible(*bottomEdgeResizer);
+    setResizeLimits(minimumEditorWidth, minimumEditorHeight, maximumEditorSize, maximumEditorSize);
     const auto savedSize = audioProcessor.getLastEditorSize();
     setSize(juce::jlimit(minimumEditorWidth, maximumEditorSize,
                          savedSize.x > 0 ? savedSize.x : defaultEditorWidth),
@@ -1734,18 +1767,26 @@ void PluginEditor::resized()
     corrDisplay.setBounds(area);
     lvlsDisplay.setBounds(area);
 
+    if (leftEdgeResizer != nullptr)
+    {
+        leftEdgeResizer->setBounds(0, 0, editorResizeHandleThickness, getHeight());
+        leftEdgeResizer->toFront(false);
+    }
     if (rightEdgeResizer != nullptr)
     {
-        rightEdgeResizer->setBounds(getWidth() - ana::ui::gap.pixels(), 0,
-                                    ana::ui::gap.pixels(),
-                                    std::max(0, getHeight() - ana::ui::gap.pixels()));
+        rightEdgeResizer->setBounds(getWidth() - editorResizeHandleThickness, 0,
+                                    editorResizeHandleThickness, getHeight());
         rightEdgeResizer->toFront(false);
+    }
+    if (topEdgeResizer != nullptr)
+    {
+        topEdgeResizer->setBounds(0, 0, getWidth(), editorResizeHandleThickness);
+        topEdgeResizer->toFront(false);
     }
     if (bottomEdgeResizer != nullptr)
     {
-        bottomEdgeResizer->setBounds(0, getHeight() - ana::ui::gap.pixels(),
-                                     std::max(0, getWidth() - ana::ui::gap.pixels()),
-                                     ana::ui::gap.pixels());
+        bottomEdgeResizer->setBounds(0, getHeight() - editorResizeHandleThickness,
+                                     getWidth(), editorResizeHandleThickness);
         bottomEdgeResizer->toFront(false);
     }
 

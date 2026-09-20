@@ -98,7 +98,7 @@ private:
     std::array<std::unique_ptr<ControlButton>, ana::spec::monitorModeCount> monitorButtons;
     ControlButton freqButton { "FREQ" };
     ControlButton mapButton { "MAP" };
-    ControlButton splitButton { "square.split.1x2" };
+    ControlButton splitButton { "layout-rows" };
     RangeSlider frequencyRangeSlider;
     RangeSlider mapTimeRangeSlider;
     RangeSlider magnitudeRangeSlider { RangeSlider::Orientation::vertical };

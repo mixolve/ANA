@@ -1,8 +1,6 @@
 #include "Controls.h"
+#include "TablerIcons.h"
 #include "Theme.h"
-#if ANA_HAS_SF_SYMBOLS
-#include "SfSymbols.h"
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -108,7 +106,6 @@ void EllipsisLabel::editorShown(juce::TextEditor* editor)
     if (onEditorVisibilityChanged)
         onEditorVisibilityChanged(true);
 
-    editor->grabKeyboardFocus();
 }
 
 void EllipsisLabel::editorAboutToBeHidden(juce::TextEditor*)
@@ -126,24 +123,24 @@ void EllipsisLabel::editorAboutToBeHidden(juce::TextEditor*)
 ControlButton::ControlButton(juce::String text)
     : juce::Button(std::move(text))
 {
-    iconButton = getButtonText() == "gearshape"
+    iconButton = getButtonText() == "settings"
         || getButtonText() == "snowflake"
-        || getButtonText() == "arrow.trianglehead.2.clockwise"
-        || getButtonText() == "info.circle"
-        || getButtonText() == "xmark.circle"
-        || getButtonText() == "circle.hexagongrid.circle"
+        || getButtonText() == "refresh"
+        || getButtonText() == "info-circle"
+        || getButtonText() == "x"
+        || getButtonText() == "hexagons"
         || getButtonText() == "plus"
-        || getButtonText() == "camera.circle"
-        || getButtonText() == "eye.slash.circle"
-        || getButtonText() == "paintpalette"
-        || getButtonText() == "square.and.arrow.up.circle"
-        || getButtonText() == "square.and.arrow.down"
-        || getButtonText() == "triangle.circle"
-        || getButtonText() == "square.split.1x2";
-#if ANA_HAS_SF_SYMBOLS
+        || getButtonText() == "camera"
+        || getButtonText() == "eye-off"
+        || getButtonText() == "palette"
+        || getButtonText() == "arrows-up-down"
+        || getButtonText() == "arrows-down"
+        || getButtonText() == "delta"
+        || getButtonText() == "browser-maximize"
+        || getButtonText() == "eraser"
+        || getButtonText() == "layout-rows";
     if (iconButton)
-        symbolImage = loadSfSymbol(getButtonText(), ana::ui::iconFontSize);
-#endif
+        symbolImage = loadTablerIcon(getButtonText(), ana::ui::iconFontSize);
     setWantsKeyboardFocus(false);
 }
 
@@ -450,7 +447,7 @@ void RangeSlider::paint(juce::Graphics& graphics)
         const auto endX = juce::jmap(rangeEnd, bounds.getX(), bounds.getRight());
         graphics.fillRect(bounds.withLeft(startX).withRight(endX));
 
-        const auto handleX = [bounds, handleThickness] (const float centreX)
+        const auto handleX = [bounds] (const float centreX)
         {
             return juce::jlimit(bounds.getX(), bounds.getRight() - handleThickness,
                                 centreX - handleThickness * 0.5f);
@@ -465,7 +462,7 @@ void RangeSlider::paint(juce::Graphics& graphics)
         const auto endY = juce::jmap(rangeEnd, bounds.getY(), bounds.getBottom());
         graphics.fillRect(bounds.withTop(startY).withBottom(endY));
 
-        const auto handleY = [bounds, handleThickness] (const float centreY)
+        const auto handleY = [bounds] (const float centreY)
         {
             return juce::jlimit(bounds.getY(), bounds.getBottom() - handleThickness,
                                 centreY - handleThickness * 0.5f);

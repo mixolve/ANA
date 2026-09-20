@@ -60,7 +60,7 @@ private:
     ControlButton peakModeButton { "PEAK" };
     ControlButton rmsModeButton { "RMS" };
     ControlButton peakChannelModeButton { "MS" };
-    ControlButton historySviewButton { "SVIEW" };
+    ControlButton historySviewButton { "browser-maximize" };
     RangeSlider historyHorizontalZoom;
     RangeSlider historyVerticalZoom { RangeSlider::Orientation::vertical };
     bool showPeakLvls = true;

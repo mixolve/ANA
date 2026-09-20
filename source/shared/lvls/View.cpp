@@ -18,7 +18,7 @@ constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
 constexpr int lvlsScaleLabelWidth = ana::ui::textControlWidth(3);
 constexpr int lvlsReadoutWidth = ana::ui::textControlWidth(7);
 constexpr int historyMetricReadoutWidth = ana::ui::textControlWidth(7);
-constexpr int historySviewWidth = ana::ui::textControlWidth(5);
+constexpr int historySviewWidth = ana::ui::iconControlSize;
 constexpr int historyMinimumWidth = historyMetricReadoutWidth * 2 + historySviewWidth + bandZoomSliderWidth
     + ana::ui::gap.pixels() * 3;
 
@@ -125,6 +125,7 @@ LvlsView::LvlsView(PluginProcessor& processorRef)
         historySviewButton.setToggleState(historySolo, juce::dontSendNotification);
         resized();
     };
+    historySviewButton.setTooltip("SVIEW");
     historyHorizontalZoom.onRangeChanged = [this] { repaint(); };
     historyVerticalZoom.onRangeChanged = [this] { repaint(); };
     peakModeButton.setToggleState(true, juce::dontSendNotification);

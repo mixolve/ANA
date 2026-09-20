@@ -55,19 +55,21 @@ private:
     std::unique_ptr<AboutPopup> aboutPopup;
     std::unique_ptr<SettingsWindow> settingsWindow;
     std::unique_ptr<SnapshotsWindow> snapshotsWindow;
+    std::unique_ptr<juce::ResizableEdgeComponent> leftEdgeResizer;
     std::unique_ptr<juce::ResizableEdgeComponent> rightEdgeResizer;
+    std::unique_ptr<juce::ResizableEdgeComponent> topEdgeResizer;
     std::unique_ptr<juce::ResizableEdgeComponent> bottomEdgeResizer;
 
     ControlButton specPageButton { "SPEC" };
     ControlButton corrPageButton { "CORR" };
     ControlButton lvlsPageButton { "LVLS" };
     ControlButton scopPageButton { "SCOP" };
-    ControlButton snapshotsWindowButton { "circle.hexagongrid.circle" };
-    ControlButton settingsButton { "gearshape" };
-    ControlButton fullSourceButton { "FULL" };
-    ControlButton clearButton { "CLEAR" };
+    ControlButton snapshotsWindowButton { "hexagons" };
+    ControlButton settingsButton { "settings" };
+    ControlButton fullSourceButton { "browser-maximize" };
+    ControlButton clearButton { "eraser" };
     ControlButton freezeButton { "snowflake" };
-    ControlButton aboutButton { "info.circle" };
+    ControlButton aboutButton { "info-circle" };
     juce::Point<int> pendingEditorSize;
     double editorSizeSaveDeadlineMilliseconds = 0.0;
     bool editorSizeSavePending = false;

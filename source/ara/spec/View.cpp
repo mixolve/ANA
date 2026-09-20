@@ -189,41 +189,6 @@ juce::Colour spectrogramColour(const float normalisedLevel) noexcept
         scaled - static_cast<float>(index));
 }
 
-float sampleMapSpectrum(const std::vector<float>& spectrum,
-                          const float binFrequency,
-                          const float lowerFrequency,
-                          const float centreFrequency,
-                          const float upperFrequency,
-                          const bool highQuality) noexcept
-{
-    constexpr float floorDb = ana::spec::SpecProcessor::minimumDecibels;
-    if (spectrum.size() < 2 || binFrequency <= 0.0f)
-        return floorDb;
-
-    const auto maxBin = static_cast<int>(spectrum.size()) - 1;
-    const auto clampBin = [maxBin, binFrequency] (const float frequency)
-    {
-        return juce::jlimit(1.0f, static_cast<float>(maxBin), frequency / binFrequency);
-    };
-    const auto exactBin = clampBin(centreFrequency);
-    const auto bin0 = static_cast<int>(std::floor(exactBin));
-    const auto bin1 = std::min(maxBin, bin0 + 1);
-    const auto mix = exactBin - static_cast<float>(bin0);
-    auto value = spectrum[static_cast<size_t>(bin0)]
-        + mix * (spectrum[static_cast<size_t>(bin1)] - spectrum[static_cast<size_t>(bin0)]);
-
-    if (! highQuality)
-        return value;
-
-    // Max-bilinear sampling preserves narrow peaks when source bins collapse into one row.
-    const auto firstCoord = std::min(clampBin(lowerFrequency), clampBin(upperFrequency));
-    const auto lastCoord = std::max(clampBin(lowerFrequency), clampBin(upperFrequency));
-    const auto first = std::max(1, static_cast<int>(std::ceil(firstCoord)));
-    const auto last = std::min(maxBin, static_cast<int>(std::floor(lastCoord)));
-    for (auto bin = first; bin <= last; ++bin)
-        value = std::max(value, spectrum[static_cast<size_t>(bin)]);
-    return value;
-}
 }
 
 SpecView::SpecView(PluginProcessor& processorRef)
@@ -637,8 +602,6 @@ void SpecView::paint(juce::Graphics& graphics)
     const auto splitViewAvailable = ana::spec::supportsSplitView(monitorMode);
     const auto useSplitView = splitViewAvailable && split != nullptr
         && split->load(std::memory_order_relaxed) >= 0.5f;
-    const auto* secondGraphEnabled = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specSecondGraphParameterId);
     const auto drawSecondGraph = useSplitView;
     const auto firstType = readSpecDisplayType(processor, PluginProcessor::specFirstGraphTypeParameterId);
     const auto secondType = readSpecDisplayType(processor, PluginProcessor::specSecondGraphTypeParameterId);

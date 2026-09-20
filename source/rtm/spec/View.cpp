@@ -948,7 +948,6 @@ void SpecView::timerCallback()
         clearSpectrogram();
     }
 
-    const auto monitorMode = readSpecMonitorMode(processor);
     const auto displayRange = readSpecDisplayRange(processor);
     const auto lowRange = displayRange.low;
     const auto highRange = displayRange.high;

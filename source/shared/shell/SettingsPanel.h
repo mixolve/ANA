@@ -51,7 +51,7 @@ private:
     LvlsSettingsSection lvlsSettings;
     SliderLookAndFeel focusedControlLookAndFeel;
     FocusedPotentiometer focusedParameterControl;
-    ControlButton closeButton { "xmark.circle" };
+    ControlButton closeButton { "x" };
     ParameterControl* focusedParameterTarget = nullptr;
     juce::Component settingsContent;
     juce::Viewport settingsViewport;

@@ -178,12 +178,14 @@ ScopView::ScopView(PluginProcessor& processorRef)
             bandModeButtons[bandIndex][modeIndex] = std::move(button);
         }
 
-        auto clearButton = std::make_unique<ControlButton>("CLEAR");
+        auto clearButton = std::make_unique<ControlButton>("eraser");
+        clearButton->setTooltip("CLEAR");
         clearButton->onClick = [this, bandIndex] { clearBandHistory(bandIndex); };
         addAndMakeVisible(*clearButton);
         bandClearButtons[bandIndex] = std::move(clearButton);
 
-        auto singleViewButton = std::make_unique<ControlButton>("SVIEW");
+        auto singleViewButton = std::make_unique<ControlButton>("browser-maximize");
+        singleViewButton->setTooltip("SVIEW");
         singleViewButton->onClick = [this, bandIndex]
         {
             if (fullSourceView)

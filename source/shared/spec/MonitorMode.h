@@ -19,7 +19,7 @@ enum class MonitorMode : int
 
 inline constexpr size_t monitorModeCount = static_cast<size_t>(MonitorMode::delta) + 1;
 inline constexpr std::array<const char*, monitorModeCount> monitorModeLabels {
-    "ST", "LR", "L", "R", "MS", "M", "S", "triangle.circle"
+    "ST", "LR", "L", "R", "MS", "M", "S", "delta"
 };
 
 constexpr int monitorModeIndex(const MonitorMode mode) noexcept
