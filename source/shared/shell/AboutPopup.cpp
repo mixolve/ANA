@@ -20,9 +20,19 @@ AboutPopup::AboutPopup(std::function<void()> closeCallback)
     };
     configureLink(webLink);
     configureLink(manualLink);
+    configureLink(licensesLink);
     manualLink.onClick = []
     {
-        const auto url = createLocalManualUrl();
+        const auto url = createLocalDocumentUrl("manual.md", BinaryData::manual_md,
+                                                static_cast<size_t>(BinaryData::manual_mdSize));
+        if (url.isWellFormed())
+            url.launchInDefaultBrowser();
+    };
+    licensesLink.onClick = []
+    {
+        const auto url = createLocalDocumentUrl(
+            "licenses.md", BinaryData::licenses_md,
+            static_cast<size_t>(BinaryData::licenses_mdSize));
         if (url.isWellFormed())
             url.launchInDefaultBrowser();
     };
@@ -41,6 +51,11 @@ AboutPopup::AboutPopup(std::function<void()> closeCallback)
         if (trimmed.startsWith("[MANUAL]"))
         {
             contentRows.push_back(&manualLink);
+            continue;
+        }
+        if (trimmed.startsWith("[LICENSES]"))
+        {
+            contentRows.push_back(&licensesLink);
             continue;
         }
 
@@ -97,17 +112,18 @@ void AboutPopup::requestClose()
     });
 }
 
-juce::URL AboutPopup::createLocalManualUrl()
+juce::URL AboutPopup::createLocalDocumentUrl(const char* const fileName,
+                                              const void* const data,
+                                              const size_t dataSize)
 {
     const auto directory = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                .getChildFile("mixolve-ana");
     if (directory.createDirectory().failed())
         return {};
-    const auto manualFile = directory.getChildFile("manual.md");
-    manualFile.setReadOnly(false);
-    if (! manualFile.replaceWithData(BinaryData::manual_md,
-                                     static_cast<size_t>(BinaryData::manual_mdSize)))
+    const auto documentFile = directory.getChildFile(fileName);
+    documentFile.setReadOnly(false);
+    if (! documentFile.replaceWithData(data, dataSize))
         return {};
-    manualFile.setReadOnly(true);
-    return juce::URL(manualFile);
+    documentFile.setReadOnly(true);
+    return juce::URL(documentFile);
 }

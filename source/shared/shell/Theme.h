@@ -5,8 +5,8 @@
 
 namespace ana::ui
 {
-inline constexpr float baseFontSize = 20.0f;
-inline constexpr float iconFontSize = 22.0f;
+inline constexpr float baseFontSize = 22.0f;
+inline constexpr float iconFontSize = 18.0f;
 inline constexpr int controlHeight = 30;
 inline constexpr int iconControlSize = 30;
 inline constexpr int activeBorderWidth = 2;
@@ -106,13 +106,13 @@ inline juce::Font makeFont()
 {
 #if JUCE_TARGET_HAS_BINARY_DATA
     if (auto typeface = juce::Typeface::createSystemTypefaceFor(
-            BinaryData::SometypeMonoRegular_ttf,
-            static_cast<size_t>(BinaryData::SometypeMonoRegular_ttfSize)))
+            BinaryData::IosevkaCharonMonoMedium_ttf,
+            static_cast<size_t>(BinaryData::IosevkaCharonMonoMedium_ttfSize)))
         return juce::Font(juce::FontOptions(typeface).withHeight(baseFontSize))
             .withExtraKerningFactor(letterSpacing / baseFontSize);
 #endif
 
-    return juce::Font(juce::FontOptions("Sometype Mono", baseFontSize, juce::Font::plain))
+    return juce::Font(juce::FontOptions("Iosevka Charon Mono", "Medium", baseFontSize))
         .withExtraKerningFactor(letterSpacing / baseFontSize);
 }
 }

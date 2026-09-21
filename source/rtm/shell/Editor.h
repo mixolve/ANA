@@ -65,11 +65,11 @@ private:
     ControlButton lvlsPageButton { "LVLS" };
     ControlButton scopPageButton { "SCOP" };
     ControlButton snapshotsWindowButton { "hexagons" };
-    ControlButton settingsButton { "settings" };
+    ControlButton settingsButton { "adjustments-alt" };
     ControlButton fullSourceButton { "browser-maximize" };
     ControlButton clearButton { "eraser" };
     ControlButton freezeButton { "snowflake" };
-    ControlButton aboutButton { "info-circle" };
+    ControlButton aboutButton { "I" };
     juce::Point<int> pendingEditorSize;
     double editorSizeSaveDeadlineMilliseconds = 0.0;
     bool editorSizeSavePending = false;

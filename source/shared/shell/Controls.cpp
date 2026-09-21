@@ -123,10 +123,9 @@ void EllipsisLabel::editorAboutToBeHidden(juce::TextEditor*)
 ControlButton::ControlButton(juce::String text)
     : juce::Button(std::move(text))
 {
-    iconButton = getButtonText() == "settings"
+    iconButton = getButtonText() == "adjustments-alt"
         || getButtonText() == "snowflake"
         || getButtonText() == "refresh"
-        || getButtonText() == "info-circle"
         || getButtonText() == "x"
         || getButtonText() == "hexagons"
         || getButtonText() == "plus"

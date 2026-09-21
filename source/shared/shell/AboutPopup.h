@@ -17,10 +17,13 @@ public:
 
 private:
     void requestClose();
-    static juce::URL createLocalManualUrl();
+    static juce::URL createLocalDocumentUrl(const char* fileName,
+                                             const void* data,
+                                             size_t dataSize);
 
     juce::HyperlinkButton webLink { "WEB", juce::URL("https://mixolve.cc/") };
     juce::HyperlinkButton manualLink { "MANUAL", juce::URL() };
+    juce::HyperlinkButton licensesLink { "LICENSES", juce::URL() };
     std::vector<std::unique_ptr<EllipsisLabel>> textLabels;
     std::vector<juce::Component*> contentRows;
     ControlButton okButton { "OK" };
