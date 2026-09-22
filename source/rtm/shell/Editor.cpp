@@ -2,6 +2,7 @@
 #include "Processor.h"
 #include "shared/shell/Theme.h"
 #include "shared/shell/AuxiliaryWindowFocus.h"
+#include "shared/shell/GraphColours.h"
 
 #include <algorithm>
 #include <array>
@@ -13,8 +14,6 @@ namespace
 {
 constexpr int minimumEditorHeight = 300;
 constexpr int maximumEditorSize = 32768;
-constexpr int minimumEditorWidth = 800;
-constexpr int defaultEditorWidth = minimumEditorWidth;
 constexpr int defaultEditorHeight = minimumEditorHeight;
 constexpr int editorResizeHandleThickness = ana::ui::gap.pixels();
 constexpr int settingsWindowWidth = 300;
@@ -26,29 +25,32 @@ constexpr int defaultSnapshotsWindowHeight = 360;
 constexpr int minimumSnapshotsWindowHeight = 180;
 constexpr int maximumSnapshotsWindowHeight = 1200;
 constexpr int snapshotFileMagic = 0x414e4153; // "ANAS"
-constexpr int snapshotFileVersion = 2;
+constexpr int snapshotFileVersion = 3;
 constexpr int maximumSnapshotNameLength = 256;
 constexpr const char* snapshotFileExtension = ".anasnapshot";
 constexpr const char* snapshotFileWildcard = "*.anasnapshot";
 
-struct SnapshotColourOption
+int navigationWidth() noexcept
 {
-    const char* name;
-    juce::Colour colour;
-};
+    return ana::ui::textControlWidth("SPEC") + ana::ui::textControlWidth("CORR")
+        + ana::ui::textControlWidth("LVLS") + ana::ui::textControlWidth("SCOP")
+        + 3 * ana::ui::gap.pixels();
+}
 
-const std::array<SnapshotColourOption, 8> snapshotColourOptions {{
-    { "FF9999", juce::Colour(0xffff9999) },
-    { "FFCC99", juce::Colour(0xffffcc99) },
-    { "FFFF99", juce::Colour(0xffffff99) },
-    { "99FF99", juce::Colour(0xff99ff99) },
-    { "99FFFF", juce::Colour(0xff99ffff) },
-    { "9999FF", juce::Colour(0xff9999ff) },
-    { "CC99FF", juce::Colour(0xffcc99ff) },
-    { "FF99CC", juce::Colour(0xffff99cc) }
-}};
+int minimumEditorWidth() noexcept
+{
+    constexpr int regularRightControlCount = 4;
+    const auto regularRightControlsWidth = 3 * ana::ui::iconControlSize
+        + ana::ui::textControlWidth("I")
+        + regularRightControlCount * ana::ui::gap.pixels();
+    const auto regularWidth = 2 * ana::ui::gap.pixels()
+        + navigationWidth() + regularRightControlsWidth;
+    return regularWidth + 2 * (ana::ui::iconControlSize + ana::ui::gap.pixels());
+}
 
-constexpr int snapshotGainFieldWidth = ana::ui::textControlWidth(6);
+const auto& snapshotColourOptions = ana::ui::graphColourOptions;
+
+int snapshotGainFieldWidth() noexcept { return ana::ui::textControlWidth(6); }
 const juce::Colour snapshotFieldBorderColour { 0xffbbbbbb };
 
 juce::String formatSnapshotGain(const float gainDb)
@@ -284,7 +286,7 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced(1);
-        gainLabel.setBounds(area.removeFromRight(snapshotGainFieldWidth));
+        gainLabel.setBounds(area.removeFromRight(snapshotGainFieldWidth()));
         ana::ui::gap.removeFromRight(area);
         visibilityButton.setBounds(area.removeFromRight(ana::ui::iconControlSize));
         ana::ui::gap.removeFromRight(area);
@@ -385,8 +387,7 @@ public:
     void setColourIndex(const int newIndex)
     {
         colourIndex = juce::jlimit(0, static_cast<int>(snapshotColourOptions.size()) - 1, newIndex);
-        specView.setSnapshotColour(snapshotIndex,
-                                       snapshotColourOptions[static_cast<size_t>(colourIndex)].colour);
+        specView.setSnapshotColour(snapshotIndex, ana::ui::graphColour(colourIndex));
     }
 
     void setGainDb(const float gainDb, const bool notifyFocusOwner = false)
@@ -432,7 +433,7 @@ public:
         const auto snapshotColour = specView.getSnapshotColour(snapshotIndex);
         for (size_t index = 0; index < snapshotColourOptions.size(); ++index)
         {
-            if (snapshotColourOptions[index].colour == snapshotColour)
+            if (ana::ui::graphColour(static_cast<int>(index)) == snapshotColour)
             {
                 colourIndex = static_cast<int>(index);
                 break;
@@ -647,7 +648,7 @@ private:
     SnapshotRow* addSnapshotRow()
     {
         const auto snapshotIndex = specView.addSnapshotSlot();
-        const auto initialColourIndex = static_cast<int>(snapshotIndex % snapshotColourOptions.size());
+        const auto initialColourIndex = ana::ui::defaultGraphColourIndex;
         auto row = std::make_unique<SnapshotRow>(specView, snapshotIndex, initialColourIndex);
         row->onColourRequested = [this] (SnapshotRow& requestedRow)
         {
@@ -1365,10 +1366,11 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
     addAndMakeVisible(*rightEdgeResizer);
     addAndMakeVisible(*topEdgeResizer);
     addAndMakeVisible(*bottomEdgeResizer);
-    setResizeLimits(minimumEditorWidth, minimumEditorHeight, maximumEditorSize, maximumEditorSize);
+    const auto minimumWidth = minimumEditorWidth();
+    setResizeLimits(minimumWidth, minimumEditorHeight, maximumEditorSize, maximumEditorSize);
     const auto savedSize = audioProcessor.getLastEditorSize();
-    setSize(juce::jlimit(minimumEditorWidth, maximumEditorSize,
-                         savedSize.x > 0 ? savedSize.x : defaultEditorWidth),
+    setSize(juce::jlimit(minimumWidth, maximumEditorSize,
+                         savedSize.x > 0 ? savedSize.x : minimumWidth),
             juce::jlimit(minimumEditorHeight, maximumEditorSize,
                          savedSize.y > 0 ? savedSize.y : defaultEditorHeight));
 }
@@ -1378,7 +1380,6 @@ PluginEditor::~PluginEditor()
     if (getWidth() > 0 && getHeight() > 0)
         audioProcessor.setLastEditorSize(getWidth(), getHeight());
 }
-
 
 void PluginEditor::showAnalyzerSettings(const bool shouldShowSettings)
 {

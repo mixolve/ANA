@@ -19,13 +19,13 @@ using ChannelValues = std::array<float, channelCount>;
 ChannelValues decibelValues(const fft::StereoSpectrumLevels& levels) noexcept
 {
     return { levels.stereoDecibels, levels.leftDecibels, levels.rightDecibels,
-             levels.midDecibels, levels.sideDecibels, levels.deltaDecibels };
+             levels.midDecibels, levels.sideDecibels };
 }
 
 ChannelValues gainValues(const fft::StereoSpectrumLevels& levels) noexcept
 {
     return { levels.stereoGain, levels.leftGain, levels.rightGain,
-             levels.midGain, levels.sideGain, levels.deltaGain };
+             levels.midGain, levels.sideGain };
 }
 }
 

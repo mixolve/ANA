@@ -134,7 +134,6 @@ ControlButton::ControlButton(juce::String text)
         || getButtonText() == "palette"
         || getButtonText() == "arrows-up-down"
         || getButtonText() == "arrows-down"
-        || getButtonText() == "delta"
         || getButtonText() == "browser-maximize"
         || getButtonText() == "eraser"
         || getButtonText() == "layout-rows";

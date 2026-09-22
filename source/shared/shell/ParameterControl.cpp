@@ -22,10 +22,6 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
     parameter = state.getParameter(parameterId);
     choiceParameter = dynamic_cast<juce::AudioParameterChoice*>(parameter);
     boolParameter = dynamic_cast<juce::AudioParameterBool*>(parameter);
-    slider.textFromValueFunction = [this] (const double value)
-    {
-        return valueFormatter != nullptr ? valueFormatter(value) : juce::String(value);
-    };
     slider.onValueChange = [this]
     {
         repaint();
@@ -52,6 +48,12 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
     };
     addChildComponent(valueEditor);
     attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(state, parameterId, slider);
+    // SliderAttachment installs the parameter's default text formatter, so the UI-specific
+    // formatter must be applied afterwards.
+    slider.textFromValueFunction = [this] (const double value)
+    {
+        return valueFormatter != nullptr ? valueFormatter(value) : juce::String(value);
+    };
 }
 
 ParameterControl::~ParameterControl()

@@ -59,7 +59,6 @@ private:
         int fftSize = 0;
         double sampleRate = 0.0;
         bool drawSecondGraph = false;
-        bool deltaMode = false;
         juce::Colour colour { juce::Colours::white };
         float gainDb = 0.0f;
         bool visible = true;
@@ -73,7 +72,7 @@ private:
     void refreshControls();
     void setViewMode(ViewMode nextViewMode);
     void updateCursorReadouts();
-    void appendSpectrogramFrame();
+    void appendSpectrogramFrame(int columnCount);
     void resetSpectrogramImage();
     void rebuildRtmSpectrogramImage();
     void scheduleMapImageRebuild() noexcept;
@@ -116,6 +115,10 @@ private:
     int renderedMapHighQuality = -1;
     int renderedMapLeftToRight = -1;
     int renderedMapFrequencyScale = -1;
+    int renderedMapColourMap = -1;
     int rtmMapWriteColumn = 0;
+    double rtmMapColumnAccumulator = 0.0;
+    double rtmMapLastAdvanceMilliseconds = 0.0;
+    double renderedMapTimeMilliseconds = std::numeric_limits<double>::quiet_NaN();
     bool mapImageRebuildPending = false;
 };

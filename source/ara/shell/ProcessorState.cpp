@@ -1,5 +1,6 @@
 #include "Processor.h"
 #include "shared/scop/Settings.h"
+#include "shared/spec/Settings.h"
 #include "shared/corr/Settings.h"
 #include "shared/scop/TimeScale.h"
 
@@ -27,6 +28,32 @@ double PluginProcessor::getScopTimeMilliseconds() const noexcept
 bool PluginProcessor::isScopTimeNoteBased() const noexcept
 {
     if (const auto* value = parameters.getRawParameterValue(scopTimeBaseParameterId))
+        return value->load(std::memory_order_relaxed) >= 0.5f;
+
+    return false;
+}
+
+double PluginProcessor::getSpecMapTimeMilliseconds() const noexcept
+{
+    if (isSpecMapTimeNoteBased())
+    {
+        const auto* noteValue = parameters.getRawParameterValue(specMapNoteLengthParameterId);
+        const auto noteIndex = noteValue != nullptr
+            ? juce::roundToInt(noteValue->load(std::memory_order_relaxed))
+            : ana::scop::defaultNoteLengthIndex;
+        return ana::scop::noteLengthMilliseconds(
+            noteIndex, hostTempoBpm.load(std::memory_order_relaxed));
+    }
+
+    if (const auto* value = parameters.getRawParameterValue(specMapTimeParameterId))
+        return static_cast<double>(value->load(std::memory_order_relaxed));
+
+    return ana::spec::defaultMapTimeMilliseconds;
+}
+
+bool PluginProcessor::isSpecMapTimeNoteBased() const noexcept
+{
+    if (const auto* value = parameters.getRawParameterValue(specMapTimeBaseParameterId))
         return value->load(std::memory_order_relaxed) >= 0.5f;
 
     return false;
@@ -209,6 +236,8 @@ void PluginProcessor::setCorrMode(const int mode)
         corrAverageTimeParameterId, corrSmoothingParameterId,
         corrFilledDisplayParameterId, corrSecondGraphParameterId,
         corrFirstGraphTypeParameterId, corrSecondGraphTypeParameterId,
+        corrFirstGraphColourParameterId, corrSecondGraphColourParameterId,
+        corrGraphOpacityParameterId,
         corrClearOnPlayParameterId, corrRangesVisibleParameterId,
         corrCursorReadoutParameterId, corrZoomControlsParameterId,
         corrLowParameterId, corrHighParameterId,

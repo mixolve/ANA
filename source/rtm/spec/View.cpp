@@ -3,6 +3,7 @@
 #include "shared/analyzer/DisplaySettings.h"
 #include "AnalyzerViewUtilities.h"
 #include "shared/analyzer/SpectrogramFrequencyScale.h"
+#include "shared/shell/GraphColours.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,6 +15,19 @@ using namespace ana::ui::analyzer_detail;
 namespace
 {
 constexpr float specSlopeReferenceFrequency = 632.0f;
+
+juce::Colour readGraphColour(const PluginProcessor& processor, const char* parameterId,
+                             const int defaultIndex) noexcept
+{
+    return ana::ui::graphColour(juce::roundToInt(
+        readParameterValue(processor, parameterId, static_cast<float>(defaultIndex))));
+}
+
+float readGraphOpacity(const PluginProcessor& processor) noexcept
+{
+    return juce::jlimit(0.01f, 1.0f, readParameterValue(
+        processor, PluginProcessor::specGraphOpacityParameterId, 100.0f) * 0.01f);
+}
 
 struct SpecFrequencyRange
 {
@@ -45,6 +59,13 @@ ana::analyzer_frequency::Scale readSpecFrequencyScale(const PluginProcessor& pro
     return ana::analyzer_frequency::scaleFromIndex(juce::roundToInt(readParameterValue(
         processor, PluginProcessor::specFrequencyScaleParameterId,
         static_cast<float>(ana::analyzer_frequency::defaultScaleIndex))));
+}
+
+ana::spec::ColourMap readSpecColourMap(const PluginProcessor& processor) noexcept
+{
+    return ana::spec::colourMapFromIndex(juce::roundToInt(readParameterValue(
+        processor, PluginProcessor::specMapColourMapParameterId,
+        static_cast<float>(ana::spec::defaultColourMapIndex))));
 }
 
 struct SpecDisplayRange
@@ -92,7 +113,7 @@ bool shouldUseSplitView(const PluginProcessor& processor,
     if (! ana::spec::supportsSplitView(mode))
         return false;
 
-    if (mapMode && mode == ana::spec::MonitorMode::leftRight)
+    if (mapMode)
         return true;
 
     const auto* split = processor.getParameters().getRawParameterValue(
@@ -115,7 +136,6 @@ specChannelsForMode(const ana::spec::MonitorMode mode) noexcept
         case MonitorMode::midSide:   return { Channel::mid, Channel::side };
         case MonitorMode::mid:       return { Channel::mid, Channel::mid };
         case MonitorMode::side:      return { Channel::side, Channel::side };
-        case MonitorMode::delta:     return { Channel::delta, Channel::delta };
     }
 
     return { Channel::stereo, Channel::stereo };
@@ -147,8 +167,13 @@ juce::String formatMapTime(const double seconds)
     return juce::String::formatted("%02d:%06.3f", minutes, secondsInMinute);
 }
 
-juce::Colour spectrogramColour(const float normalisedLevel) noexcept
+juce::Colour spectrogramColour(const float normalisedLevel,
+                               const ana::spec::ColourMap colourMap) noexcept
 {
+    const auto clampedLevel = juce::jlimit(0.0f, 1.0f, normalisedLevel);
+    if (colourMap == ana::spec::ColourMap::grayscale)
+        return juce::Colour::fromFloatRGBA(clampedLevel, clampedLevel, clampedLevel, 1.0f);
+
     static constexpr std::array<juce::uint32, 200> colours {
         0xff000000u, 0xff000003u, 0xff000006u, 0xff000009u, 0xff00000cu, 0xff00000fu, 0xff000012u, 0xff000015u,
         0xff000018u, 0xff00001au, 0xff01001eu, 0xff010021u, 0xff010024u, 0xff010027u, 0xff01002au, 0xff01002eu,
@@ -176,8 +201,7 @@ juce::Colour spectrogramColour(const float normalisedLevel) noexcept
         0xfffff5ffu, 0xfffff8ffu, 0xfffff9ffu, 0xfffffaffu, 0xfffffaffu, 0xfffffaffu, 0xfffffaffu, 0xfffffaffu,
         0xfffffaffu, 0xfffffbffu, 0xfffffbffu, 0xfffffbffu, 0xfffffcffu, 0xfffffdffu, 0xfffffeffu, 0xffffffffu
     };
-    const auto scaled = juce::jlimit(0.0f, 1.0f, normalisedLevel)
-        * static_cast<float>(colours.size() - 1);
+    const auto scaled = clampedLevel * static_cast<float>(colours.size() - 1);
     const auto index = juce::jlimit(0, static_cast<int>(colours.size()) - 2,
                                    static_cast<int>(std::floor(scaled)));
     return juce::Colour(colours[static_cast<size_t>(index)]).interpolatedWith(
@@ -265,8 +289,6 @@ SpecView::SpecView(PluginProcessor& processorRef)
         {
             processor.setSpecMonitorMode(static_cast<int>(index));
         };
-        if (index == ana::spec::monitorModeIndex(ana::spec::MonitorMode::delta))
-            button->setTooltip("DELTA");
         addAndMakeVisible(*button);
         monitorButtons[index] = std::move(button);
     }
@@ -274,11 +296,11 @@ SpecView::SpecView(PluginProcessor& processorRef)
     splitButton.setClickingTogglesState(true);
     splitButton.onClick = [this]
     {
-        if (viewMode == ViewMode::map
-            && readSpecMonitorMode(processor) == ana::spec::MonitorMode::leftRight)
+        if (viewMode != ViewMode::frequency)
             return;
 
-        if (auto* parameter = processor.getParameters().getParameter(PluginProcessor::specSplitViewParameterId))
+        if (auto* parameter = processor.getParameters().getParameter(
+                PluginProcessor::specSplitViewParameterId))
             parameter->setValueNotifyingHost(splitButton.getToggleState() ? 1.0f : 0.0f);
     };
     addAndMakeVisible(splitButton);
@@ -351,13 +373,7 @@ bool SpecView::captureSnapshot(const size_t snapshotIndex)
 
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto [firstChannel, secondChannel] = specChannelsForMode(monitorMode);
-    captured.deltaMode = monitorMode == ana::spec::MonitorMode::delta;
-
-    const auto* split = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specSplitViewParameterId);
-    const auto useSplitView = ana::spec::supportsSplitView(monitorMode)
-        && split != nullptr
-        && split->load(std::memory_order_relaxed) >= 0.5f;
+    const auto useSplitView = shouldUseSplitView(processor, monitorMode, false);
     const auto* secondGraphEnabled = processor.getParameters().getRawParameterValue(
         PluginProcessor::specSecondGraphParameterId);
     captured.drawSecondGraph = useSplitView || secondGraphEnabled == nullptr
@@ -464,7 +480,6 @@ bool SpecView::writeSnapshot(const size_t snapshotIndex, juce::OutputStream& out
     return output.writeInt(snapshot.fftSize)
         && output.writeDouble(snapshot.sampleRate)
         && output.writeByte(snapshot.drawSecondGraph ? 1 : 0)
-        && output.writeByte(snapshot.deltaMode ? 1 : 0)
         && output.writeInt(static_cast<int>(snapshot.colour.getARGB()))
         && output.writeByte(snapshot.visible ? 1 : 0)
         && output.writeFloat(snapshot.gainDb)
@@ -477,7 +492,7 @@ bool SpecView::readSnapshot(const size_t snapshotIndex, juce::InputStream& input
     if (snapshotIndex >= snapshots.size())
         return false;
 
-    constexpr juce::int64 fixedHeaderSize = 4 + 8 + 1 + 1 + 4 + 1 + 4;
+    constexpr juce::int64 fixedHeaderSize = 4 + 8 + 1 + 4 + 1 + 4;
     if (input.getNumBytesRemaining() < fixedHeaderSize)
         return false;
 
@@ -485,7 +500,6 @@ bool SpecView::readSnapshot(const size_t snapshotIndex, juce::InputStream& input
     loaded.fftSize = input.readInt();
     loaded.sampleRate = input.readDouble();
     const auto drawSecondGraph = input.readByte();
-    const auto deltaMode = input.readByte();
     loaded.colour = juce::Colour(static_cast<juce::uint32>(input.readInt()));
     const auto visible = input.readByte();
     loaded.gainDb = input.readFloat();
@@ -494,11 +508,10 @@ bool SpecView::readSnapshot(const size_t snapshotIndex, juce::InputStream& input
     {
         return value == 0 || value == 1;
     };
-    if (! isBooleanByte(drawSecondGraph) || ! isBooleanByte(deltaMode) || ! isBooleanByte(visible))
+    if (! isBooleanByte(drawSecondGraph) || ! isBooleanByte(visible))
         return false;
 
     loaded.drawSecondGraph = drawSecondGraph == 1;
-    loaded.deltaMode = deltaMode == 1;
     loaded.visible = visible == 1;
 
     if (! ana::fft::StereoFftStream::isSupportedFftSize(loaded.fftSize)
@@ -561,6 +574,8 @@ float SpecView::getSnapshotGain(const size_t snapshotIndex) const noexcept
 void SpecView::clearSpectrogram()
 {
     rtmMapWriteColumn = 0;
+    rtmMapColumnAccumulator = 0.0;
+    rtmMapLastAdvanceMilliseconds = 0.0;
     std::fill(rtmSpectrogramLevels.begin(), rtmSpectrogramLevels.end(), ana::spec::SpecProcessor::minimumDecibels);
     if (spectrogramImage.isValid())
         spectrogramImage.clear(spectrogramImage.getBounds(), juce::Colours::black);
@@ -609,11 +624,7 @@ void SpecView::paint(juce::Graphics& graphics)
 
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto [firstChannel, secondChannel] = specChannelsForMode(monitorMode);
-    const auto* split = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specSplitViewParameterId);
-    const auto splitViewAvailable = ana::spec::supportsSplitView(monitorMode);
-    const auto useSplitView = splitViewAvailable && split != nullptr
-        && split->load(std::memory_order_relaxed) >= 0.5f;
+    const auto useSplitView = shouldUseSplitView(processor, monitorMode, false);
     const auto* secondGraphEnabled = processor.getParameters().getRawParameterValue(
         PluginProcessor::specSecondGraphParameterId);
     const auto drawSecondGraph = useSplitView
@@ -621,6 +632,11 @@ void SpecView::paint(juce::Graphics& graphics)
         || secondGraphEnabled->load(std::memory_order_relaxed) >= 0.5f;
     const auto firstType = readSpecDisplayType(processor, PluginProcessor::specFirstGraphTypeParameterId);
     const auto secondType = readSpecDisplayType(processor, PluginProcessor::specSecondGraphTypeParameterId);
+    const auto firstColour = readGraphColour(processor,
+        PluginProcessor::specFirstGraphColourParameterId, ana::ui::defaultFirstGraphColourIndex);
+    const auto secondColour = readGraphColour(processor,
+        PluginProcessor::specSecondGraphColourParameterId, ana::ui::defaultSecondGraphColourIndex);
+    const auto graphOpacity = readGraphOpacity(processor);
     const auto copySpectra = [&] (const ana::spec::SpecProcessor& spec)
     {
         spec.copySpectrum(firstChannel, firstType, primarySpec, fftSize);
@@ -629,7 +645,6 @@ void SpecView::paint(juce::Graphics& graphics)
     };
     copySpectra(processor.getSpecProcessor());
 
-    const auto currentDeltaMode = monitorMode == ana::spec::MonitorMode::delta;
     if (useSplitView)
     {
         auto upperBounds = plotBounds;
@@ -639,7 +654,7 @@ void SpecView::paint(juce::Graphics& graphics)
 
         for (const auto& snapshot : snapshots)
         {
-            if (! snapshot.visible || ! snapshot.hasData || snapshot.deltaMode != currentDeltaMode)
+            if (! snapshot.visible || ! snapshot.hasData)
                 continue;
 
             if (snapshot.drawSecondGraph)
@@ -652,15 +667,15 @@ void SpecView::paint(juce::Graphics& graphics)
         graphics.setColour(ana::ui::white);
         graphics.fillRect(plotBounds.getX(), upperBounds.getBottom(), plotBounds.getWidth(), dividerHeight);
         drawSpec(graphics, secondarySpec, fftSize, sampleRate, lowerBounds,
-                     ana::ui::white, ana::ui::dark);
+                     secondColour, secondColour.withAlpha(graphOpacity));
         drawSpec(graphics, primarySpec, fftSize, sampleRate, upperBounds,
-                     ana::ui::white, ana::ui::light);
+                     firstColour, firstColour.withAlpha(graphOpacity));
     }
     else
     {
         for (const auto& snapshot : snapshots)
         {
-            if (! snapshot.visible || ! snapshot.hasData || snapshot.deltaMode != currentDeltaMode)
+            if (! snapshot.visible || ! snapshot.hasData)
                 continue;
 
             if (snapshot.drawSecondGraph)
@@ -672,9 +687,9 @@ void SpecView::paint(juce::Graphics& graphics)
 
         if (drawSecondGraph)
             drawSpec(graphics, secondarySpec, fftSize, sampleRate, plotBounds,
-                         ana::ui::white, ana::ui::dark);
+                         secondColour, secondColour.withAlpha(graphOpacity));
         drawSpec(graphics, primarySpec, fftSize, sampleRate, plotBounds,
-                     ana::ui::white, ana::ui::light);
+                     firstColour, firstColour.withAlpha(graphOpacity));
     }
 
     const auto* cursorReadout = processor.getParameters().getRawParameterValue(
@@ -704,9 +719,9 @@ void SpecView::resized()
     const auto showZoomSetting = readVisibility(PluginProcessor::specZoomControlsParameterId);
     const auto showHorizontalZoom = showZoomSetting && freqMode;
     const auto showVerticalZoom = showZoomSetting && (freqMode || mapMode);
-    constexpr int frequencyReadoutWidth = ana::ui::textControlWidth(8);
-    constexpr int levelReadoutWidth = ana::ui::textControlWidth(7);
-    constexpr int timeReadoutWidth = ana::ui::textControlWidth(10);
+    const auto frequencyReadoutWidth = ana::ui::textControlWidth(8);
+    const auto levelReadoutWidth = ana::ui::textControlWidth(7);
+    const auto timeReadoutWidth = ana::ui::textControlWidth(10);
     const auto mapCursorTimeWidth = timeReadoutWidth;
     const auto mapCursorFrequencyWidth = frequencyReadoutWidth;
     const auto readoutY = plotBounds.getBottom() - ana::ui::controlHeight;
@@ -750,7 +765,7 @@ void SpecView::resized()
     for (auto& button : monitorButtons)
         button->setBounds(showMonitor
             ? optionalControls.takeLeft(button->getPreferredWidth()) : juce::Rectangle<int>());
-    splitButtonFits = showMonitor
+    splitButtonFits = showMonitor && freqMode
         && optionalControls.remaining().getWidth() >= splitButton.getPreferredWidth();
     splitButton.setBounds(splitButtonFits
         ? optionalControls.takeLeft(splitButton.getPreferredWidth()) : juce::Rectangle<int>());
@@ -862,20 +877,8 @@ void SpecView::updateCursorReadouts()
             const auto normalisedX = juce::jlimit(0.0f, 1.0f,
                 (cursorPosition.x - plotBounds.getX()) / plotBounds.getWidth());
             {
-                const auto& fftSizes = ana::fft::StereoFftStream::supportedFftSizes;
-                const auto fftIndex = juce::jlimit(0, static_cast<int>(fftSizes.size()) - 1,
-                    juce::roundToInt(readParameterValue(
-                        processor, PluginProcessor::specFftSizeParameterId,
-                        static_cast<float>(ana::fft::StereoFftStream::defaultFftSizeIndex))));
-                const auto fftSize = fftSizes[static_cast<size_t>(fftIndex)];
-                const auto sampleRate = processor.getSpecProcessor().getSampleRate();
-                // Cursor time uses the base raster hop; Time Overlap only adds intermediate analyses.
-                const auto hopSize = ana::spec::SpecProcessor::mapBaseHopSizeForFftSize(fftSize);
-                const auto secondsPerColumn = sampleRate > 0.0
-                    ? static_cast<double>(hopSize) / sampleRate : 0.0;
-                const auto historyColumns = std::max(0, spectrogramImage.getWidth() - 1);
                 const auto ageSeconds = (1.0 - static_cast<double>(normalisedX))
-                    * static_cast<double>(historyColumns) * secondsPerColumn;
+                    * processor.getSpecMapTimeMilliseconds() * 0.001;
                 cursorReadoutLabel.setText(ageSeconds > 0.0005
                                                ? "-" + formatMapTime(ageSeconds)
                                                : formatMapTime(0.0),
@@ -953,6 +956,7 @@ void SpecView::timerCallback()
     const auto highRange = displayRange.high;
     const auto slope = displayRange.slope;
     const auto frequencyScale = readSpecFrequencyScale(processor);
+    const auto colourMap = readSpecColourMap(processor);
     const auto rangeChanged = ! juce::approximatelyEqual(renderedMapRangeLow, lowRange)
         || ! juce::approximatelyEqual(renderedMapRangeHigh, highRange);
     const auto slopeChanged = ! juce::approximatelyEqual(renderedMapSlope, slope);
@@ -962,18 +966,24 @@ void SpecView::timerCallback()
     const auto mapLeftToRight = readParameterValue(
         processor, PluginProcessor::specMapLeftToRightParameterId, 0.0f) >= 0.5f;
     const auto mapDirectionChanged = renderedMapLeftToRight != (mapLeftToRight ? 1 : 0);
+    const auto mapTimeMilliseconds = processor.getSpecMapTimeMilliseconds();
+    const auto mapTimeChanged = ! juce::approximatelyEqual(
+        renderedMapTimeMilliseconds, mapTimeMilliseconds);
     const auto frequencyScaleChanged = renderedMapFrequencyScale
         != static_cast<int>(frequencyScale);
+    const auto colourMapChanged = renderedMapColourMap != static_cast<int>(colourMap);
     if (viewMode == ViewMode::map
-        && (rangeChanged || slopeChanged || highQualityChanged || mapDirectionChanged
-            || frequencyScaleChanged))
+        && (rangeChanged || slopeChanged || highQualityChanged || mapDirectionChanged || mapTimeChanged
+            || frequencyScaleChanged || colourMapChanged))
     {
-        if (highQualityChanged || mapDirectionChanged || frequencyScaleChanged)
+        if (highQualityChanged || mapDirectionChanged || frequencyScaleChanged || mapTimeChanged)
             clearSpectrogram();
         scheduleMapImageRebuild();
         renderedMapHighQuality = highQuality ? 1 : 0;
         renderedMapLeftToRight = mapLeftToRight ? 1 : 0;
         renderedMapFrequencyScale = static_cast<int>(frequencyScale);
+        renderedMapColourMap = static_cast<int>(colourMap);
+        renderedMapTimeMilliseconds = mapTimeMilliseconds;
     }
 
     if (viewMode == ViewMode::map && mapImageRebuildPending)
@@ -990,7 +1000,24 @@ void SpecView::timerCallback()
     {
         displayedRevision = currentRevision;
         if (viewMode == ViewMode::map)
-            appendSpectrogramFrame();
+        {
+            const auto now = juce::Time::getMillisecondCounterHiRes();
+            const auto rawElapsedMilliseconds = rtmMapLastAdvanceMilliseconds > 0.0
+                ? std::max(0.0, now - rtmMapLastAdvanceMilliseconds)
+                : 1000.0 / 30.0;
+            const auto elapsedMilliseconds = rawElapsedMilliseconds <= 250.0
+                ? rawElapsedMilliseconds : 1000.0 / 30.0;
+            rtmMapLastAdvanceMilliseconds = now;
+            const auto mapWidth = std::max(1, juce::roundToInt(getPlotBounds().getWidth()));
+            rtmMapColumnAccumulator += elapsedMilliseconds * static_cast<double>(mapWidth)
+                / std::max(1.0, mapTimeMilliseconds);
+            const auto columnCount = static_cast<int>(std::floor(rtmMapColumnAccumulator));
+            if (columnCount > 0)
+            {
+                rtmMapColumnAccumulator -= static_cast<double>(columnCount);
+                appendSpectrogramFrame(columnCount);
+            }
+        }
         repaint();
     }
 }
@@ -1014,17 +1041,15 @@ void SpecView::refreshControls()
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto modeIndex = ana::spec::monitorModeIndex(monitorMode);
     const auto splitAvailable = ana::spec::supportsSplitView(monitorMode);
-    const auto splitForced = mapMode && monitorMode == ana::spec::MonitorMode::leftRight;
     for (size_t index = 0; index < monitorButtons.size(); ++index)
     {
         monitorButtons[index]->setVisible(showMonitor && ! monitorButtons[index]->getBounds().isEmpty());
         monitorButtons[index]->setToggleState(static_cast<int>(index) == modeIndex, juce::dontSendNotification);
     }
-    splitButton.setVisible(showMonitor && splitButtonFits);
-    splitButton.setEnabled(splitAvailable && ! splitForced);
+    splitButton.setVisible(showMonitor && freqMode && splitButtonFits);
+    splitButton.setEnabled(splitAvailable);
     splitButton.setToggleState(splitAvailable
-                                   && (splitForced
-                                       || readValue(PluginProcessor::specSplitViewParameterId, 0.0f) >= 0.5f),
+                                   && readValue(PluginProcessor::specSplitViewParameterId, 0.0f) >= 0.5f,
                                juce::dontSendNotification);
     frequencyRangeSlider.setVisible(showZoom && freqMode);
     magnitudeRangeSlider.setVisible(showZoom && (freqMode || mapMode));
@@ -1119,6 +1144,7 @@ void SpecView::rebuildRtmSpectrogramImage()
     const auto lowFrequency = frequencyRange.low;
     const auto highFrequency = frequencyRange.high;
     const auto frequencyScale = readSpecFrequencyScale(processor);
+    const auto colourMap = readSpecColourMap(processor);
 
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto useSplitView = shouldUseSplitView(processor, monitorMode, true);
@@ -1147,7 +1173,7 @@ void SpecView::rebuildRtmSpectrogramImage()
             const auto rawValue = rtmSpectrogramLevels[rowOffset + static_cast<size_t>(x)];
             const auto level = juce::jlimit(0.0f, 1.0f,
                 (rawValue + slopeOffset - lowRange) / (highRange - lowRange));
-            pixels.setPixelColour(x, y, spectrogramColour(level));
+            pixels.setPixelColour(x, y, spectrogramColour(level, colourMap));
         }
     }
 
@@ -1157,20 +1183,20 @@ void SpecView::rebuildRtmSpectrogramImage()
     renderedMapHighQuality = readParameterValue(
         processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f ? 1 : 0;
     renderedMapFrequencyScale = static_cast<int>(frequencyScale);
+    renderedMapColourMap = static_cast<int>(colourMap);
 }
 
 
-void SpecView::appendSpectrogramFrame()
+void SpecView::appendSpectrogramFrame(const int columnCount)
 {
     resetSpectrogramImage();
     if (! spectrogramImage.isValid())
         return;
 
     const auto monitorMode = readSpecMonitorMode(processor);
-    const auto deltaMode = monitorMode == ana::spec::MonitorMode::delta;
     const auto [firstChannel, secondChannel] = specChannelsForMode(monitorMode);
     const auto useSplitView = shouldUseSplitView(processor, monitorMode, true);
-    const auto useSecondSpectrum = ! deltaMode && secondChannel != firstChannel;
+    const auto useSecondSpectrum = secondChannel != firstChannel;
 
     std::vector<float> firstSpectrum;
     std::vector<float> secondSpectrum;
@@ -1190,6 +1216,7 @@ void SpecView::appendSpectrogramFrame()
     const auto lowFrequency = frequencyRange.low;
     const auto highFrequency = frequencyRange.high;
     const auto frequencyScale = readSpecFrequencyScale(processor);
+    const auto colourMap = readSpecColourMap(processor);
     const auto displayRange = readSpecDisplayRange(processor);
     const auto slope = displayRange.slope;
     const auto lowRange = displayRange.low;
@@ -1199,6 +1226,7 @@ void SpecView::appendSpectrogramFrame()
         processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f;
     const auto width = spectrogramImage.getWidth();
     const auto height = spectrogramImage.getHeight();
+    const auto columnsToAppend = juce::jlimit(1, width, columnCount);
     const auto leftToRight = readParameterValue(
         processor, PluginProcessor::specMapLeftToRightParameterId, 0.0f) >= 0.5f;
     const auto directionState = leftToRight ? 1 : 0;
@@ -1208,20 +1236,23 @@ void SpecView::appendSpectrogramFrame()
         renderedMapLeftToRight = directionState;
     }
 
-    auto targetX = width - 1;
+    auto firstTargetX = width - columnsToAppend;
+    auto targetColumnCount = columnsToAppend;
     if (leftToRight)
     {
-        if (rtmMapWriteColumn >= width)
+        if (rtmMapWriteColumn + columnsToAppend > width)
             clearSpectrogram();
-        targetX = juce::jlimit(0, width - 1, rtmMapWriteColumn);
+        firstTargetX = juce::jlimit(0, width - 1, rtmMapWriteColumn);
+        targetColumnCount = std::min(columnsToAppend, width - firstTargetX);
     }
-    else if (width > 1)
+    else if (width > columnsToAppend)
     {
-        spectrogramImage.moveImageSection(0, 0, 1, 0, width - 1, height);
+        spectrogramImage.moveImageSection(0, 0, columnsToAppend, 0,
+                                          width - columnsToAppend, height);
         for (int y = 0; y < height; ++y)
         {
             auto* row = rtmSpectrogramLevels.data() + static_cast<size_t>(y * width);
-            std::move(row + 1, row + width, row);
+            std::move(row + columnsToAppend, row + width, row);
         }
     }
 
@@ -1256,23 +1287,29 @@ void SpecView::appendSpectrogramFrame()
                 secondSpectrum, binFrequency, lowerBandFrequency, frequency,
                 upperBandFrequency, highQuality));
 
-        rtmSpectrogramLevels[static_cast<size_t>(y * width + targetX)] = rawValue;
         const auto slopeOffset = frequency > 0.0f
             ? slope * std::log2(frequency / specSlopeReferenceFrequency) : 0.0f;
         const auto displayValue = rawValue + slopeOffset;
         const auto level = juce::jlimit(0.0f, 1.0f,
                                   (displayValue - lowRange) / (highRange - lowRange));
-        pixels.setPixelColour(targetX, y, spectrogramColour(level));
+        const auto colour = spectrogramColour(level, colourMap);
+        for (int column = 0; column < targetColumnCount; ++column)
+        {
+            const auto targetX = firstTargetX + column;
+            rtmSpectrogramLevels[static_cast<size_t>(y * width + targetX)] = rawValue;
+            pixels.setPixelColour(targetX, y, colour);
+        }
     }
 
     if (leftToRight)
-        ++rtmMapWriteColumn;
+        rtmMapWriteColumn += targetColumnCount;
 
     renderedMapRangeLow = lowRange;
     renderedMapRangeHigh = highRange;
     renderedMapSlope = slope;
     renderedMapHighQuality = highQuality ? 1 : 0;
     renderedMapFrequencyScale = static_cast<int>(frequencyScale);
+    renderedMapColourMap = static_cast<int>(colourMap);
 }
 
 void SpecView::syncRangeSliders()

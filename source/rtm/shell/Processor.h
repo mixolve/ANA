@@ -31,6 +31,10 @@ public:
     static constexpr const char* specFftSizeParameterId = "specFftSize";
     static constexpr const char* specFftOverlapParameterId = "specFftOverlap";
     static constexpr const char* specMapTimeOverlapParameterId = "specMapTimeOverlap";
+    static constexpr const char* specMapTimeParameterId = "specMapTimeMs";
+    static constexpr const char* specMapTimeBaseParameterId = "specMapTimeBase";
+    static constexpr const char* specMapNoteLengthParameterId = "specMapNoteLength";
+    static constexpr const char* specMapColourMapParameterId = "specMapColourMap";
     static constexpr const char* specAverageTimeParameterId = "specAverageTime";
     static constexpr const char* specSmoothingParameterId = "specSmoothing";
     static constexpr const char* specFrequencyScaleParameterId = "specFrequencyScale";
@@ -38,6 +42,9 @@ public:
     static constexpr const char* specSecondGraphParameterId = "specSecondGraph";
     static constexpr const char* specFirstGraphTypeParameterId = "specFirstGraphType";
     static constexpr const char* specSecondGraphTypeParameterId = "specSecondGraphType";
+    static constexpr const char* specFirstGraphColourParameterId = "specFirstGraphColour";
+    static constexpr const char* specSecondGraphColourParameterId = "specSecondGraphColour";
+    static constexpr const char* specGraphOpacityParameterId = "specGraphOpacity";
     static constexpr const char* specAntiAliasParameterId = "specAntiAlias";
     static constexpr const char* specHighQualityRenderingParameterId = "specHighQualityRendering";
     static constexpr const char* specMapLeftToRightParameterId = "specMapLeftToRight";
@@ -62,6 +69,9 @@ public:
     static constexpr const char* corrSecondGraphParameterId = "corrSecondGraph";
     static constexpr const char* corrFirstGraphTypeParameterId = "corrFirstGraphType";
     static constexpr const char* corrSecondGraphTypeParameterId = "corrSecondGraphType";
+    static constexpr const char* corrFirstGraphColourParameterId = "corrFirstGraphColour";
+    static constexpr const char* corrSecondGraphColourParameterId = "corrSecondGraphColour";
+    static constexpr const char* corrGraphOpacityParameterId = "corrGraphOpacity";
     static constexpr const char* corrClearOnPlayParameterId = "corrClearOnPlay";
     static constexpr const char* corrRangesVisibleParameterId = "corrRangesVisible";
     static constexpr const char* corrCursorReadoutParameterId = "corrCursorReadout";
@@ -149,6 +159,8 @@ public:
     const juce::AudioProcessorValueTreeState& getParameters() const noexcept { return parameters; }
     double getScopTimeMilliseconds() const noexcept;
     bool isScopTimeNoteBased() const noexcept;
+    double getSpecMapTimeMilliseconds() const noexcept;
+    bool isSpecMapTimeNoteBased() const noexcept;
     bool isScopFilledStyle() const noexcept;
     float getScopOpacity() const noexcept;
     bool areScopZoomControlsVisible() const noexcept;

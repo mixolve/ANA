@@ -2,6 +2,7 @@
 #include "shared/corr/Settings.h"
 #include "shared/analyzer/DisplaySettings.h"
 #include "AnalyzerViewUtilities.h"
+#include "shared/shell/GraphColours.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +17,19 @@ ana::analyzer_frequency::Scale readCorrFrequencyScale(const PluginProcessor& pro
     return ana::analyzer_frequency::scaleFromIndex(juce::roundToInt(readParameterValue(
         processor, PluginProcessor::corrFrequencyScaleParameterId,
         static_cast<float>(ana::analyzer_frequency::defaultScaleIndex))));
+}
+
+juce::Colour readGraphColour(const PluginProcessor& processor, const char* parameterId,
+                             const int defaultIndex) noexcept
+{
+    return ana::ui::graphColour(juce::roundToInt(readParameterValue(
+        processor, parameterId, static_cast<float>(defaultIndex))));
+}
+
+float readGraphOpacity(const PluginProcessor& processor) noexcept
+{
+    return juce::jlimit(0.01f, 1.0f, readParameterValue(
+        processor, PluginProcessor::corrGraphOpacityParameterId, 100.0f) * 0.01f);
 }
 }
 
@@ -102,6 +116,11 @@ void CorrView::paint(juce::Graphics& graphics)
     }
 
     const auto primaryDisplayType = displayType(PluginProcessor::corrFirstGraphTypeParameterId);
+    const auto primaryColour = readGraphColour(processor,
+        PluginProcessor::corrFirstGraphColourParameterId, ana::ui::defaultFirstGraphColourIndex);
+    const auto secondaryColour = readGraphColour(processor,
+        PluginProcessor::corrSecondGraphColourParameterId, ana::ui::defaultSecondGraphColourIndex);
+    const auto graphOpacity = readGraphOpacity(processor);
     displayedCorr->copyCorr(mode, primaryDisplayType, primaryCorr, fftSize);
     if (fftSize <= 0 || primaryCorr.empty())
         return;
@@ -119,8 +138,23 @@ void CorrView::paint(juce::Graphics& graphics)
         (0.0f - lowRange) / (highRange - lowRange)) * plotBounds.getHeight();
     drawCorr(graphics, primaryCorr, plotBounds, lowFrequency, highFrequency,
                     lowRange, highRange, sampleRate, fftSize,
-                    ana::ui::white, ana::ui::light);
+                    primaryColour,
+                    primaryColour.withAlpha(graphOpacity));
 
+    const auto* secondGraph = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrSecondGraphParameterId);
+    if (secondGraph != nullptr && secondGraph->load(std::memory_order_relaxed) >= 0.5f)
+    {
+        int secondaryFftSize = 0;
+        const auto secondaryDisplayType = displayType(
+            PluginProcessor::corrSecondGraphTypeParameterId);
+        displayedCorr->copyCorr(mode, secondaryDisplayType, secondaryCorr, secondaryFftSize);
+        if (secondaryFftSize == fftSize)
+            drawCorr(graphics, secondaryCorr, plotBounds, lowFrequency, highFrequency,
+                     lowRange, highRange, sampleRate, fftSize,
+                     secondaryColour,
+                     secondaryColour.withAlpha(graphOpacity));
+    }
 
     graphics.setColour(ana::ui::light);
     graphics.fillRect(plotBounds.getX(), zeroY, plotBounds.getWidth(), 1.0f);
@@ -260,8 +294,8 @@ void CorrView::resized()
     const auto* zoom = processor.getParameters().getRawParameterValue(
         PluginProcessor::corrZoomControlsParameterId);
     const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
-    constexpr int frequencyReadoutWidth = ana::ui::textControlWidth(8);
-    constexpr int coefficientReadoutWidth = ana::ui::textControlWidth(5);
+    const auto frequencyReadoutWidth = ana::ui::textControlWidth(8);
+    const auto coefficientReadoutWidth = ana::ui::textControlWidth(5);
     const auto readoutY = plotBounds.getBottom() - ana::ui::controlHeight;
     const auto graphRight = plotBounds.getRight();
     auto topArea = juce::Rectangle<int>(plotBounds.getX(), plotBounds.getY(),

@@ -79,8 +79,6 @@ void CorrProcessor::publish(const fft::StereoFftFrame& frame,
     {
         fillModeBins(averages, 1.0f);
         fillModeBins(minimums, 1.0f);
-        for (auto& state : rtmMinimumStates)
-            resetMinimumWindowState(state);
         lastFrameSize = fftSize;
     }
 
@@ -98,10 +96,13 @@ void CorrProcessor::publish(const fft::StereoFftFrame& frame,
         auto& average = averages[modeIndexValue][binIndex];
         average = alpha * average + update * current;
         publishedAverages[modeIndexValue][binIndex].store(average, std::memory_order_relaxed);
-    }
 
-    updateMinimumWindow(frame, mode, rtmMinimumStates[modeIndexValue],
-                        minimums[modeIndexValue], publishedMinimums[modeIndexValue]);
+        // MIN holds the lowest AVG value, so AVG TIME filters the signal before
+        // it participates in the historical minimum.
+        auto& minimum = minimums[modeIndexValue][binIndex];
+        minimum = std::min(minimum, average);
+        publishedMinimums[modeIndexValue][binIndex].store(minimum, std::memory_order_relaxed);
+    }
 
     publishedFftSize.store(fftSize, std::memory_order_release);
     revision.fetch_add(1, std::memory_order_release);

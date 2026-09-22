@@ -59,7 +59,6 @@ private:
         int fftSize = 0;
         double sampleRate = 0.0;
         bool drawSecondGraph = false;
-        bool deltaMode = false;
         juce::Colour colour { juce::Colours::white };
         float gainDb = 0.0f;
         bool visible = true;
@@ -98,7 +97,6 @@ private:
     std::array<std::unique_ptr<ControlButton>, ana::spec::monitorModeCount> monitorButtons;
     ControlButton freqButton { "FREQ" };
     ControlButton mapButton { "MAP" };
-    ControlButton splitButton { "layout-rows" };
     RangeSlider frequencyRangeSlider;
     RangeSlider mapTimeRangeSlider;
     RangeSlider magnitudeRangeSlider { RangeSlider::Orientation::vertical };
@@ -112,7 +110,6 @@ private:
     bool synchronisingRanges = false;
     juce::Point<float> cursorPosition;
     bool cursorInside = false;
-    bool splitButtonFits = true;
     float lastCursorFrequency = 0.0f;
     float mapTimeRangeStart = 0.0f;
     float mapTimeRangeEnd = 1.0f;
@@ -122,6 +119,7 @@ private:
     int renderedMapHighQuality = -1;
     int renderedMapLeftToRight = -1;
     int renderedMapFrequencyScale = -1;
+    int renderedMapColourMap = -1;
     bool mapImageRebuildPending = false;
     int renderedAraMonitorMode = -1;
     bool renderedAraSplitView = false;

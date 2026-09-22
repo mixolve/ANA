@@ -52,6 +52,7 @@ private:
     RangeSlider frequencyRangeSlider;
     RangeSlider corrRangeSlider { RangeSlider::Orientation::vertical };
     std::vector<float> primaryCorr;
+    std::vector<float> secondaryCorr;
     uint64_t displayedAraRevision = 0;
     bool synchronisingRanges = false;
     juce::Point<float> cursorPosition;

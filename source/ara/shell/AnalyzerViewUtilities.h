@@ -16,7 +16,7 @@ inline constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
 
 inline juce::String formatReadoutFrequency(const double frequency)
 {
-    return juce::String::formatted("%08.2f", frequency);
+    return juce::String::formatted("%08.2f", std::max(0.0, frequency));
 }
 
 inline juce::String formatReadoutLevel(const double level)

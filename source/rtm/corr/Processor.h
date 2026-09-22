@@ -7,7 +7,6 @@
 
 #include <array>
 #include <atomic>
-#include <vector>
 
 namespace ana::corr
 {
@@ -45,26 +44,8 @@ public:
     uint64_t getRevision() const noexcept;
 
 private:
-    struct MinimumWindowState
-    {
-        std::array<double, maximumBinCount> numeratorWindowSum {};
-        std::array<double, maximumBinCount> denominatorWindowSum {};
-        std::vector<double> numeratorRing;
-        std::vector<double> denominatorRing;
-        int windowFrames = 0;
-        int ringPosition = 0;
-        int frameCount = 0;
-        int binCount = 0;
-        int hopSize = 0;
-    };
-
     void publish(const fft::StereoFftFrame& frame, float averagingTimeMilliseconds,
                  Mode mode) noexcept;
-    void updateMinimumWindow(const fft::StereoFftFrame& frame, Mode mode,
-                             MinimumWindowState& state,
-                             std::array<float, maximumBinCount>& minimum,
-                             std::array<std::atomic<float>, maximumBinCount>& published) noexcept;
-    static void resetMinimumWindowState(MinimumWindowState& state) noexcept;
 
     using BinValues = std::array<float, maximumBinCount>;
     using AtomicBinValues = std::array<std::atomic<float>, maximumBinCount>;
@@ -74,7 +55,6 @@ private:
     fft::StereoFftStream fftStream;
     ModeBinValues averages {};
     ModeBinValues minimums {};
-    std::array<MinimumWindowState, modeCount> rtmMinimumStates;
     AtomicModeBinValues publishedAverages {};
     AtomicModeBinValues publishedMinimums {};
     std::atomic<int> publishedFftSize { 0 };

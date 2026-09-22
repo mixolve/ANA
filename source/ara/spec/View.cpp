@@ -3,6 +3,7 @@
 #include "shared/analyzer/DisplaySettings.h"
 #include "AnalyzerViewUtilities.h"
 #include "shared/analyzer/SpectrogramFrequencyScale.h"
+#include "shared/shell/GraphColours.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,6 +15,19 @@ using namespace ana::ui::analyzer_detail;
 namespace
 {
 constexpr float specSlopeReferenceFrequency = 632.0f;
+
+juce::Colour readGraphColour(const PluginProcessor& processor, const char* parameterId,
+                             const int defaultIndex) noexcept
+{
+    return ana::ui::graphColour(juce::roundToInt(
+        readParameterValue(processor, parameterId, static_cast<float>(defaultIndex))));
+}
+
+float readGraphOpacity(const PluginProcessor& processor) noexcept
+{
+    return juce::jlimit(0.01f, 1.0f, readParameterValue(
+        processor, PluginProcessor::specGraphOpacityParameterId, 100.0f) * 0.01f);
+}
 
 struct SpecFrequencyRange
 {
@@ -45,6 +59,13 @@ ana::analyzer_frequency::Scale readSpecFrequencyScale(const PluginProcessor& pro
     return ana::analyzer_frequency::scaleFromIndex(juce::roundToInt(readParameterValue(
         processor, PluginProcessor::specFrequencyScaleParameterId,
         static_cast<float>(ana::analyzer_frequency::defaultScaleIndex))));
+}
+
+ana::spec::ColourMap readSpecColourMap(const PluginProcessor& processor) noexcept
+{
+    return ana::spec::colourMapFromIndex(juce::roundToInt(readParameterValue(
+        processor, PluginProcessor::specMapColourMapParameterId,
+        static_cast<float>(ana::spec::defaultColourMapIndex))));
 }
 
 struct SpecDisplayRange
@@ -85,19 +106,9 @@ ana::spec::SpecProcessor::DisplayType readSpecDisplayType(
         : ana::spec::SpecProcessor::DisplayType::average;
 }
 
-bool shouldUseSplitView(const PluginProcessor& processor,
-                        const ana::spec::MonitorMode mode,
-                        const bool mapMode) noexcept
+bool shouldUseSplitView(const ana::spec::MonitorMode mode) noexcept
 {
-    if (! ana::spec::supportsSplitView(mode))
-        return false;
-
-    if (mapMode && mode == ana::spec::MonitorMode::leftRight)
-        return true;
-
-    const auto* split = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specSplitViewParameterId);
-    return split != nullptr && split->load(std::memory_order_relaxed) >= 0.5f;
+    return ana::spec::supportsSplitView(mode);
 }
 
 std::pair<ana::spec::Channel, ana::spec::Channel>
@@ -115,7 +126,6 @@ specChannelsForMode(const ana::spec::MonitorMode mode) noexcept
         case MonitorMode::midSide:   return { Channel::mid, Channel::side };
         case MonitorMode::mid:       return { Channel::mid, Channel::mid };
         case MonitorMode::side:      return { Channel::side, Channel::side };
-        case MonitorMode::delta:     return { Channel::delta, Channel::delta };
     }
 
     return { Channel::stereo, Channel::stereo };
@@ -151,8 +161,13 @@ juce::String formatMapTime(const double seconds)
     return juce::String::formatted("%02d:%06.3f", minutes, secondsInMinute);
 }
 
-juce::Colour spectrogramColour(const float normalisedLevel) noexcept
+juce::Colour spectrogramColour(const float normalisedLevel,
+                               const ana::spec::ColourMap colourMap) noexcept
 {
+    const auto clampedLevel = juce::jlimit(0.0f, 1.0f, normalisedLevel);
+    if (colourMap == ana::spec::ColourMap::grayscale)
+        return juce::Colour::fromFloatRGBA(clampedLevel, clampedLevel, clampedLevel, 1.0f);
+
     static constexpr std::array<juce::uint32, 200> colours {
         0xff000000u, 0xff000003u, 0xff000006u, 0xff000009u, 0xff00000cu, 0xff00000fu, 0xff000012u, 0xff000015u,
         0xff000018u, 0xff00001au, 0xff01001eu, 0xff010021u, 0xff010024u, 0xff010027u, 0xff01002au, 0xff01002eu,
@@ -180,8 +195,7 @@ juce::Colour spectrogramColour(const float normalisedLevel) noexcept
         0xfffff5ffu, 0xfffff8ffu, 0xfffff9ffu, 0xfffffaffu, 0xfffffaffu, 0xfffffaffu, 0xfffffaffu, 0xfffffaffu,
         0xfffffaffu, 0xfffffbffu, 0xfffffbffu, 0xfffffbffu, 0xfffffcffu, 0xfffffdffu, 0xfffffeffu, 0xffffffffu
     };
-    const auto scaled = juce::jlimit(0.0f, 1.0f, normalisedLevel)
-        * static_cast<float>(colours.size() - 1);
+    const auto scaled = clampedLevel * static_cast<float>(colours.size() - 1);
     const auto index = juce::jlimit(0, static_cast<int>(colours.size()) - 2,
                                    static_cast<int>(std::floor(scaled)));
     return juce::Colour(colours[static_cast<size_t>(index)]).interpolatedWith(
@@ -240,24 +254,9 @@ SpecView::SpecView(PluginProcessor& processorRef)
         {
             processor.setSpecMonitorMode(static_cast<int>(index));
         };
-        if (index == ana::spec::monitorModeIndex(ana::spec::MonitorMode::delta))
-            button->setTooltip("DELTA");
         addAndMakeVisible(*button);
         monitorButtons[index] = std::move(button);
     }
-    splitButton.setTooltip("SPLIT");
-    splitButton.setClickingTogglesState(true);
-    splitButton.onClick = [this]
-    {
-        if (viewMode == ViewMode::map
-            && readSpecMonitorMode(processor) == ana::spec::MonitorMode::leftRight)
-            return;
-
-        if (auto* parameter = processor.getParameters().getParameter(PluginProcessor::specSplitViewParameterId))
-            parameter->setValueNotifyingHost(splitButton.getToggleState() ? 1.0f : 0.0f);
-    };
-    addAndMakeVisible(splitButton);
-
     for (auto* control : std::array<ParameterControl*, 4> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
     {
@@ -341,13 +340,8 @@ bool SpecView::captureSnapshot(const size_t snapshotIndex)
 
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto [firstChannel, secondChannel] = specChannelsForMode(monitorMode);
-    captured.deltaMode = monitorMode == ana::spec::MonitorMode::delta;
 
-    const auto* split = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specSplitViewParameterId);
-    const auto useSplitView = ana::spec::supportsSplitView(monitorMode)
-        && split != nullptr
-        && split->load(std::memory_order_relaxed) >= 0.5f;
+    const auto useSplitView = shouldUseSplitView(monitorMode);
     const auto* secondGraphEnabled = processor.getParameters().getRawParameterValue(
         PluginProcessor::specSecondGraphParameterId);
     captured.drawSecondGraph = useSplitView || secondGraphEnabled == nullptr
@@ -460,7 +454,6 @@ bool SpecView::writeSnapshot(const size_t snapshotIndex, juce::OutputStream& out
     return output.writeInt(snapshot.fftSize)
         && output.writeDouble(snapshot.sampleRate)
         && output.writeByte(snapshot.drawSecondGraph ? 1 : 0)
-        && output.writeByte(snapshot.deltaMode ? 1 : 0)
         && output.writeInt(static_cast<int>(snapshot.colour.getARGB()))
         && output.writeByte(snapshot.visible ? 1 : 0)
         && output.writeFloat(snapshot.gainDb)
@@ -473,7 +466,7 @@ bool SpecView::readSnapshot(const size_t snapshotIndex, juce::InputStream& input
     if (snapshotIndex >= snapshots.size())
         return false;
 
-    constexpr juce::int64 fixedHeaderSize = 4 + 8 + 1 + 1 + 4 + 1 + 4;
+    constexpr juce::int64 fixedHeaderSize = 4 + 8 + 1 + 4 + 1 + 4;
     if (input.getNumBytesRemaining() < fixedHeaderSize)
         return false;
 
@@ -481,7 +474,6 @@ bool SpecView::readSnapshot(const size_t snapshotIndex, juce::InputStream& input
     loaded.fftSize = input.readInt();
     loaded.sampleRate = input.readDouble();
     const auto drawSecondGraph = input.readByte();
-    const auto deltaMode = input.readByte();
     loaded.colour = juce::Colour(static_cast<juce::uint32>(input.readInt()));
     const auto visible = input.readByte();
     loaded.gainDb = input.readFloat();
@@ -490,11 +482,10 @@ bool SpecView::readSnapshot(const size_t snapshotIndex, juce::InputStream& input
     {
         return value == 0 || value == 1;
     };
-    if (! isBooleanByte(drawSecondGraph) || ! isBooleanByte(deltaMode) || ! isBooleanByte(visible))
+    if (! isBooleanByte(drawSecondGraph) || ! isBooleanByte(visible))
         return false;
 
     loaded.drawSecondGraph = drawSecondGraph == 1;
-    loaded.deltaMode = deltaMode == 1;
     loaded.visible = visible == 1;
 
     if (! ana::fft::StereoFftStream::isSupportedFftSize(loaded.fftSize)
@@ -569,7 +560,7 @@ void SpecView::paint(juce::Graphics& graphics)
             graphics.drawImage(image, plotBounds);
 
         const auto monitorMode = readSpecMonitorMode(processor);
-        const auto useSplitView = shouldUseSplitView(processor, monitorMode, true);
+        const auto useSplitView = shouldUseSplitView(monitorMode);
         if (useSplitView)
         {
             graphics.setColour(ana::ui::white);
@@ -597,14 +588,15 @@ void SpecView::paint(juce::Graphics& graphics)
 
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto [firstChannel, secondChannel] = specChannelsForMode(monitorMode);
-    const auto* split = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specSplitViewParameterId);
-    const auto splitViewAvailable = ana::spec::supportsSplitView(monitorMode);
-    const auto useSplitView = splitViewAvailable && split != nullptr
-        && split->load(std::memory_order_relaxed) >= 0.5f;
+    const auto useSplitView = shouldUseSplitView(monitorMode);
     const auto drawSecondGraph = useSplitView;
     const auto firstType = readSpecDisplayType(processor, PluginProcessor::specFirstGraphTypeParameterId);
     const auto secondType = readSpecDisplayType(processor, PluginProcessor::specSecondGraphTypeParameterId);
+    const auto firstColour = readGraphColour(processor,
+        PluginProcessor::specFirstGraphColourParameterId, ana::ui::defaultFirstGraphColourIndex);
+    const auto secondColour = readGraphColour(processor,
+        PluginProcessor::specSecondGraphColourParameterId, ana::ui::defaultSecondGraphColourIndex);
+    const auto graphOpacity = readGraphOpacity(processor);
     const auto copySpectra = [&] (const ana::spec::SpecProcessor& spec)
     {
         spec.copySpectrum(firstChannel, firstType, primarySpec, fftSize);
@@ -618,7 +610,6 @@ void SpecView::paint(juce::Graphics& graphics)
         copySpectra(*analysisResult->spec);
     }
 
-    const auto currentDeltaMode = monitorMode == ana::spec::MonitorMode::delta;
     if (useSplitView)
     {
         auto upperBounds = plotBounds;
@@ -628,7 +619,7 @@ void SpecView::paint(juce::Graphics& graphics)
 
         for (const auto& snapshot : snapshots)
         {
-            if (! snapshot.visible || ! snapshot.hasData || snapshot.deltaMode != currentDeltaMode)
+            if (! snapshot.visible || ! snapshot.hasData)
                 continue;
 
             if (snapshot.drawSecondGraph)
@@ -641,15 +632,15 @@ void SpecView::paint(juce::Graphics& graphics)
         graphics.setColour(ana::ui::white);
         graphics.fillRect(plotBounds.getX(), upperBounds.getBottom(), plotBounds.getWidth(), dividerHeight);
         drawSpec(graphics, secondarySpec, fftSize, sampleRate, lowerBounds,
-                     ana::ui::white, ana::ui::dark);
+                     secondColour, secondColour.withAlpha(graphOpacity));
         drawSpec(graphics, primarySpec, fftSize, sampleRate, upperBounds,
-                     ana::ui::white, ana::ui::light);
+                     firstColour, firstColour.withAlpha(graphOpacity));
     }
     else
     {
         for (const auto& snapshot : snapshots)
         {
-            if (! snapshot.visible || ! snapshot.hasData || snapshot.deltaMode != currentDeltaMode)
+            if (! snapshot.visible || ! snapshot.hasData)
                 continue;
 
             if (snapshot.drawSecondGraph)
@@ -661,9 +652,9 @@ void SpecView::paint(juce::Graphics& graphics)
 
         if (drawSecondGraph)
             drawSpec(graphics, secondarySpec, fftSize, sampleRate, plotBounds,
-                         ana::ui::white, ana::ui::dark);
+                         secondColour, secondColour.withAlpha(graphOpacity));
         drawSpec(graphics, primarySpec, fftSize, sampleRate, plotBounds,
-                     ana::ui::white, ana::ui::light);
+                     firstColour, firstColour.withAlpha(graphOpacity));
     }
 
     const auto* cursorReadout = processor.getParameters().getRawParameterValue(
@@ -694,9 +685,9 @@ void SpecView::resized()
     const auto showZoomSetting = readVisibility(PluginProcessor::specZoomControlsParameterId);
     const auto showHorizontalZoom = showZoomSetting && (freqMode || araMap);
     const auto showVerticalZoom = showZoomSetting && (freqMode || mapMode);
-    constexpr int frequencyReadoutWidth = ana::ui::textControlWidth(8);
-    constexpr int levelReadoutWidth = ana::ui::textControlWidth(7);
-    constexpr int timeReadoutWidth = ana::ui::textControlWidth(10);
+    const auto frequencyReadoutWidth = ana::ui::textControlWidth(8);
+    const auto levelReadoutWidth = ana::ui::textControlWidth(7);
+    const auto timeReadoutWidth = ana::ui::textControlWidth(10);
     const auto mapCursorTimeWidth = timeReadoutWidth;
     const auto mapCursorFrequencyWidth = frequencyReadoutWidth;
     const auto readoutY = plotBounds.getBottom() - ana::ui::controlHeight;
@@ -740,10 +731,6 @@ void SpecView::resized()
     for (auto& button : monitorButtons)
         button->setBounds(showMonitor
             ? optionalControls.takeLeft(button->getPreferredWidth()) : juce::Rectangle<int>());
-    splitButtonFits = showMonitor
-        && optionalControls.remaining().getWidth() >= splitButton.getPreferredWidth();
-    splitButton.setBounds(splitButtonFits
-        ? optionalControls.takeLeft(splitButton.getPreferredWidth()) : juce::Rectangle<int>());
 
     if (rangeReadoutWidth > 0)
     {
@@ -867,8 +854,7 @@ void SpecView::updateCursorReadouts()
         const auto lowFrequency = frequencyRange.low;
         const auto highFrequency = frequencyRange.high;
         const auto monitorMode = readSpecMonitorMode(processor);
-        const auto useSplitView = shouldUseSplitView(
-            processor, monitorMode, viewMode == ViewMode::map);
+        const auto useSplitView = shouldUseSplitView(monitorMode);
         const auto cursorPane = splitPaneForCursor(plotBounds, cursorPosition.y, useSplitView);
 
         if (viewMode == ViewMode::map)
@@ -956,14 +942,9 @@ size_t SpecView::getAraMapColumnCount() const noexcept
 
 size_t SpecView::getAraMapRowCount() const noexcept
 {
-    auto height = std::max(1, static_cast<int>(std::ceil(getPlotBounds().getHeight())));
-    const auto monitorMode = readSpecMonitorMode(processor);
-    const auto useSplit = shouldUseSplitView(processor, monitorMode, true);
-
-    // In split LR/MS, native MAP row density follows one pane, not the combined plot.
-    if (useSplit)
-        height = std::max(1, (height + 1) / 2);
-
+    // Keep analysis geometry independent of monitor mode. All channel variants are
+    // calculated in one pass, so switching ST/LR/L/R/MS/M/S is render-only.
+    const auto height = std::max(1, static_cast<int>(std::ceil(getPlotBounds().getHeight())));
     return static_cast<size_t>(std::max(
         static_cast<int>(ana::ara::SpectrogramMap::minimumRowCount), height));
 }
@@ -986,6 +967,7 @@ void SpecView::timerCallback()
     const auto highRange = displayRange.high;
     const auto slope = displayRange.slope;
     const auto frequencyScale = readSpecFrequencyScale(processor);
+    const auto colourMap = readSpecColourMap(processor);
     const auto rangeChanged = ! juce::approximatelyEqual(renderedMapRangeLow, lowRange)
         || ! juce::approximatelyEqual(renderedMapRangeHigh, highRange);
     const auto slopeChanged = ! juce::approximatelyEqual(renderedMapSlope, slope);
@@ -997,14 +979,16 @@ void SpecView::timerCallback()
     const auto mapDirectionChanged = renderedMapLeftToRight != (mapLeftToRight ? 1 : 0);
     const auto frequencyScaleChanged = renderedMapFrequencyScale
         != static_cast<int>(frequencyScale);
+    const auto colourMapChanged = renderedMapColourMap != static_cast<int>(colourMap);
     if (viewMode == ViewMode::map
         && (rangeChanged || slopeChanged || highQualityChanged || mapDirectionChanged
-            || frequencyScaleChanged))
+            || frequencyScaleChanged || colourMapChanged))
     {
         scheduleMapImageRebuild();
         renderedMapHighQuality = highQuality ? 1 : 0;
         renderedMapLeftToRight = mapLeftToRight ? 1 : 0;
         renderedMapFrequencyScale = static_cast<int>(frequencyScale);
+        renderedMapColourMap = static_cast<int>(colourMap);
     }
 
     {
@@ -1025,7 +1009,7 @@ void SpecView::timerCallback()
                     onAraUpdateStatus("UPDATED");
             }
 
-            const auto useSplit = shouldUseSplitView(processor, monitorMode, true);
+            const auto useSplit = shouldUseSplitView(monitorMode);
             if (renderedAraMonitorMode != ana::spec::monitorModeIndex(monitorMode)
                 || renderedAraSplitView != useSplit)
                 scheduleMapImageRebuild();
@@ -1069,19 +1053,11 @@ void SpecView::refreshControls()
     mapButton.setToggleState(mapMode, juce::dontSendNotification);
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto modeIndex = ana::spec::monitorModeIndex(monitorMode);
-    const auto splitAvailable = ana::spec::supportsSplitView(monitorMode);
-    const auto splitForced = mapMode && monitorMode == ana::spec::MonitorMode::leftRight;
     for (size_t index = 0; index < monitorButtons.size(); ++index)
     {
         monitorButtons[index]->setVisible(showMonitor && ! monitorButtons[index]->getBounds().isEmpty());
         monitorButtons[index]->setToggleState(static_cast<int>(index) == modeIndex, juce::dontSendNotification);
     }
-    splitButton.setVisible(showMonitor && splitButtonFits);
-    splitButton.setEnabled(splitAvailable && ! splitForced);
-    splitButton.setToggleState(splitAvailable
-                                   && (splitForced
-                                       || readValue(PluginProcessor::specSplitViewParameterId, 0.0f) >= 0.5f),
-                               juce::dontSendNotification);
     frequencyRangeSlider.setVisible(showZoom && freqMode);
     mapTimeRangeSlider.setVisible(showZoom && araMap);
     magnitudeRangeSlider.setVisible(showZoom && (freqMode || mapMode));
@@ -1159,17 +1135,19 @@ void SpecView::rebuildAraSpectrogramImage()
     const auto highQuality = readParameterValue(
         processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f;
     const auto frequencyScale = readSpecFrequencyScale(processor);
+    const auto colourMap = readSpecColourMap(processor);
     renderedMapRangeLow = lowRange;
     renderedMapRangeHigh = highRange;
     renderedMapSlope = slope;
     renderedMapHighQuality = highQuality ? 1 : 0;
     renderedMapFrequencyScale = static_cast<int>(frequencyScale);
+    renderedMapColourMap = static_cast<int>(colourMap);
 
     const auto& map = *analysisResult->specMap;
     const auto [firstChannel, secondChannel] = specChannelsForMode(monitorMode);
     const auto firstIndex = araMapChannelIndex(firstChannel);
     const auto secondIndex = araMapChannelIndex(secondChannel);
-    const auto useSplitView = shouldUseSplitView(processor, monitorMode, true);
+    const auto useSplitView = shouldUseSplitView(monitorMode);
     const auto useSecondSpectrum = secondChannel != firstChannel && ! useSplitView;
     const auto frequencyRange = readSpecFrequencyRange(processor);
     const auto lowFrequency = frequencyRange.low;
@@ -1180,7 +1158,7 @@ void SpecView::rebuildAraSpectrogramImage()
             ? slope * std::log2(frequency / specSlopeReferenceFrequency) : 0.0f;
         const auto displayValue = value + slopeOffset;
         return spectrogramColour(juce::jlimit(0.0f, 1.0f,
-            (displayValue - lowRange) / (highRange - lowRange)));
+            (displayValue - lowRange) / (highRange - lowRange)), colourMap);
     };
 
     const auto mapAt = [&map] (const size_t channel, const size_t row, const size_t column)

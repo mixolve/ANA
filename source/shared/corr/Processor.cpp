@@ -12,10 +12,12 @@ namespace ana::corr
 {
 namespace
 {
+#if ! ANA_VARIANT_RTM
 juce::Point<float> complexBin(const float* data, const int bin) noexcept
 {
     return { data[2 * bin], data[2 * bin + 1] };
 }
+#endif
 
 size_t modeArrayIndex(const CorrProcessor::Mode mode) noexcept
 {
@@ -60,8 +62,6 @@ void CorrProcessor::reset() noexcept
    #if ANA_VARIANT_RTM
     fillModeBins(averages, 1.0f);
     fillModeBins(minimums, 1.0f);
-    for (auto& state : rtmMinimumStates)
-        resetMinimumWindowState(state);
    #else
     resetAraAccumulators();
    #endif
@@ -112,6 +112,7 @@ uint64_t CorrProcessor::getRevision() const noexcept
     return revision.load(std::memory_order_acquire);
 }
 
+#if ! ANA_VARIANT_RTM
 void CorrProcessor::resetMinimumWindowState(MinimumWindowState& state) noexcept
 {
     state.numeratorWindowSum.fill(0.0);
@@ -216,4 +217,5 @@ void CorrProcessor::updateMinimumWindow(
     state.ringPosition = (state.ringPosition + 1) % state.windowFrames;
     state.frameCount = std::min(state.frameCount + 1, state.windowFrames);
 }
+#endif
 }

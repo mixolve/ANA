@@ -8,7 +8,10 @@
 
 namespace
 {
-constexpr int bandZoomValueWidth = ana::ui::textControlWidth(6);
+int bandZoomValueWidth() noexcept
+{
+    return ana::ui::textControlWidth(6);
+}
 constexpr int bandRangeSliderHeight = 14;
 constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
 constexpr int minimumBandHeight = ana::ui::gap.pixels() * 3 + ana::ui::controlHeight + bandRangeSliderHeight;
@@ -47,7 +50,7 @@ DisplayedModes getDisplayedModes(const ana::ScopChannelMode mode) noexcept
 juce::String formatZoomValue(const float decibels)
 {
     const auto displayValue = std::abs(decibels) < 0.05f ? 0.0f : decibels;
-    return (displayValue > 0.0f ? "+" : "") + juce::String(displayValue, 2);
+    return juce::String::formatted("%+.2f", displayValue);
 }
 
 void drawWaveformEnvelope(juce::Graphics& graphics,
@@ -648,7 +651,7 @@ void ScopView::refreshBandModeButtons()
 
     constexpr int buttonHeight = ana::ui::controlHeight;
     constexpr int zoomSliderWidth = bandZoomSliderWidth;
-    constexpr int zoomValueWidth = bandZoomValueWidth;
+    const auto zoomValueWidth = bandZoomValueWidth();
     const auto showZoomControls = processor.areScopZoomControlsVisible();
     const auto showMonitorControls = processor.areScopMonitorControlsVisible();
     const auto showTools = processor.areScopToolsVisible();
@@ -928,9 +931,6 @@ void ScopView::renderAraAnalysis(
 
     if (receivedNewRevision)
     {
-        for (size_t bandIndex = 0; bandIndex < bandNormalizeButtons.size(); ++bandIndex)
-            processor.setScopBandNormalized(bandIndex, false);
-
         refreshBandModeButtons();
 
         if (onAraUpdateStatus)

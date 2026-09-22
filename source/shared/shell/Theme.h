@@ -10,22 +10,36 @@ inline constexpr float iconFontSize = 18.0f;
 inline constexpr int controlHeight = 30;
 inline constexpr int iconControlSize = 30;
 inline constexpr int activeBorderWidth = 2;
-inline constexpr int glyphWidth = 12;
 inline constexpr int letterSpacing = 1;
 inline constexpr int textPadding = 8;
 inline constexpr int borderWidth = 1;
 inline constexpr int readoutTextVerticalOffset = -1;
 
-constexpr int textControlWidth(const int characterCount) noexcept
+inline juce::Font makeFont()
 {
-    const auto count = characterCount > 0 ? characterCount : 0;
-    return borderWidth * 2 + textPadding * 2 + glyphWidth * count
-        + letterSpacing * std::max(0, count - 1);
+#if JUCE_TARGET_HAS_BINARY_DATA
+    static const auto typeface = juce::Typeface::createSystemTypefaceFor(
+        BinaryData::IosevkaCharonMonoMedium_ttf,
+        static_cast<size_t>(BinaryData::IosevkaCharonMonoMedium_ttfSize));
+    if (typeface != nullptr)
+        return juce::Font(juce::FontOptions(typeface).withHeight(baseFontSize))
+            .withExtraKerningFactor(letterSpacing / baseFontSize);
+#endif
+
+    return juce::Font(juce::FontOptions("Iosevka Charon Mono", "Medium", baseFontSize))
+        .withExtraKerningFactor(letterSpacing / baseFontSize);
 }
 
 inline int textControlWidth(const juce::String& text) noexcept
 {
-    return textControlWidth(text.length());
+    return borderWidth * 2 + textPadding * 2
+        + juce::GlyphArrangement::getStringWidthInt(makeFont(), text);
+}
+
+inline int textControlWidth(const int characterCount) noexcept
+{
+    return textControlWidth(juce::String::repeatedString(
+        "0", std::max(0, characterCount)));
 }
 
 inline juce::Rectangle<int> readoutTextBounds(const juce::Rectangle<int> bounds) noexcept
@@ -33,8 +47,6 @@ inline juce::Rectangle<int> readoutTextBounds(const juce::Rectangle<int> bounds)
     return bounds.translated(0, readoutTextVerticalOffset);
 }
 
-static_assert(textControlWidth(1) == 30);
-static_assert(textControlWidth(2) == 43);
 static_assert(iconControlSize == 30);
 
 class FixedGap final
@@ -102,17 +114,4 @@ inline juce::Colour opacityShade(const float opacity) noexcept
     return white;
 }
 
-inline juce::Font makeFont()
-{
-#if JUCE_TARGET_HAS_BINARY_DATA
-    if (auto typeface = juce::Typeface::createSystemTypefaceFor(
-            BinaryData::IosevkaCharonMonoMedium_ttf,
-            static_cast<size_t>(BinaryData::IosevkaCharonMonoMedium_ttfSize)))
-        return juce::Font(juce::FontOptions(typeface).withHeight(baseFontSize))
-            .withExtraKerningFactor(letterSpacing / baseFontSize);
-#endif
-
-    return juce::Font(juce::FontOptions("Iosevka Charon Mono", "Medium", baseFontSize))
-        .withExtraKerningFactor(letterSpacing / baseFontSize);
-}
 }

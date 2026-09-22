@@ -13,7 +13,7 @@ constexpr float minimumCrossoverGapHz = 1.0f;
 
 juce::String formatFrequency(const double frequency)
 {
-    return juce::String(frequency, frequency >= 100.0 ? 0 : 1);
+    return juce::String::formatted("%08.2f", std::max(0.0, frequency));
 }
 
 
@@ -59,17 +59,21 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     configureHeading(controlsVisibilityHeadingLabel, "VIEW");
     configureHeading(scopMainHeadingLabel, "SCOP MAIN");
 
-    for (auto* component : std::array<juce::Component*, 62> {
+    for (auto* component : std::array<juce::Component*, 72> {
              &scopSettings.addCrossoverButton, &scopSettings.removeCrossoverButton, &scopSettings.equalHeightButton,
              &scopSettings.styleControl, &scopSettings.opacityControl, &scopSettings.zoomControlsButton,
              &scopSettings.monitorControlsButton, &scopSettings.toolsButton, &scopSettings.timeControl,
              &scopSettings.timeNoteControl, &scopSettings.timeBaseControl, &scopSettings.leftToRightButton,
              &specSettings.fftSizeControl,
              &specSettings.fftOverlapControl, &specSettings.mapTimeOverlapControl,
+             &specSettings.mapTimeControl, &specSettings.mapTimeNoteControl,
+             &specSettings.mapTimeBaseControl,
              &specSettings.averageTimeControl, &specSettings.smoothingControl,
-             &specSettings.frequencyScaleControl,
+             &specSettings.frequencyScaleControl, &specSettings.mapColourMapControl,
              &specSettings.filledDisplayButton, &specSettings.secondGraphButton,
-             &specSettings.firstGraphTypeControl, &specSettings.secondGraphTypeControl,
+             &specSettings.firstGraphTypeControl, &specSettings.firstGraphColourControl,
+             &specSettings.secondGraphTypeControl, &specSettings.secondGraphColourControl,
+             &specSettings.graphOpacityControl,
              &specSettings.antiAliasButton, &specSettings.highQualityRenderingButton, &specSettings.mapLeftToRightButton,
              &specSettings.slopeControl,
              &specSettings.rangeLowControl, &specSettings.rangeHighControl,
@@ -77,8 +81,9 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
              &specSettings.monitorControlsButton, &specSettings.zoomControlsButton,
              &corrSettings.fftSizeControl, &corrSettings.fftOverlapControl, &corrSettings.averageTimeControl,
              &corrSettings.smoothingControl, &corrSettings.frequencyScaleControl,
-             &corrSettings.firstGraphTypeControl,
-             &corrSettings.secondGraphTypeControl,
+             &corrSettings.firstGraphTypeControl, &corrSettings.firstGraphColourControl,
+             &corrSettings.secondGraphTypeControl, &corrSettings.secondGraphColourControl,
+             &corrSettings.graphOpacityControl,
              &corrSettings.filledDisplayButton, &corrSettings.secondGraphButton, &corrSettings.clearOnPlayButton,
              &corrSettings.rangesButton, &corrSettings.cursorButton,
              &corrSettings.zoomControlsButton, &lvlsSettings.widthControl,
@@ -274,32 +279,44 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     scopSettings.timeBaseControl.onChoiceRequested = requestChoice;
     specSettings.fftSizeControl.onChoiceRequested = requestChoice;
     specSettings.mapTimeOverlapControl.onChoiceRequested = requestChoice;
+    specSettings.mapTimeNoteControl.onChoiceRequested = requestChoice;
+    specSettings.mapTimeBaseControl.onChoiceRequested = requestChoice;
     specSettings.frequencyScaleControl.onChoiceRequested = requestChoice;
+    specSettings.mapColourMapControl.onChoiceRequested = requestChoice;
     specSettings.firstGraphTypeControl.onChoiceRequested = requestChoice;
+    specSettings.firstGraphColourControl.onChoiceRequested = requestChoice;
     specSettings.secondGraphTypeControl.onChoiceRequested = requestChoice;
+    specSettings.secondGraphColourControl.onChoiceRequested = requestChoice;
     corrSettings.fftSizeControl.onChoiceRequested = requestChoice;
     corrSettings.frequencyScaleControl.onChoiceRequested = requestChoice;
     corrSettings.firstGraphTypeControl.onChoiceRequested = requestChoice;
+    corrSettings.firstGraphColourControl.onChoiceRequested = requestChoice;
     corrSettings.secondGraphTypeControl.onChoiceRequested = requestChoice;
+    corrSettings.secondGraphColourControl.onChoiceRequested = requestChoice;
 
     const auto requestReset = [this] (ParameterControl& control)
     {
         if (onResetRequested)
             onResetRequested(control);
     };
-    for (auto* control : std::array<ParameterControl*, 30> {
+    for (auto* control : std::array<ParameterControl*, 40> {
              &scopSettings.styleControl, &scopSettings.opacityControl, &scopSettings.timeControl,
              &scopSettings.timeNoteControl, &scopSettings.timeBaseControl,
              &specSettings.fftSizeControl, &specSettings.fftOverlapControl, &specSettings.mapTimeOverlapControl,
+             &specSettings.mapTimeControl, &specSettings.mapTimeNoteControl,
+             &specSettings.mapTimeBaseControl,
              &specSettings.averageTimeControl,
              &specSettings.smoothingControl, &specSettings.frequencyScaleControl,
-             &specSettings.firstGraphTypeControl,
-             &specSettings.secondGraphTypeControl, &specSettings.slopeControl,
+             &specSettings.mapColourMapControl,
+             &specSettings.firstGraphTypeControl, &specSettings.firstGraphColourControl,
+             &specSettings.secondGraphTypeControl, &specSettings.secondGraphColourControl,
+             &specSettings.graphOpacityControl, &specSettings.slopeControl,
              &specSettings.rangeLowControl, &specSettings.rangeHighControl,
              &corrSettings.fftSizeControl, &corrSettings.fftOverlapControl, &corrSettings.averageTimeControl,
              &corrSettings.smoothingControl, &corrSettings.frequencyScaleControl,
-             &corrSettings.firstGraphTypeControl,
-             &corrSettings.secondGraphTypeControl,
+             &corrSettings.firstGraphTypeControl, &corrSettings.firstGraphColourControl,
+             &corrSettings.secondGraphTypeControl, &corrSettings.secondGraphColourControl,
+             &corrSettings.graphOpacityControl,
              &lvlsSettings.widthControl, &lvlsSettings.peakRangeHighControl, &lvlsSettings.peakRangeLowControl,
              &lvlsSettings.rmsWindowControl, &lvlsSettings.peakHoldControl,
              &lvlsSettings.loudnessRangeHighControl, &lvlsSettings.loudnessRangeLowControl })
@@ -318,8 +335,10 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     };
     scopSettings.opacityControl.onFocusRequested = focusControl;
     scopSettings.timeControl.onFocusRequested = focusControl;
+    specSettings.mapTimeControl.onFocusRequested = focusControl;
     specSettings.averageTimeControl.onFocusRequested = focusControl;
     specSettings.smoothingControl.onFocusRequested = focusControl;
+    specSettings.graphOpacityControl.onFocusRequested = focusControl;
     specSettings.slopeControl.onFocusRequested = focusControl;
     specSettings.rangeLowControl.onFocusRequested = focusControl;
     specSettings.rangeHighControl.onFocusRequested = focusControl;
@@ -327,6 +346,7 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     corrSettings.fftOverlapControl.onFocusRequested = focusControl;
     corrSettings.averageTimeControl.onFocusRequested = focusControl;
     corrSettings.smoothingControl.onFocusRequested = focusControl;
+    corrSettings.graphOpacityControl.onFocusRequested = focusControl;
     lvlsSettings.widthControl.onFocusRequested = focusControl;
     lvlsSettings.peakRangeHighControl.onFocusRequested = focusControl;
     lvlsSettings.peakRangeLowControl.onFocusRequested = focusControl;
@@ -343,11 +363,18 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     lvlsSettings.loudnessRangeLowControl.onValueChanged = displaySettingChanged;
     specSettings.smoothingControl.onValueChanged = displaySettingChanged;
     specSettings.frequencyScaleControl.onValueChanged = displaySettingChanged;
+    specSettings.mapColourMapControl.onValueChanged = displaySettingChanged;
+    specSettings.firstGraphColourControl.onValueChanged = displaySettingChanged;
+    specSettings.secondGraphColourControl.onValueChanged = displaySettingChanged;
+    specSettings.graphOpacityControl.onValueChanged = displaySettingChanged;
     specSettings.slopeControl.onValueChanged = displaySettingChanged;
     specSettings.rangeLowControl.onValueChanged = displaySettingChanged;
     specSettings.rangeHighControl.onValueChanged = displaySettingChanged;
     corrSettings.smoothingControl.onValueChanged = displaySettingChanged;
     corrSettings.frequencyScaleControl.onValueChanged = displaySettingChanged;
+    corrSettings.firstGraphColourControl.onValueChanged = displaySettingChanged;
+    corrSettings.secondGraphColourControl.onValueChanged = displaySettingChanged;
+    corrSettings.graphOpacityControl.onValueChanged = displaySettingChanged;
     specSettings.fftOverlapControl.getSlider().valueFromTextFunction = [] (const juce::String& text)
     {
         return text.getDoubleValue() * 0.01;
@@ -367,7 +394,21 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     scopSettings.timeNoteControl.onValueChanged = displaySettingChanged;
     scopSettings.timeControl.getSlider().valueFromTextFunction = [] (const juce::String& text)
     {
-        return text.getDoubleValue() * 1000.0;
+        return text.getDoubleValue();
+    };
+    specSettings.mapTimeBaseControl.onValueChanged = [this]
+    {
+        refreshExternalState();
+        resized();
+
+        if (onDisplaySettingsChanged)
+            onDisplaySettingsChanged();
+    };
+    specSettings.mapTimeNoteControl.onValueChanged = displaySettingChanged;
+    specSettings.mapTimeControl.onValueChanged = displaySettingChanged;
+    specSettings.mapTimeControl.getSlider().valueFromTextFunction = [] (const juce::String& text)
+    {
+        return text.getDoubleValue();
     };
 
     focusedParameterControl.onValueChange = [this]
@@ -490,10 +531,10 @@ void SettingsPanel::resized()
         ? scopRowCount * rowHeight + (scopRowCount - 1) * fixedGap.pixels()
         : specPage ? (specMapPage
             ? (rtmSpecMapPage
-                ? 15 * rowHeight + 14 * fixedGap.pixels()
-                : 14 * rowHeight + 13 * fixedGap.pixels())
-            : 18 * rowHeight + 17 * fixedGap.pixels())
-        : lvlsPage ? 16 * rowHeight + 15 * fixedGap.pixels() : 15 * rowHeight + 14 * fixedGap.pixels();
+                ? 18 * rowHeight + 17 * fixedGap.pixels()
+                : 17 * rowHeight + 16 * fixedGap.pixels())
+            : 21 * rowHeight + 20 * fixedGap.pixels())
+        : lvlsPage ? 16 * rowHeight + 15 * fixedGap.pixels() : 18 * rowHeight + 17 * fixedGap.pixels();
     const auto contentHeight = pageContentHeight;
     auto innerBounds = getLocalBounds().reduced(fixedGap.pixels());
     const auto potentiometerBounds = innerBounds.removeFromBottom(rowHeight);
@@ -562,8 +603,33 @@ void SettingsPanel::resized()
 
     if (specPage)
     {
+        if (specMapPage)
+        {
+            const auto timeBounds = area.removeFromTop(rowHeight);
+            specSettings.mapTimeControl.setBounds(timeBounds);
+            specSettings.mapTimeNoteControl.setBounds(timeBounds);
+            fixedGap.removeFromTop(area);
+            specSettings.mapTimeBaseControl.setBounds(area.removeFromTop(rowHeight));
+            fixedGap.removeFromTop(area);
+        }
+        else
+        {
+            specSettings.mapTimeControl.setBounds({});
+            specSettings.mapTimeNoteControl.setBounds({});
+            specSettings.mapTimeBaseControl.setBounds({});
+        }
+
         specSettings.frequencyScaleControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
+        if (specMapPage)
+        {
+            specSettings.mapColourMapControl.setBounds(area.removeFromTop(rowHeight));
+            fixedGap.removeFromTop(area);
+        }
+        else
+        {
+            specSettings.mapColourMapControl.setBounds({});
+        }
         specSettings.fftSizeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
         if (! specMapPage)
@@ -637,7 +703,13 @@ void SettingsPanel::resized()
             fixedGap.removeFromTop(area);
             specSettings.firstGraphTypeControl.setBounds(area.removeFromTop(rowHeight));
             fixedGap.removeFromTop(area);
+            specSettings.firstGraphColourControl.setBounds(area.removeFromTop(rowHeight));
+            fixedGap.removeFromTop(area);
             specSettings.secondGraphTypeControl.setBounds(area.removeFromTop(rowHeight));
+            fixedGap.removeFromTop(area);
+            specSettings.secondGraphColourControl.setBounds(area.removeFromTop(rowHeight));
+            fixedGap.removeFromTop(area);
+            specSettings.graphOpacityControl.setBounds(area.removeFromTop(rowHeight));
             fixedGap.removeFromTop(area);
         }
         else
@@ -645,7 +717,10 @@ void SettingsPanel::resized()
             specSettings.filledDisplayButton.setBounds({});
             specSettings.secondGraphButton.setBounds({});
             specSettings.firstGraphTypeControl.setBounds({});
+            specSettings.firstGraphColourControl.setBounds({});
             specSettings.secondGraphTypeControl.setBounds({});
+            specSettings.secondGraphColourControl.setBounds({});
+            specSettings.graphOpacityControl.setBounds({});
         }
 
         placeButton(specSettings.clearOnPlayButton);
@@ -690,7 +765,13 @@ void SettingsPanel::resized()
         fixedGap.removeFromTop(area);
         corrSettings.firstGraphTypeControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
+        corrSettings.firstGraphColourControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
         corrSettings.secondGraphTypeControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        corrSettings.secondGraphColourControl.setBounds(area.removeFromTop(rowHeight));
+        fixedGap.removeFromTop(area);
+        corrSettings.graphOpacityControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
         placeButton(corrSettings.clearOnPlayButton);
         fixedGap.removeFromTop(area);
@@ -841,18 +922,16 @@ void SettingsPanel::refreshExternalState()
     scopSettings.timeControl.setInteractionEnabled(rtmControlsEnabled, true);
     scopSettings.timeNoteControl.setInteractionEnabled(rtmControlsEnabled, true);
     scopSettings.timeBaseControl.setInteractionEnabled(rtmControlsEnabled, true);
+    specSettings.mapTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
+    specSettings.mapTimeNoteControl.setInteractionEnabled(rtmControlsEnabled, true);
+    specSettings.mapTimeBaseControl.setInteractionEnabled(rtmControlsEnabled, true);
     specSettings.averageTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    specSettings.firstGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    specSettings.secondGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
     corrSettings.averageTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    corrSettings.firstGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    corrSettings.secondGraphTypeControl.setInteractionEnabled(rtmControlsEnabled, true);
     lvlsSettings.rmsWindowControl.setInteractionEnabled(rtmControlsEnabled, true);
     lvlsSettings.peakHoldControl.setInteractionEnabled(rtmControlsEnabled, true);
     specSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
     specSettings.secondGraphButton.setEnabled(rtmControlsEnabled);
     corrSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
-    corrSettings.secondGraphButton.setEnabled(rtmControlsEnabled);
     lvlsSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
     controlsVisibilityHeadingLabel.setVisible(scopPage || specPage || corrPage || lvlsPage);
     for (auto* component : std::array<juce::Component*, 12> {
@@ -870,8 +949,11 @@ void SettingsPanel::refreshExternalState()
     scopMainHeadingLabel.setVisible(scopPage);
 
     specSettings.fftSizeControl.setVisible(specPage);
+    specSettings.frequencyScaleControl.setVisible(specPage);
+    specSettings.mapColourMapControl.setVisible(specMapPage);
     specSettings.fftOverlapControl.setVisible(specPage && ! specMapPage);
     specSettings.mapTimeOverlapControl.setVisible(specMapPage);
+    specSettings.mapTimeBaseControl.setVisible(specMapPage);
     specSettings.slopeControl.setVisible(specPage);
     specSettings.rangeLowControl.setVisible(specMapPage);
     specSettings.rangeHighControl.setVisible(specMapPage);
@@ -883,6 +965,12 @@ void SettingsPanel::refreshExternalState()
     specSettings.monitorControlsButton.setVisible(specPage);
     specSettings.zoomControlsButton.setVisible(specPage);
 
+    const auto mapNoteTime = processor.isSpecMapTimeNoteBased();
+    specSettings.mapTimeControl.setVisible(specMapPage && ! mapNoteTime);
+    specSettings.mapTimeNoteControl.setVisible(specMapPage && mapNoteTime);
+    if (mapNoteTime && focusedParameterTarget == &specSettings.mapTimeControl)
+        clearFocusedParameterControl();
+
     // Hide FREQ-only line controls in MAP; they do not participate in raster rendering.
     const auto showFreqOnlySpecSettings = specPage && ! specMapPage;
     specSettings.averageTimeControl.setVisible(showFreqOnlySpecSettings);
@@ -890,17 +978,22 @@ void SettingsPanel::refreshExternalState()
     specSettings.filledDisplayButton.setVisible(showFreqOnlySpecSettings);
     specSettings.secondGraphButton.setVisible(showFreqOnlySpecSettings);
     specSettings.firstGraphTypeControl.setVisible(showFreqOnlySpecSettings);
+    specSettings.firstGraphColourControl.setVisible(showFreqOnlySpecSettings);
     specSettings.secondGraphTypeControl.setVisible(showFreqOnlySpecSettings);
+    specSettings.secondGraphColourControl.setVisible(showFreqOnlySpecSettings);
+    specSettings.graphOpacityControl.setVisible(showFreqOnlySpecSettings);
     specSettings.antiAliasButton.setVisible(showFreqOnlySpecSettings);
 
-    for (auto* component : std::array<juce::Component*, 12> {
+    for (auto* component : std::array<juce::Component*, 15> {
              &corrSettings.fftSizeControl, &corrSettings.fftOverlapControl, &corrSettings.averageTimeControl,
              &corrSettings.smoothingControl, &corrSettings.firstGraphTypeControl,
-             &corrSettings.secondGraphTypeControl,
+             &corrSettings.firstGraphColourControl, &corrSettings.secondGraphTypeControl,
+             &corrSettings.secondGraphColourControl, &corrSettings.graphOpacityControl,
              &corrSettings.filledDisplayButton, &corrSettings.secondGraphButton,
              &corrSettings.clearOnPlayButton, &corrSettings.rangesButton,
              &corrSettings.cursorButton, &corrSettings.zoomControlsButton })
         component->setVisible(corrPage);
+    corrSettings.frequencyScaleControl.setVisible(corrPage);
 
     for (auto* component : std::array<juce::Component*, 15> {
              &lvlsSettings.widthControl, &lvlsSettings.peakRangeHighControl, &lvlsSettings.peakRangeLowControl,
@@ -967,13 +1060,20 @@ void SettingsPanel::dismissParameterEditors()
     scopSettings.timeControl.commitPendingEditor();
     scopSettings.timeNoteControl.commitPendingEditor();
     scopSettings.timeBaseControl.commitPendingEditor();
+    specSettings.mapTimeControl.commitPendingEditor();
+    specSettings.mapTimeNoteControl.commitPendingEditor();
+    specSettings.mapTimeBaseControl.commitPendingEditor();
+    specSettings.mapColourMapControl.commitPendingEditor();
     specSettings.fftSizeControl.commitPendingEditor();
     specSettings.fftOverlapControl.commitPendingEditor();
     specSettings.mapTimeOverlapControl.commitPendingEditor();
     specSettings.averageTimeControl.commitPendingEditor();
     specSettings.smoothingControl.commitPendingEditor();
     specSettings.firstGraphTypeControl.commitPendingEditor();
+    specSettings.firstGraphColourControl.commitPendingEditor();
     specSettings.secondGraphTypeControl.commitPendingEditor();
+    specSettings.secondGraphColourControl.commitPendingEditor();
+    specSettings.graphOpacityControl.commitPendingEditor();
     specSettings.slopeControl.commitPendingEditor();
     specSettings.rangeLowControl.commitPendingEditor();
     specSettings.rangeHighControl.commitPendingEditor();
@@ -981,6 +1081,9 @@ void SettingsPanel::dismissParameterEditors()
     corrSettings.fftOverlapControl.commitPendingEditor();
     corrSettings.averageTimeControl.commitPendingEditor();
     corrSettings.smoothingControl.commitPendingEditor();
+    corrSettings.firstGraphColourControl.commitPendingEditor();
+    corrSettings.secondGraphColourControl.commitPendingEditor();
+    corrSettings.graphOpacityControl.commitPendingEditor();
     lvlsSettings.widthControl.commitPendingEditor();
     lvlsSettings.peakRangeHighControl.commitPendingEditor();
     lvlsSettings.peakRangeLowControl.commitPendingEditor();

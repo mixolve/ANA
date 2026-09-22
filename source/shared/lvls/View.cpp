@@ -15,12 +15,15 @@ namespace
 {
 constexpr int bandRangeSliderHeight = 14;
 constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
-constexpr int lvlsScaleLabelWidth = ana::ui::textControlWidth(3);
-constexpr int lvlsReadoutWidth = ana::ui::textControlWidth(7);
-constexpr int historyMetricReadoutWidth = ana::ui::textControlWidth(7);
+int lvlsScaleLabelWidth() noexcept { return ana::ui::textControlWidth(3); }
+int lvlsReadoutWidth() noexcept { return ana::ui::textControlWidth(7); }
+int historyMetricReadoutWidth() noexcept { return ana::ui::textControlWidth(7); }
 constexpr int historySviewWidth = ana::ui::iconControlSize;
-constexpr int historyMinimumWidth = historyMetricReadoutWidth * 2 + historySviewWidth + bandZoomSliderWidth
-    + ana::ui::gap.pixels() * 3;
+int historyMinimumWidth() noexcept
+{
+    return historyMetricReadoutWidth() * 2 + historySviewWidth + bandZoomSliderWidth
+        + ana::ui::gap.pixels() * 3;
+}
 
 struct LvlsHistoryLayout
 {
@@ -67,11 +70,11 @@ LvlsHistoryLayout makeLvlsHistoryLayout(juce::Rectangle<int> bounds,
         sviewWidth,
         std::min(ana::ui::controlHeight, layout.plot.getBottom() - sviewY)
     };
-    layout.metricLabelRow = historyArea.withWidth(historyMetricReadoutWidth * 2
+    layout.metricLabelRow = historyArea.withWidth(historyMetricReadoutWidth() * 2
                                              + ana::ui::gap.pixels())
                                       .withHeight(std::min(ana::ui::controlHeight,
                                                           historyArea.getHeight()));
-    layout.metricReadoutRow = historyArea.withWidth(historyMetricReadoutWidth * 2
+    layout.metricReadoutRow = historyArea.withWidth(historyMetricReadoutWidth() * 2
                                                + ana::ui::gap.pixels())
         .withHeight(layout.metricLabelRow.getHeight())
         .withY(layout.metricLabelRow.getBottom() + ana::ui::gap.pixels());
@@ -142,14 +145,14 @@ void LvlsView::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(juce::Colours::black);
 
-    const auto minimumLvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth);
+    const auto minimumLvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth());
     const auto parts = getPartBounds();
     const auto visibleParts = getVisibleParts();
     auto peakRmsBounds = parts[0];
     auto lufsBounds = parts[1];
     const auto historyBounds = (historySolo && visibleParts[2]
         ? getLocalBounds() : parts[2]).toFloat();
-    const auto scaleSideWidth = lvlsScaleLabelWidth + ana::ui::gap.pixels();
+    const auto scaleSideWidth = lvlsScaleLabelWidth() + ana::ui::gap.pixels();
     const auto peakScalesVisible = peakRmsBounds.getWidth()
         >= minimumLvlsColumnWidth * 2 + ana::ui::gap.pixels() + scaleSideWidth * 2;
     auto peakLvlsHorizontalBounds = peakRmsBounds;
@@ -223,13 +226,13 @@ void LvlsView::paint(juce::Graphics& graphics)
                                                           : formatLevelScaleTick(tick);
             if (drawLeftLabels)
                 graphics.drawText(label,
-                                  juce::roundToInt(bounds.getX()) - ana::ui::gap.pixels() - lvlsScaleLabelWidth,
-                                  labelY, lvlsScaleLabelWidth, ana::ui::controlHeight,
+                                  juce::roundToInt(bounds.getX()) - ana::ui::gap.pixels() - lvlsScaleLabelWidth(),
+                                  labelY, lvlsScaleLabelWidth(), ana::ui::controlHeight,
                                   juce::Justification::centredRight, true);
             if (drawRightLabels)
                 graphics.drawText(label,
                                   juce::roundToInt(bounds.getRight()) + ana::ui::gap.pixels(),
-                                  labelY, lvlsScaleLabelWidth, ana::ui::controlHeight,
+                                  labelY, lvlsScaleLabelWidth(), ana::ui::controlHeight,
                                   juce::Justification::centredLeft, true);
         }
     };
@@ -457,11 +460,11 @@ void LvlsView::paint(juce::Graphics& graphics)
         ana::ui::FixedGapRow metricReadouts(historyLayout.metricReadoutRow);
         const auto truePeak = std::max(peakMaximumValues[0], peakMaximumValues[1]);
         drawMetric("TP", truePeak <= -119.95f ? juce::String("-inf") : formatReadoutLevel(truePeak),
-                   metricLabels.takeLeft(historyMetricReadoutWidth),
-                   metricReadouts.takeLeft(historyMetricReadoutWidth));
+                   metricLabels.takeLeft(historyMetricReadoutWidth()),
+                   metricReadouts.takeLeft(historyMetricReadoutWidth()));
         drawMetric("LRA", formatReadoutLevel(loudnessRange),
-                   metricLabels.takeLeft(historyMetricReadoutWidth),
-                   metricReadouts.takeLeft(historyMetricReadoutWidth));
+                   metricLabels.takeLeft(historyMetricReadoutWidth()),
+                   metricReadouts.takeLeft(historyMetricReadoutWidth()));
     };
 
     const auto historyEnabled = [this] (const char* parameterId)
@@ -579,8 +582,8 @@ void LvlsView::layoutPeakModeButtons()
         return;
 
     const auto partBounds = getPartBounds()[0];
-    const auto minimumLvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth);
-    const auto scaleSideWidth = lvlsScaleLabelWidth + ana::ui::gap.pixels();
+    const auto minimumLvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth());
+    const auto scaleSideWidth = lvlsScaleLabelWidth() + ana::ui::gap.pixels();
     const auto scalesVisible = partBounds.getWidth()
         >= minimumLvlsColumnWidth * 2 + ana::ui::gap.pixels() + scaleSideWidth * 2;
     auto headerBounds = partBounds;
@@ -627,11 +630,11 @@ std::array<bool, 3> LvlsView::getVisibleParts() const noexcept
 
 std::array<int, 3> LvlsView::getMinimumPartWidths() const noexcept
 {
-    const auto lvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth);
+    const auto lvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth());
     return {
         lvlsColumnWidth * 2 + ana::ui::gap.pixels(),
         lvlsColumnWidth * 3 + ana::ui::gap.pixels() * 2,
-        historyMinimumWidth
+        historyMinimumWidth()
     };
 }
 

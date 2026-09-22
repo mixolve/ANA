@@ -14,13 +14,11 @@ struct StereoSpectrumLevels
     float stereoGain = 0.0f;
     float midGain = 0.0f;
     float sideGain = 0.0f;
-    float deltaGain = 0.0f;
     float leftDecibels = 0.0f;
     float rightDecibels = 0.0f;
     float stereoDecibels = 0.0f;
     float midDecibels = 0.0f;
     float sideDecibels = 0.0f;
-    float deltaDecibels = 0.0f;
 };
 
 inline float spectrumGainToDecibels(const float gain, const float minimumDecibels) noexcept
@@ -62,15 +60,12 @@ inline StereoSpectrumLevels calculateStereoSpectrumLevels(
     levels.stereoGain = calibratedGain((magnitude(leftComplex) + magnitude(rightComplex)) * 0.5f);
     levels.midGain = calibratedGain(magnitude(midComplex));
     levels.sideGain = calibratedGain(magnitude(sideComplex));
-    // DELTA compares channel magnitudes, unlike phase-aware SIDE.
-    levels.deltaGain = std::abs(levels.leftGain - levels.rightGain);
 
     levels.leftDecibels = spectrumGainToDecibels(levels.leftGain, minimumDecibels);
     levels.rightDecibels = spectrumGainToDecibels(levels.rightGain, minimumDecibels);
     levels.stereoDecibels = spectrumGainToDecibels(levels.stereoGain, minimumDecibels);
     levels.midDecibels = spectrumGainToDecibels(levels.midGain, minimumDecibels);
     levels.sideDecibels = spectrumGainToDecibels(levels.sideGain, minimumDecibels);
-    levels.deltaDecibels = spectrumGainToDecibels(levels.deltaGain, minimumDecibels);
     return levels;
 }
 }

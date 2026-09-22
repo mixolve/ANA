@@ -145,8 +145,7 @@ struct SpectrogramMapWriter
                 levels.leftDecibels,
                 levels.rightDecibels,
                 levels.midDecibels,
-                levels.sideDecibels,
-                levels.deltaDecibels
+                levels.sideDecibels
             };
         }
 

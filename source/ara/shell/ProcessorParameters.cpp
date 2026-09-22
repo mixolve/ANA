@@ -1,4 +1,5 @@
 #include "Processor.h"
+#include "shared/shell/GraphColours.h"
 #include "shared/analyzer/DisplaySettings.h"
 #include "shared/analyzer/Frequency.h"
 #include "shared/scop/Settings.h"
@@ -6,6 +7,7 @@
 #include "shared/corr/Settings.h"
 #include "shared/scop/TimeScale.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <tuple>
@@ -14,13 +16,12 @@ namespace
 {
 juce::String formatFrequency(const float value)
 {
-    return juce::String(value, value >= 100.0f ? 0 : 1);
+    return juce::String::formatted("%08.2f", std::max(0.0f, value));
 }
 
 juce::String formatScopTime(const float milliseconds)
 {
-    const auto seconds = milliseconds / 1000.0f;
-    return juce::String(seconds, seconds < 10.0f ? 1 : 0);
+    return juce::String(juce::roundToInt(milliseconds));
 }
 }
 
@@ -144,6 +145,54 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
         0,
         juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
 
+    auto mapTimeRange = juce::NormalisableRange<float> { ana::spec::minimumMapTimeMilliseconds,
+                                                         ana::spec::maximumMapTimeMilliseconds,
+                                                         ana::spec::mapTimeStepMilliseconds };
+    mapTimeRange.setSkewForCentre(ana::spec::mapTimeRangeSkewCentreMilliseconds);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { specMapTimeParameterId, 1 },
+        "SPEC MAP / TIME",
+        mapTimeRange,
+        ana::spec::defaultMapTimeMilliseconds,
+        juce::AudioParameterFloatAttributes()
+            .withStringFromValueFunction([] (const float value, int)
+            {
+                return juce::String(juce::roundToInt(value));
+            })));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { specMapTimeBaseParameterId, 1 },
+        "SPEC MAP / TIME BASE",
+        juce::StringArray { "MS", "NOTE" },
+        0,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { specMapNoteLengthParameterId, 1 },
+        "SPEC MAP / NOTE LENGTH",
+        []
+        {
+            juce::StringArray choices;
+            for (const auto* label : ana::scop::noteLengthLabels)
+                choices.add(label);
+            return choices;
+        }(),
+        ana::scop::defaultNoteLengthIndex,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { specMapColourMapParameterId, 1 },
+        "SPEC MAP / COLOUR MAP",
+        []
+        {
+            juce::StringArray choices;
+            for (const auto* label : ana::spec::colourMapLabels)
+                choices.add(label);
+            return choices;
+        }(),
+        ana::spec::defaultColourMapIndex,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { specAverageTimeParameterId, 1 },
         "SPEC / AVG TIME",
@@ -180,8 +229,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
              std::tuple { specClearOnPlayParameterId, "SPEC / CLEAR ON PLAY", false },
              std::tuple { specCursorReadoutParameterId, "SPEC / CURSOR", true },
              std::tuple { specMonitorControlsParameterId, "SPEC / MONITOR", true },
-             std::tuple { specZoomControlsParameterId, "SPEC / ZOOM", true },
-             std::tuple { specSplitViewParameterId, "SPEC / SPLIT", false } })
+             std::tuple { specZoomControlsParameterId, "SPEC / ZOOM", true } })
         layout.add(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID { id, 1 }, name, defaultValue,
             juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
@@ -202,6 +250,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
             juce::ParameterID { id, 1 }, name,
             juce::StringArray { "AVG", "MAX" }, 0,
             juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name, defaultIndex] : std::array {
+             std::tuple { specFirstGraphColourParameterId, "SPEC / 1ST GRAPH COLOUR",
+                          ana::ui::defaultFirstGraphColourIndex },
+             std::tuple { specSecondGraphColourParameterId, "SPEC / 2ND GRAPH COLOUR",
+                          ana::ui::defaultSecondGraphColourIndex } })
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { id, 1 }, name, ana::ui::graphColourNames(), defaultIndex,
+            juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID { specGraphOpacityParameterId, 1 },
+        "SPEC / GRAPH OPACITY", 1, 100, 100,
+        juce::AudioParameterIntAttributes().withAutomatable(false).withMeta(true)));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { specSlopeParameterId, 1 },
@@ -296,6 +358,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
         juce::ParameterID { corrSecondGraphTypeParameterId, 1 },
         "CORR / 2ND GRAPH TYPE", juce::StringArray { "AVG", "MIN" }, 1,
         juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name, defaultIndex] : std::array {
+             std::tuple { corrFirstGraphColourParameterId, "CORR / 1ST GRAPH COLOUR",
+                          ana::ui::defaultFirstGraphColourIndex },
+             std::tuple { corrSecondGraphColourParameterId, "CORR / 2ND GRAPH COLOUR",
+                          ana::ui::defaultSecondGraphColourIndex } })
+        layout.add(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { id, 1 }, name, ana::ui::graphColourNames(), defaultIndex,
+            juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID { corrGraphOpacityParameterId, 1 },
+        "CORR / GRAPH OPACITY", 1, 100, 100,
+        juce::AudioParameterIntAttributes().withAutomatable(false).withMeta(true)));
 
     layout.add(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID { corrModeParameterId, 1 },
@@ -405,8 +481,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
                 .withMeta(true)
                 .withStringFromValueFunction([] (const float value, int)
                 {
-                    const auto prefix = value > 0.05f ? "+" : "";
-                    return prefix + juce::String(std::abs(value) < 0.05f ? 0.0f : value, 1);
+                    return juce::String::formatted(
+                        "%+.1f", std::abs(value) < 0.05f ? 0.0f : value);
                 })));
 
         layout.add(std::make_unique<juce::AudioParameterBool>(

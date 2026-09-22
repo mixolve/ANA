@@ -19,10 +19,10 @@ inline constexpr size_t scopChannelModeCount = static_cast<size_t>(ScopChannelMo
 
 namespace ana::scop
 {
-inline constexpr float minimumTimeMilliseconds = 1000.0f;
+inline constexpr float minimumTimeMilliseconds = 10.0f;
 inline constexpr float maximumTimeMilliseconds = 30000.0f;
 inline constexpr float defaultTimeMilliseconds = 10000.0f;
-inline constexpr float timeStepMilliseconds = 100.0f;
+inline constexpr float timeStepMilliseconds = 10.0f;
 inline constexpr float timeRangeSkewCentreMilliseconds = 5000.0f;
 
 inline constexpr float minimumOpacityPercent = 10.0f;

@@ -10,11 +10,10 @@ enum class Channel : size_t
     left,
     right,
     mid,
-    side,
-    delta
+    side
 };
 
-inline constexpr size_t channelCount = static_cast<size_t>(Channel::delta) + 1;
+inline constexpr size_t channelCount = static_cast<size_t>(Channel::side) + 1;
 
 constexpr size_t channelIndex(const Channel channel) noexcept
 {
