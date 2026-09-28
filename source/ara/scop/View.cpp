@@ -1,20 +1,55 @@
 #include "View.h"
 #include "../shell/Processor.h"
 #include "shared/shell/Theme.h"
+#include "shared/scop/Layout.h"
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <utility>
 
 namespace
 {
+float readParameterValue(const PluginProcessor& processor, const char* parameterId,
+                         const float fallback) noexcept
+{
+    if (const auto* value = processor.getParameters().getRawParameterValue(parameterId))
+        return value->load(std::memory_order_relaxed);
+    return fallback;
+}
+
+void setParameterPlainValue(PluginProcessor& processor, const char* parameterId,
+                            const float value)
+{
+    auto* parameter = processor.getParameters().getParameter(parameterId);
+    if (parameter == nullptr)
+        return;
+    const auto normalised = parameter->convertTo0to1(value);
+    if (juce::approximatelyEqual(parameter->getValue(), normalised))
+        return;
+    parameter->beginChangeGesture();
+    parameter->setValueNotifyingHost(normalised);
+    parameter->endChangeGesture();
+}
+
 int bandZoomValueWidth() noexcept
 {
     return ana::ui::textControlWidth(6);
 }
-constexpr int bandRangeSliderHeight = 14;
+juce::String formatTimeReadout(const double seconds)
+{
+    const auto safeSeconds = std::max(0.0, seconds);
+    const auto minutes = static_cast<int>(safeSeconds / 60.0);
+    return juce::String::formatted("%02d:%06.3f", minutes,
+        safeSeconds - static_cast<double>(minutes) * 60.0);
+}
+int bandTimeReadoutWidth() noexcept
+{
+    return ana::ui::textControlWidth(9);
+}
+constexpr int bandRangeSliderHeight = ana::scop::bandRangeSliderHeight;
 constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
-constexpr int minimumBandHeight = ana::ui::gap.pixels() * 3 + ana::ui::controlHeight + bandRangeSliderHeight;
+constexpr int minimumBandHeight = ana::scop::minimumAraBandHeight;
 constexpr int waveformRightInset = ana::ui::gap.pixels() + bandZoomSliderWidth;
 constexpr std::array<const char*, ana::scopChannelModeCount> scopModeButtonNames { "LR", "L", "R", "MS", "M", "S" };
 constexpr std::array<ana::ScopChannelMode, ana::scopChannelModeCount> scopModeButtonModes {
@@ -156,7 +191,7 @@ ScopView::ScopView(PluginProcessor& processorRef)
     : processor(processorRef)
 {
     setOpaque(false);
-    bandHeightWeights.fill(1.0f);
+    bandHeightWeights = processor.getScopBandHeightWeights();
     singleViewBand = processor.getScopSingleViewBand();
     fullSourceView = processor.isScopFullSourceView();
 
@@ -242,13 +277,43 @@ ScopView::ScopView(PluginProcessor& processorRef)
         addAndMakeVisible(*zoomValueLabel);
         bandZoomValueLabels[bandIndex] = std::move(zoomValueLabel);
 
+        const auto makeTimeLabel = [this]
+        {
+            auto label = std::make_unique<EllipsisLabel>();
+            label->setFont(ana::ui::makeFont());
+            label->setJustificationType(juce::Justification::centred);
+            label->setColour(juce::Label::textColourId, ana::ui::white);
+            label->setColour(juce::Label::backgroundColourId, ana::ui::dark);
+            label->setColour(juce::Label::outlineColourId, ana::ui::light);
+            label->setBorderSize(juce::BorderSize<int>(1));
+            label->setTextVerticalOffset(ana::ui::readoutTextVerticalOffset);
+            label->setInterceptsMouseClicks(false, false);
+            addAndMakeVisible(*label);
+            return label;
+        };
+        bandTimeStartLabels[bandIndex] = makeTimeLabel();
+        bandTimeEndLabels[bandIndex] = makeTimeLabel();
+
         auto normalizeButton = std::make_unique<ControlButton>("N");
         normalizeButton->onClick = [this, bandIndex] { normalizeBandWithZoom(bandIndex); };
         addAndMakeVisible(*normalizeButton);
         bandNormalizeButtons[bandIndex] = std::move(normalizeButton);
 
         auto rangeSlider = std::make_unique<RangeSlider>();
-        rangeSlider->onRangeChanged = [this] { repaint(); };
+        rangeSlider->setRange(
+            readParameterValue(processor, PluginProcessor::scopRangeStartParameterIds[bandIndex], 0.0f),
+            readParameterValue(processor, PluginProcessor::scopRangeEndParameterIds[bandIndex], 1.0f));
+        rangeSlider->onRangeChanged = [this, bandIndex]
+        {
+            if (! updatingBandControls)
+            {
+                setParameterPlainValue(processor, PluginProcessor::scopRangeStartParameterIds[bandIndex],
+                                       bandRangeSliders[bandIndex]->getRangeStart());
+                setParameterPlainValue(processor, PluginProcessor::scopRangeEndParameterIds[bandIndex],
+                                       bandRangeSliders[bandIndex]->getRangeEnd());
+            }
+            repaint();
+        };
         addAndMakeVisible(*rangeSlider);
         bandRangeSliders[bandIndex] = std::move(rangeSlider);
 
@@ -311,6 +376,7 @@ void ScopView::refreshWaveform()
 void ScopView::equalizeBandHeights()
 {
     bandHeightWeights.fill(1.0f);
+    processor.setScopBandHeightWeights(bandHeightWeights);
     draggedBandSeparator = -1;
     refreshBandModeButtons();
     repaint();
@@ -344,6 +410,22 @@ void ScopView::setFullSourceView(const bool shouldShowFullSource)
 
 void ScopView::timerCallback()
 {
+    if (draggedBandSeparator < 0)
+    {
+        const auto storedWeights = processor.getScopBandHeightWeights();
+        const auto localTotal = std::max(0.001f, std::accumulate(
+            bandHeightWeights.begin(), bandHeightWeights.end(), 0.0f));
+        auto changed = false;
+        for (size_t index = 0; index < bandHeightWeights.size(); ++index)
+            changed = changed
+                || std::abs(bandHeightWeights[index] / localTotal - storedWeights[index]) > 1.0e-4f;
+        if (changed)
+        {
+            bandHeightWeights = storedWeights;
+            resized();
+        }
+    }
+
     const auto waveformColumnCount = getWaveformColumnCount();
     const auto activeBandCount = processor.getCrossoverCount() + 1;
     std::array<ana::ScopChannelMode, ana::dsp::LinkwitzRileyCrossover::numBands> currentModes;
@@ -421,16 +503,15 @@ void ScopView::paint(juce::Graphics& graphics)
             continue;
 
         auto waveformBounds = laneBounds;
-        const auto zoomSlidersVisible = shouldShowZoomSliders(bandIndex, activeBandCount);
-        if (zoomSlidersVisible)
-        {
+        const auto zoomSlidersFit = shouldShowZoomSliders(bandIndex, activeBandCount);
+        if (zoomSlidersFit && processor.areScopHorizontalZoomControlsVisible())
             waveformBounds.setBottom(std::max(waveformBounds.getY() + 1.0f,
                                               waveformBounds.getBottom()
                                                   - static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels())));
+        if (zoomSlidersFit && processor.areScopVerticalZoomControlsVisible())
             waveformBounds.setRight(std::max(
                 waveformBounds.getX() + 1.0f,
                 static_cast<float>(getWidth() - waveformRightInset)));
-        }
 
         const auto rangeStart = bandRangeSliders[bandIndex]->getRangeStart();
         const auto rangeEnd = bandRangeSliders[bandIndex]->getRangeEnd();
@@ -477,14 +558,18 @@ void ScopView::paint(juce::Graphics& graphics)
         if (waveformBounds.isEmpty())
             continue;
 
-        const auto zoomSlidersVisible = shouldShowZoomSliders(bandIndex, activeBandCount);
+        const auto zoomSlidersFit = shouldShowZoomSliders(bandIndex, activeBandCount);
+        const auto showHorizontalZoom = zoomSlidersFit
+            && processor.areScopHorizontalZoomControlsVisible();
+        const auto showVerticalZoom = zoomSlidersFit
+            && processor.areScopVerticalZoomControlsVisible();
 
-        if (zoomSlidersVisible)
+        if (showHorizontalZoom)
             waveformBounds.setBottom(std::max(waveformBounds.getY() + 1.0f,
                                               waveformBounds.getBottom()
                                                   - static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels())));
 
-        const auto lineWidth = zoomSlidersVisible
+        const auto lineWidth = showVerticalZoom
             ? std::max(0, getWidth() - waveformRightInset)
             : getWidth();
         const auto displayedModes = getDisplayedModes(processor.getScopChannelMode(bandIndex));
@@ -652,7 +737,10 @@ void ScopView::refreshBandModeButtons()
     constexpr int buttonHeight = ana::ui::controlHeight;
     constexpr int zoomSliderWidth = bandZoomSliderWidth;
     const auto zoomValueWidth = bandZoomValueWidth();
-    const auto showZoomControls = processor.areScopZoomControlsVisible();
+    const auto showZoomControls = processor.areScopVerticalZoomControlsVisible();
+    const auto showVerticalReadout = processor.areScopVerticalReadoutsVisible();
+    const auto showHorizontalZoomControls = processor.areScopHorizontalZoomControlsVisible();
+    const auto showHorizontalReadouts = processor.areScopHorizontalReadoutsVisible();
     const auto showMonitorControls = processor.areScopMonitorControlsVisible();
     const auto showTools = processor.areScopToolsVisible();
     const auto normalizationAvailable = showingAraAnalysis
@@ -674,15 +762,25 @@ void ScopView::refreshBandModeButtons()
             : juce::Rectangle<int>();
         const auto showZoomSliders = isVisibleBand
             && shouldShowZoomSliders(bandIndex, activeBandCount);
-        const auto laneTopInset = laneBounds.getY() == 0 ? 0 : ana::ui::gap.pixels();
-        const auto controlsY = laneBounds.getY() + laneTopInset;
-        const auto preferredZoomControlsWidth = showZoomControls
-            ? zoomValueWidth + ana::ui::gap.pixels() + bandNormalizeButtons[bandIndex]->getPreferredWidth()
-                + ana::ui::gap.pixels() + (showZoomSliders ? zoomSliderWidth + ana::ui::gap.pixels() : 0)
-            : 0;
-        const auto zoomControlsFit = getWidth() >= preferredZoomControlsWidth;
-        const auto zoomControlsWidth = zoomControlsFit ? preferredZoomControlsWidth : 0;
-        ana::ui::FixedGapRow controlsRow({ 0, controlsY, std::max(0, getWidth() - zoomControlsWidth), buttonHeight });
+        const auto showVerticalZoomSlider = showZoomSliders && showZoomControls;
+        const auto controlsY = laneBounds.getY() + ana::ui::gap.pixels();
+        const auto normalizeButtonWidth = bandNormalizeButtons[bandIndex]->getPreferredWidth();
+        const auto preferredZoomControlsWidth = normalizeButtonWidth
+            + (showVerticalReadout ? ana::ui::gap.pixels() + zoomValueWidth : 0)
+            + (showVerticalZoomSlider ? ana::ui::gap.pixels() + zoomSliderWidth : 0);
+        const auto leftControlsWidth = std::max(0, getWidth() - preferredZoomControlsWidth);
+        auto controlX = 0;
+        auto controlY = controlsY;
+        const auto placeLeftControl = [&] (juce::Component& component, const int width)
+        {
+            if (controlX + width > leftControlsWidth)
+            {
+                controlX = 0;
+                controlY += buttonHeight + ana::ui::gap.pixels();
+            }
+            component.setBounds(controlX, controlY, width, buttonHeight);
+            controlX += width + ana::ui::gap.pixels();
+        };
 
         for (size_t modeIndex = 0; modeIndex < bandModeButtons[bandIndex].size(); ++modeIndex)
         {
@@ -692,60 +790,93 @@ void ScopView::refreshBandModeButtons()
                                   juce::dontSendNotification);
 
             if (isVisibleBand && showMonitorControls)
-                button.setBounds(controlsRow.takeLeft(button.getPreferredWidth()));
+                placeLeftControl(button, button.getPreferredWidth());
         }
 
         auto& clearButton = *bandClearButtons[bandIndex];
         clearButton.setVisible(isVisibleBand && showTools);
         if (isVisibleBand && showTools)
-            clearButton.setBounds(controlsRow.takeLeft(clearButton.getPreferredWidth()));
+            placeLeftControl(clearButton, clearButton.getPreferredWidth());
 
         auto& singleViewButton = *bandSingleViewButtons[bandIndex];
         singleViewButton.setVisible(isVisibleBand && showTools && ! fullSourceView);
         singleViewButton.setToggleState(singleViewBand == static_cast<int>(bandIndex),
                                         juce::dontSendNotification);
         if (isVisibleBand && showTools)
-            singleViewButton.setBounds(controlsRow.takeLeft(singleViewButton.getPreferredWidth()));
+            placeLeftControl(singleViewButton, singleViewButton.getPreferredWidth());
 
         auto& zoomSlider = *bandZoomSliders[bandIndex];
         auto& zoomValueLabel = *bandZoomValueLabels[bandIndex];
-        zoomSlider.setVisible(showZoomSliders);
-        zoomValueLabel.setVisible(isVisibleBand && showZoomControls && zoomControlsFit);
+        zoomSlider.setVisible(showVerticalZoomSlider);
+        zoomValueLabel.setVisible(isVisibleBand && showVerticalReadout);
         zoomSlider.setValue(verticalZoomDecibels, juce::dontSendNotification);
         zoomSlider.setTooltip("ZOOM " + formatZoomValue(verticalZoomDecibels));
         zoomValueLabel.setText(formatZoomValue(verticalZoomDecibels), juce::dontSendNotification);
         auto& normalizeButton = *bandNormalizeButtons[bandIndex];
-        normalizeButton.setVisible(isVisibleBand && showZoomControls && zoomControlsFit);
+        normalizeButton.setVisible(isVisibleBand);
         normalizeButton.setEnabled(normalizationAvailable
                                    && ! (fullSourceView ? widebandCleared : clearedBands[bandIndex]));
         normalizeButton.setToggleState(normalized, juce::dontSendNotification);
 
         auto& rangeSlider = *bandRangeSliders[bandIndex];
-        rangeSlider.setVisible(showZoomSliders);
+        rangeSlider.setRange(
+            readParameterValue(processor, PluginProcessor::scopRangeStartParameterIds[bandIndex], 0.0f),
+            readParameterValue(processor, PluginProcessor::scopRangeEndParameterIds[bandIndex], 1.0f));
+        rangeSlider.setVisible(showZoomSliders && showHorizontalZoomControls);
 
-        if (isVisibleBand && showZoomControls && zoomControlsFit)
+        auto& timeStartLabel = *bandTimeStartLabels[bandIndex];
+        auto& timeEndLabel = *bandTimeEndLabels[bandIndex];
+        const auto startSeconds = displayedAraAnalysis != nullptr
+            ? displayedAraAnalysis->startTimeSeconds
+                + displayedAraAnalysis->durationSeconds * rangeSlider.getRangeStart()
+            : 0.0;
+        const auto endSeconds = displayedAraAnalysis != nullptr
+            ? displayedAraAnalysis->startTimeSeconds
+                + displayedAraAnalysis->durationSeconds * rangeSlider.getRangeEnd()
+            : 0.0;
+        timeStartLabel.setText(formatTimeReadout(startSeconds), juce::dontSendNotification);
+        timeEndLabel.setText(formatTimeReadout(endSeconds), juce::dontSendNotification);
+        const auto timeReadoutWidth = bandTimeReadoutWidth();
+        const auto showTimeReadouts = isVisibleBand && showHorizontalReadouts;
+        timeStartLabel.setVisible(showTimeReadouts);
+        timeEndLabel.setVisible(showTimeReadouts);
+        if (showTimeReadouts)
+        {
+            placeLeftControl(timeStartLabel, timeReadoutWidth);
+            placeLeftControl(timeEndLabel, timeReadoutWidth);
+        }
+
+        if (showZoomSliders && showHorizontalZoomControls)
+        {
+            const auto rangeWidth = showVerticalZoomSlider
+                ? getWidth() - zoomSliderWidth - ana::ui::gap.pixels()
+                : getWidth();
+            rangeSlider.setBounds(0,
+                                  laneBounds.getBottom() - ana::ui::gap.pixels() - bandRangeSliderHeight,
+                                  std::max(1, rangeWidth), bandRangeSliderHeight);
+        }
+
+        if (isVisibleBand)
         {
             const auto buttonY = controlsY;
-            const auto sliderX = showZoomSliders
+            const auto sliderX = showVerticalZoomSlider
                 ? std::max(0, getWidth() - zoomSliderWidth)
                 : getWidth();
-            const auto zoomValueX = sliderX - (showZoomSliders ? ana::ui::gap.pixels() : 0)
+            const auto zoomValueX = sliderX - (showVerticalZoomSlider ? ana::ui::gap.pixels() : 0)
                 - zoomValueWidth;
-            zoomValueLabel.setBounds(zoomValueX, buttonY, zoomValueWidth, buttonHeight);
-            const auto normalizeButtonWidth = normalizeButton.getPreferredWidth();
-            const auto normalizeButtonX = zoomValueX - ana::ui::gap.pixels() - normalizeButtonWidth;
+            if (showVerticalReadout)
+                zoomValueLabel.setBounds(zoomValueX, buttonY, zoomValueWidth, buttonHeight);
+            const auto normalizeButtonX = (showVerticalReadout
+                ? zoomValueX - ana::ui::gap.pixels()
+                : sliderX - (showVerticalZoomSlider ? ana::ui::gap.pixels() : 0))
+                - normalizeButtonWidth;
             normalizeButton.setBounds(normalizeButtonX, buttonY, normalizeButtonWidth, buttonHeight);
 
-            if (showZoomSliders)
+            if (showVerticalZoomSlider)
             {
-                const auto rangeBounds = juce::Rectangle<int>(
-                    0,
-                    laneBounds.getBottom() - ana::ui::gap.pixels() - bandRangeSliderHeight,
-                    std::max(1, sliderX - ana::ui::gap.pixels()),
-                    bandRangeSliderHeight);
-                rangeSlider.setBounds(rangeBounds);
                 zoomSlider.setBounds(sliderX, buttonY, zoomSliderWidth,
-                                     std::max(1, rangeBounds.getBottom() - buttonY));
+                                     std::max(1, laneBounds.getBottom()
+                                         - ana::ui::gap.pixels() - buttonY));
             }
         }
     }
@@ -806,8 +937,7 @@ juce::Rectangle<float> ScopView::getBandBounds(
 bool ScopView::shouldShowZoomSliders(
     const size_t bandIndex, const size_t activeBandCount) const noexcept
 {
-    return processor.areScopZoomControlsVisible()
-        && getBandBounds(bandIndex, activeBandCount).getHeight()
+    return getBandBounds(bandIndex, activeBandCount).getHeight()
             >= static_cast<float>(minimumBandHeight);
 }
 
@@ -815,7 +945,8 @@ bool ScopView::hasVisibleZoomSliders() const noexcept
 {
     const auto activeBandCount = processor.getCrossoverCount() + 1;
     for (size_t bandIndex = 0; bandIndex < activeBandCount; ++bandIndex)
-        if (shouldShowZoomSliders(bandIndex, activeBandCount))
+        if (processor.areScopVerticalZoomControlsVisible()
+            && shouldShowZoomSliders(bandIndex, activeBandCount))
             return true;
 
     return false;
@@ -909,7 +1040,10 @@ void ScopView::mouseDrag(const juce::MouseEvent& event)
 
 void ScopView::mouseUp(const juce::MouseEvent& event)
 {
+    const auto wasDragging = draggedBandSeparator >= 0;
     draggedBandSeparator = -1;
+    if (wasDragging)
+        processor.setScopBandHeightWeights(bandHeightWeights);
     mouseMove(event);
 }
 

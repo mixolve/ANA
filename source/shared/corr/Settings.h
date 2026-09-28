@@ -1,9 +1,43 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <JuceHeader.h>
 
 namespace ana::corr
 {
+inline constexpr const char* modeStateKey = "ana.corr.mode";
+
+inline constexpr std::array<const char*, 22> modeSettingParameterIds {
+    "corrFftSize",
+    "corrFftOverlap",
+    "corrAverageTime",
+    "corrSmoothing",
+    "corrFrequencyScale",
+    "corrFilledDisplay",
+    "corrSecondGraph",
+    "corrFirstGraphType",
+    "corrSecondGraphType",
+    "corrFirstGraphColour",
+    "corrSecondGraphColour",
+    "corrGraphOpacity",
+    "corrClearOnPlay",
+    "corrHorizontalReadouts",
+    "corrVerticalReadouts",
+    "corrCursorReadout",
+    "corrHorizontalZoom",
+    "corrVerticalZoom",
+    "corrLow",
+    "corrHigh",
+    "corrRangeLow",
+    "corrRangeHigh"
+};
+
+inline juce::Identifier modeSettingStateKey(const int mode, const char* parameterId)
+{
+    return juce::Identifier("corrMode" + juce::String(mode) + "_" + parameterId);
+}
+
 inline constexpr float minimumCoefficient = -1.0f;
 inline constexpr float maximumCoefficient = 1.0f;
 inline constexpr float defaultLowCoefficient = minimumCoefficient;

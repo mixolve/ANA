@@ -27,6 +27,9 @@ public:
 
 private:
     void timerCallback() override;
+    void refreshPersistentViewState();
+    void setPersistentParameter(const char* parameterId, float value);
+    void storeHistoryZoomState();
     void layoutPeakModeButtons();
     int getLvlsWidth() const noexcept;
     std::array<bool, 3> getVisibleParts() const noexcept;

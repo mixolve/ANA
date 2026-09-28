@@ -291,9 +291,14 @@ void CorrView::resized()
     const auto* cursor = processor.getParameters().getRawParameterValue(
         PluginProcessor::corrCursorReadoutParameterId);
     const auto showCursor = cursor == nullptr || cursor->load(std::memory_order_relaxed) >= 0.5f;
-    const auto* zoom = processor.getParameters().getRawParameterValue(
-        PluginProcessor::corrZoomControlsParameterId);
-    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
+    const auto* horizontalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrHorizontalZoomParameterId);
+    const auto* verticalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrVerticalZoomParameterId);
+    const auto showHorizontalZoom = horizontalZoom == nullptr
+        || horizontalZoom->load(std::memory_order_relaxed) >= 0.5f;
+    const auto showVerticalZoom = verticalZoom == nullptr
+        || verticalZoom->load(std::memory_order_relaxed) >= 0.5f;
     const auto frequencyReadoutWidth = ana::ui::textControlWidth(8);
     const auto coefficientReadoutWidth = ana::ui::textControlWidth(5);
     const auto readoutY = plotBounds.getBottom() - ana::ui::controlHeight;
@@ -306,12 +311,6 @@ void CorrView::resized()
     signedModeButton.setBounds(topControls.takeLeft(signedModeButton.getPreferredWidth()));
     phaseModeButton.setBounds(topControls.takeLeft(phaseModeButton.getPreferredWidth()));
     freqModeButton.setBounds(topControls.takeLeft(freqModeButton.getPreferredWidth()));
-    cursorReadoutLabel.setBounds(showCursor
-        ? topControls.takeLeft(frequencyReadoutWidth) : juce::Rectangle<int>());
-    const auto cursorVerticalReadoutFits = showCursor
-        && topControls.remaining().getWidth() >= coefficientReadoutWidth;
-    cursorVerticalReadoutLabel.setBounds(cursorVerticalReadoutFits
-        ? topControls.takeLeft(coefficientReadoutWidth) : juce::Rectangle<int>());
     ana::ui::FixedGapRow topReadoutControls(topReadouts);
     rangeHighControl.setBounds(topReadoutControls.takeLeft(coefficientReadoutWidth));
     frequencyLowControl.setBounds(plotBounds.getX(), readoutY, frequencyReadoutWidth, ana::ui::controlHeight);
@@ -320,18 +319,38 @@ void CorrView::resized()
                                    frequencyReadoutWidth, ana::ui::controlHeight);
     rangeLowControl.setBounds(graphRight - coefficientReadoutWidth, readoutY,
                               coefficientReadoutWidth, ana::ui::controlHeight);
-    if (showZoom)
+    cursorReadoutLabel.setBounds({});
+    cursorVerticalReadoutLabel.setBounds({});
+    if (showCursor)
     {
-        frequencyRangeSlider.setBounds(0, getHeight() - bandRangeSliderHeight,
-                                       getWidth(), bandRangeSliderHeight);
-        corrRangeSlider.setBounds(getWidth() - bandRangeSliderHeight, 0, bandRangeSliderHeight,
-                                         getHeight() - bandRangeSliderHeight - ana::ui::gap.pixels());
+        const auto left = frequencyLowControl.getRight() + ana::ui::gap.pixels();
+        const auto right = frequencyHighControl.getX() - ana::ui::gap.pixels();
+        const auto verticalFits = frequencyReadoutWidth + ana::ui::gap.pixels()
+            + coefficientReadoutWidth <= right - left;
+        const auto cursorWidth = frequencyReadoutWidth
+            + (verticalFits ? ana::ui::gap.pixels() + coefficientReadoutWidth : 0);
+        const auto cursorX = juce::jlimit(left,
+            std::max(left, right - cursorWidth),
+            plotBounds.getCentreX() - cursorWidth / 2);
+        cursorReadoutLabel.setBounds(cursorX, readoutY,
+                                      frequencyReadoutWidth, ana::ui::controlHeight);
+        cursorVerticalReadoutLabel.setBounds(verticalFits
+                                                 ? cursorX + frequencyReadoutWidth + ana::ui::gap.pixels()
+                                                 : rangeLowControl.getX(),
+                                             verticalFits ? readoutY
+                                                 : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
+                                             coefficientReadoutWidth, ana::ui::controlHeight);
     }
-    else
-    {
-        frequencyRangeSlider.setBounds({});
-        corrRangeSlider.setBounds({});
-    }
+    frequencyRangeSlider.setBounds(showHorizontalZoom
+        ? juce::Rectangle<int>(0, getHeight() - bandRangeSliderHeight,
+                               getWidth() - (showVerticalZoom
+                                   ? bandRangeSliderHeight + ana::ui::gap.pixels() : 0),
+                               bandRangeSliderHeight)
+        : juce::Rectangle<int>());
+    corrRangeSlider.setBounds(showVerticalZoom
+        ? juce::Rectangle<int>(getWidth() - bandRangeSliderHeight, 0,
+                               bandRangeSliderHeight, getHeight())
+        : juce::Rectangle<int>());
     syncRangeSliders();
     refreshControls();
 }
@@ -458,12 +477,19 @@ void CorrView::syncRangeSliders()
                                    read(PluginProcessor::corrRangeLowParameterId, minimumRange));
     const auto highRange = read(PluginProcessor::corrRangeHighParameterId,
                                 ana::corr::defaultHighCoefficient);
-    const auto* ranges = processor.getParameters().getRawParameterValue(PluginProcessor::corrRangesVisibleParameterId);
+    const auto* horizontalReadouts = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrHorizontalReadoutsParameterId);
+    const auto* verticalReadouts = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrVerticalReadoutsParameterId);
     const auto* cursor = processor.getParameters().getRawParameterValue(PluginProcessor::corrCursorReadoutParameterId);
-    const auto showRanges = ranges == nullptr || ranges->load(std::memory_order_relaxed) >= 0.5f;
-    for (auto* control : std::array<ParameterControl*, 4> {
-             &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
-        control->setVisible(showRanges);
+    const auto showHorizontalReadouts = horizontalReadouts == nullptr
+        || horizontalReadouts->load(std::memory_order_relaxed) >= 0.5f;
+    const auto showVerticalReadouts = verticalReadouts == nullptr
+        || verticalReadouts->load(std::memory_order_relaxed) >= 0.5f;
+    frequencyLowControl.setVisible(showHorizontalReadouts);
+    frequencyHighControl.setVisible(showHorizontalReadouts);
+    rangeLowControl.setVisible(showVerticalReadouts);
+    rangeHighControl.setVisible(showVerticalReadouts);
     cursorReadoutLabel.setVisible(cursor == nullptr || cursor->load(std::memory_order_relaxed) >= 0.5f);
     cursorVerticalReadoutLabel.setVisible(cursor == nullptr || cursor->load(std::memory_order_relaxed) >= 0.5f);
     const juce::ScopedValueSetter<bool> guard(synchronisingRanges, true);
@@ -482,8 +508,10 @@ void CorrView::syncRangeSliders()
 
 void CorrView::refreshControls()
 {
-    const auto* zoom = processor.getParameters().getRawParameterValue(
-        PluginProcessor::corrZoomControlsParameterId);
+    const auto* horizontalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrHorizontalZoomParameterId);
+    const auto* verticalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrVerticalZoomParameterId);
     const auto mode = getCorrModeIndex();
     const auto freqMode = mode
         == ana::corr::CorrProcessor::modeIndex(ana::corr::CorrProcessor::Mode::frequency);
@@ -521,9 +549,10 @@ void CorrView::refreshControls()
                                                              ana::corr::defaultHighCoefficient)),
                              juce::dontSendNotification);
 
-    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
-    frequencyRangeSlider.setVisible(showZoom);
-    corrRangeSlider.setVisible(showZoom);
+    frequencyRangeSlider.setVisible(horizontalZoom == nullptr
+        || horizontalZoom->load(std::memory_order_relaxed) >= 0.5f);
+    corrRangeSlider.setVisible(verticalZoom == nullptr
+        || verticalZoom->load(std::memory_order_relaxed) >= 0.5f);
 }
 
 void CorrView::updateFrequencyRangeFromSlider()
@@ -560,13 +589,13 @@ void CorrView::updateCorrRangeFromSlider()
 juce::Rectangle<float> CorrView::getPlotBounds() const noexcept
 {
     auto bounds = getLocalBounds().toFloat();
-    const auto* zoom = processor.getParameters().getRawParameterValue(
-        PluginProcessor::corrZoomControlsParameterId);
-    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
-    if (showZoom)
-    {
+    const auto* horizontalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrHorizontalZoomParameterId);
+    const auto* verticalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::corrVerticalZoomParameterId);
+    if (horizontalZoom == nullptr || horizontalZoom->load(std::memory_order_relaxed) >= 0.5f)
         bounds.removeFromBottom(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
+    if (verticalZoom == nullptr || verticalZoom->load(std::memory_order_relaxed) >= 0.5f)
         bounds.removeFromRight(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
-    }
     return bounds;
 }

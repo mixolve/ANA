@@ -31,14 +31,17 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
     };
     valueEditor.setFont(ana::ui::makeFont());
     valueEditor.setJustification(juce::Justification::centred);
+    valueEditor.setBorder(juce::BorderSize<int>(0, ana::ui::gap.pixels() - 2,
+                                                  2, ana::ui::gap.pixels() - 2));
+    valueEditor.setIndents(2, 0);
     valueEditor.setPopupMenuEnabled(false);
     valueEditor.setSelectAllWhenFocused(true);
     valueEditor.setColour(juce::TextEditor::textColourId, ana::ui::white);
     valueEditor.setColour(juce::TextEditor::backgroundColourId, ana::ui::dark);
     valueEditor.setColour(juce::TextEditor::outlineColourId, ana::ui::light);
     valueEditor.setColour(juce::TextEditor::focusedOutlineColourId, ana::ui::light);
-    valueEditor.setColour(juce::TextEditor::highlightColourId, ana::ui::black);
-    valueEditor.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::white);
+    valueEditor.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
+    valueEditor.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
     valueEditor.onReturnKey = [this] { hideValueEditor(false); };
     valueEditor.onEscapeKey = [this] { hideValueEditor(true); };
     valueEditor.onFocusLost = [this]

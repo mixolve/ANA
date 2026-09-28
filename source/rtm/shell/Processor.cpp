@@ -1,8 +1,55 @@
 #include "Processor.h"
 #include "shared/analyzer/DisplaySettings.h"
+#include "shared/corr/Settings.h"
 #include "Editor.h"
 
 #include <cmath>
+
+namespace
+{
+int currentCorrMode(const PluginProcessor& processor) noexcept
+{
+    if (const auto* value = processor.getParameters().getRawParameterValue(
+            PluginProcessor::corrModeParameterId))
+        return juce::jlimit(0, ana::corr::CorrProcessor::modeCount - 1,
+                            juce::roundToInt(value->load(std::memory_order_relaxed)));
+    return 0;
+}
+
+void snapshotCurrentCorrMode(const PluginProcessor& processor, juce::ValueTree& state)
+{
+    const auto mode = currentCorrMode(processor);
+    state.setProperty(ana::corr::modeStateKey, mode, nullptr);
+    for (const auto* parameterId : ana::corr::modeSettingParameterIds)
+        if (const auto* parameter = processor.getParameters().getParameter(parameterId))
+            state.setProperty(ana::corr::modeSettingStateKey(mode, parameterId),
+                              parameter->getValue(), nullptr);
+}
+
+int restoreCurrentCorrMode(PluginProcessor& processor)
+{
+    auto mode = currentCorrMode(processor);
+    if (processor.getParameters().state.hasProperty(ana::corr::modeStateKey))
+        mode = juce::jlimit(0, ana::corr::CorrProcessor::modeCount - 1,
+                            static_cast<int>(processor.getParameters().state.getProperty(
+                                ana::corr::modeStateKey)));
+
+    if (auto* modeParameter = processor.getParameters().getParameter(
+            PluginProcessor::corrModeParameterId))
+        modeParameter->setValue(modeParameter->convertTo0to1(static_cast<float>(mode)));
+
+    for (const auto* parameterId : ana::corr::modeSettingParameterIds)
+    {
+        const auto key = ana::corr::modeSettingStateKey(mode, parameterId);
+        auto* parameter = processor.getParameters().getParameter(parameterId);
+        if (parameter != nullptr && processor.getParameters().state.hasProperty(key))
+            parameter->setValue(juce::jlimit(
+                0.0f, 1.0f,
+                static_cast<float>(processor.getParameters().state.getProperty(key))));
+    }
+    return mode;
+}
+}
 
 PluginProcessor::PluginProcessor()
     : AudioProcessor(BusesProperties()
@@ -101,6 +148,7 @@ void PluginProcessor::changeProgramName(int, const juce::String&)
 void PluginProcessor::getStateInformation(juce::MemoryBlock& destination)
 {
     auto state = parameters.copyState();
+    snapshotCurrentCorrMode(*this, state);
     const auto editorWidth = lastEditorWidth.load(std::memory_order_relaxed);
     const auto editorHeight = lastEditorHeight.load(std::memory_order_relaxed);
 
@@ -121,10 +169,7 @@ void PluginProcessor::setStateInformation(const void* data, const int sizeInByte
         {
             auto restoredState = juce::ValueTree::fromXml(*state);
             parameters.replaceState(restoredState);
-            if (const auto* mode = parameters.getRawParameterValue(corrModeParameterId))
-                constrainCorrRangeForMode(
-                    juce::jlimit(0, ana::corr::CorrProcessor::modeCount - 1,
-                                 juce::roundToInt(mode->load(std::memory_order_relaxed))));
+            constrainCorrRangeForMode(restoreCurrentCorrMode(*this));
             activeAnalyzerPage.store(
                 ana::analyzerPageFromIndex(static_cast<int>(parameters.state.getProperty(
                     analyzerPageStateKey, static_cast<int>(ana::AnalyzerPage::spec)))),

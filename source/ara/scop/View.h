@@ -57,6 +57,8 @@ private:
     std::array<std::unique_ptr<ControlButton>, ana::dsp::LinkwitzRileyCrossover::numBands> bandSingleViewButtons;
     std::array<std::unique_ptr<juce::Slider>, ana::dsp::LinkwitzRileyCrossover::numBands> bandZoomSliders;
     std::array<std::unique_ptr<EllipsisLabel>, ana::dsp::LinkwitzRileyCrossover::numBands> bandZoomValueLabels;
+    std::array<std::unique_ptr<EllipsisLabel>, ana::dsp::LinkwitzRileyCrossover::numBands> bandTimeStartLabels;
+    std::array<std::unique_ptr<EllipsisLabel>, ana::dsp::LinkwitzRileyCrossover::numBands> bandTimeEndLabels;
     std::array<std::unique_ptr<ControlButton>, ana::dsp::LinkwitzRileyCrossover::numBands> bandNormalizeButtons;
     std::array<std::unique_ptr<RangeSlider>, ana::dsp::LinkwitzRileyCrossover::numBands> bandRangeSliders;
     ana::ScopHistory history;

@@ -61,9 +61,7 @@ private:
     std::unique_ptr<AboutPopup> aboutPopup;
     std::unique_ptr<SettingsWindow> settingsWindow;
     std::unique_ptr<SnapshotsWindow> snapshotsWindow;
-    std::unique_ptr<juce::ResizableEdgeComponent> leftEdgeResizer;
     std::unique_ptr<juce::ResizableEdgeComponent> rightEdgeResizer;
-    std::unique_ptr<juce::ResizableEdgeComponent> topEdgeResizer;
     std::unique_ptr<juce::ResizableEdgeComponent> bottomEdgeResizer;
 
     ControlButton specPageButton { "SPEC" };
@@ -78,7 +76,7 @@ private:
     ControlButton fullSourceButton { "browser-maximize" };
     ControlButton clearButton { "eraser" };
     ControlButton freezeButton { "snowflake" };
-    ControlButton aboutButton { "I" };
+    ControlButton aboutButton { "atom" };
     juce::Point<int> pendingEditorSize;
     double editorSizeSaveDeadlineMilliseconds = 0.0;
     double araUpdateStatusMinimumEndMilliseconds = 0.0;

@@ -15,6 +15,7 @@ using namespace ana::ui::analyzer_detail;
 namespace
 {
 constexpr float specSlopeReferenceFrequency = 632.0f;
+constexpr int cursorNotePadding = 4;
 
 juce::Colour readGraphColour(const PluginProcessor& processor, const char* parameterId,
                              const int defaultIndex) noexcept
@@ -266,6 +267,8 @@ SpecView::SpecView(PluginProcessor& processorRef)
     addAndMakeVisible(cursorReadoutLabel);
 
     configureCursorReadoutLabel(cursorNoteReadoutLabel);
+    cursorNoteReadoutLabel.setBorderSize(
+        juce::BorderSize<int>(1, cursorNotePadding, 1, cursorNotePadding));
     addAndMakeVisible(cursorNoteReadoutLabel);
 
     configureCursorReadoutLabel(cursorVerticalReadoutLabel);
@@ -715,10 +718,13 @@ void SpecView::resized()
     const auto mapMode = viewMode == ViewMode::map;
     const auto showCursor = (freqMode || mapMode)
         && readVisibility(PluginProcessor::specCursorReadoutParameterId);
+    const auto showCursorNotes = freqMode && showCursor
+        && readVisibility(PluginProcessor::specCursorNotesParameterId);
     const auto showMonitor = readVisibility(PluginProcessor::specMonitorControlsParameterId);
-    const auto showZoomSetting = readVisibility(PluginProcessor::specZoomControlsParameterId);
-    const auto showHorizontalZoom = showZoomSetting && freqMode;
-    const auto showVerticalZoom = showZoomSetting && (freqMode || mapMode);
+    const auto showHorizontalZoom = freqMode
+        && readVisibility(PluginProcessor::specHorizontalZoomParameterId);
+    const auto showVerticalZoom = (freqMode || mapMode)
+        && readVisibility(PluginProcessor::specVerticalZoomParameterId);
     const auto frequencyReadoutWidth = ana::ui::textControlWidth(8);
     const auto levelReadoutWidth = ana::ui::textControlWidth(7);
     const auto timeReadoutWidth = ana::ui::textControlWidth(10);
@@ -737,38 +743,37 @@ void SpecView::resized()
     ana::ui::FixedGapRow topControls(topArea);
     freqButton.setBounds(topControls.takeLeft(freqButton.getPreferredWidth()));
     mapButton.setBounds(topControls.takeLeft(mapButton.getPreferredWidth()));
-    if (mapMode)
+    int monitorWidth = 0;
+    for (const auto& button : monitorButtons)
+        monitorWidth += button->getPreferredWidth() + (monitorWidth > 0 ? ana::ui::gap.pixels() : 0);
+    if (freqMode)
+        monitorWidth += splitButton.getPreferredWidth() + ana::ui::gap.pixels();
+    const auto monitorBounds = monitorWidth <= topControls.remaining().getWidth()
+        ? topControls.remaining()
+        : juce::Rectangle<int>(plotBounds.getX(),
+                               plotBounds.getY() + ana::ui::controlHeight + ana::ui::gap.pixels(),
+                               plotBounds.getWidth(), ana::ui::controlHeight);
+    auto monitorX = monitorBounds.getX();
+    auto monitorY = monitorBounds.getY();
+    const auto placeMonitorControl = [&] (juce::Component& component, const int width)
     {
-        const auto frequencyFits = showCursor
-            && topControls.remaining().getWidth() >= mapCursorFrequencyWidth;
-        cursorVerticalReadoutLabel.setBounds(frequencyFits
-            ? topControls.takeLeft(mapCursorFrequencyWidth) : juce::Rectangle<int>());
-        const auto timeFits = showCursor
-            && topControls.remaining().getWidth() >= mapCursorTimeWidth;
-        cursorReadoutLabel.setBounds(timeFits
-            ? topControls.takeLeft(mapCursorTimeWidth) : juce::Rectangle<int>());
-        cursorNoteReadoutLabel.setBounds({});
-    }
-    else
-    {
-        cursorReadoutLabel.setBounds(showCursor
-            ? topControls.takeLeft(frequencyReadoutWidth) : juce::Rectangle<int>());
-        cursorNoteReadoutLabel.setBounds(showCursor
-            ? topControls.takeLeft(ana::ui::textControlWidth(4)) : juce::Rectangle<int>());
-        const auto cursorVerticalReadoutFits = showCursor
-            && topControls.remaining().getWidth() >= levelReadoutWidth;
-        cursorVerticalReadoutLabel.setBounds(cursorVerticalReadoutFits
-            ? topControls.takeLeft(levelReadoutWidth) : juce::Rectangle<int>());
-    }
-
-    ana::ui::FixedGapRow optionalControls(topControls.remaining());
+        if (monitorX + width > monitorBounds.getRight())
+        {
+            monitorX = plotBounds.getX();
+            monitorY += ana::ui::controlHeight + ana::ui::gap.pixels();
+        }
+        component.setBounds(monitorX, monitorY, width, ana::ui::controlHeight);
+        monitorX += width + ana::ui::gap.pixels();
+    };
     for (auto& button : monitorButtons)
-        button->setBounds(showMonitor
-            ? optionalControls.takeLeft(button->getPreferredWidth()) : juce::Rectangle<int>());
-    splitButtonFits = showMonitor && freqMode
-        && optionalControls.remaining().getWidth() >= splitButton.getPreferredWidth();
-    splitButton.setBounds(splitButtonFits
-        ? optionalControls.takeLeft(splitButton.getPreferredWidth()) : juce::Rectangle<int>());
+    {
+        button->setBounds({});
+        if (showMonitor)
+            placeMonitorControl(*button, button->getPreferredWidth());
+    }
+    splitButton.setBounds({});
+    if (showMonitor && freqMode)
+        placeMonitorControl(splitButton, splitButton.getPreferredWidth());
 
     if (rangeReadoutWidth > 0)
     {
@@ -808,15 +813,66 @@ void SpecView::resized()
         rangeLowControl.setBounds({});
     }
 
+    cursorReadoutLabel.setBounds({});
+    cursorNoteReadoutLabel.setBounds({});
+    cursorVerticalReadoutLabel.setBounds({});
+    if (showCursor && freqMode)
+    {
+        const auto left = frequencyLowControl.getRight() + ana::ui::gap.pixels();
+        const auto right = frequencyHighControl.getX() - ana::ui::gap.pixels();
+        const auto noteWidth = ana::ui::textControlWidth(4)
+            - 2 * (ana::ui::textPadding - cursorNotePadding);
+        const auto cursorBaseWidth = frequencyReadoutWidth
+            + (showCursorNotes ? ana::ui::gap.pixels() + noteWidth : 0);
+        const auto verticalFits = cursorBaseWidth + ana::ui::gap.pixels()
+            + levelReadoutWidth <= right - left;
+        const auto cursorWidth = cursorBaseWidth
+            + (verticalFits ? ana::ui::gap.pixels() + levelReadoutWidth : 0);
+        const auto cursorX = juce::jlimit(left, std::max(left, right - cursorWidth),
+                                          plotBounds.getCentreX() - cursorWidth / 2);
+        cursorReadoutLabel.setBounds(cursorX, readoutY,
+                                      frequencyReadoutWidth, ana::ui::controlHeight);
+        if (showCursorNotes)
+            cursorNoteReadoutLabel.setBounds(cursorX + frequencyReadoutWidth
+                                                + ana::ui::gap.pixels(), readoutY,
+                                             noteWidth, ana::ui::controlHeight);
+        cursorVerticalReadoutLabel.setBounds(verticalFits
+                                                 ? cursorX + cursorBaseWidth + ana::ui::gap.pixels()
+                                                 : rangeLowControl.getX(),
+                                             verticalFits ? readoutY
+                                                 : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
+                                             levelReadoutWidth, ana::ui::controlHeight);
+    }
+    else if (showCursor && mapMode)
+    {
+        const auto right = frequencyLowControl.getX() - ana::ui::gap.pixels();
+        const auto left = plotBounds.getX();
+        const auto verticalFits = mapCursorTimeWidth + ana::ui::gap.pixels()
+            + mapCursorFrequencyWidth <= right - left;
+        const auto cursorWidth = mapCursorTimeWidth
+            + (verticalFits ? ana::ui::gap.pixels() + mapCursorFrequencyWidth : 0);
+        const auto cursorX = juce::jlimit(left,
+            std::max(left, right - cursorWidth),
+            plotBounds.getCentreX() - cursorWidth / 2);
+        cursorReadoutLabel.setBounds(cursorX, readoutY,
+                                      mapCursorTimeWidth, ana::ui::controlHeight);
+        cursorVerticalReadoutLabel.setBounds(verticalFits
+                                                 ? cursorX + mapCursorTimeWidth + ana::ui::gap.pixels()
+                                                 : frequencyLowControl.getX(),
+                                             verticalFits ? readoutY
+                                                 : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
+                                             mapCursorFrequencyWidth, ana::ui::controlHeight);
+    }
+
+    const auto horizontalZoomWidth = getWidth() - (showVerticalZoom
+        ? bandZoomSliderWidth + ana::ui::gap.pixels() : 0);
     frequencyRangeSlider.setBounds(showHorizontalZoom && freqMode
         ? juce::Rectangle<int>(0, getHeight() - bandRangeSliderHeight,
-                               getWidth(), bandRangeSliderHeight)
+                               horizontalZoomWidth, bandRangeSliderHeight)
         : juce::Rectangle<int>());
     magnitudeRangeSlider.setBounds(showVerticalZoom
         ? juce::Rectangle<int>(getWidth() - bandZoomSliderWidth, 0,
-                               bandZoomSliderWidth,
-                               getHeight() - (showHorizontalZoom
-                                   ? bandRangeSliderHeight + ana::ui::gap.pixels() : 0))
+                               bandZoomSliderWidth, getHeight())
         : juce::Rectangle<int>());
 
     if (mapMode)
@@ -841,10 +897,20 @@ void SpecView::mouseDown(const juce::MouseEvent& event)
 void SpecView::mouseMove(const juce::MouseEvent& event)
 {
     const auto nextCursorInside = getPlotBounds().contains(event.position);
-    if (cursorInside == nextCursorInside && cursorPosition == event.position)
+    if (! nextCursorInside)
+    {
+        if (cursorInside)
+        {
+            cursorInside = false;
+            repaint();
+        }
+        return;
+    }
+
+    if (cursorInside && cursorPosition == event.position)
         return;
 
-    cursorInside = nextCursorInside;
+    cursorInside = true;
     cursorPosition = event.position;
     updateCursorReadouts();
     repaint();
@@ -924,13 +990,16 @@ void SpecView::mouseExit(const juce::MouseEvent&)
 juce::Rectangle<float> SpecView::getPlotBounds() const noexcept
 {
     auto bounds = getLocalBounds().toFloat();
-    const auto* zoom = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specZoomControlsParameterId);
-    const auto showZoom = zoom == nullptr || zoom->load(std::memory_order_relaxed) >= 0.5f;
+    const auto* horizontalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::specHorizontalZoomParameterId);
+    const auto* verticalZoom = processor.getParameters().getRawParameterValue(
+        PluginProcessor::specVerticalZoomParameterId);
     const auto freqMode = viewMode == ViewMode::frequency;
     const auto mapMode = viewMode == ViewMode::map;
-    const auto showHorizontalZoom = showZoom && freqMode;
-    const auto showVerticalZoom = showZoom && (freqMode || mapMode);
+    const auto showHorizontalZoom = freqMode && (horizontalZoom == nullptr
+        || horizontalZoom->load(std::memory_order_relaxed) >= 0.5f);
+    const auto showVerticalZoom = (freqMode || mapMode) && (verticalZoom == nullptr
+        || verticalZoom->load(std::memory_order_relaxed) >= 0.5f);
     if (showHorizontalZoom)
         bounds.removeFromBottom(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
     if (showVerticalZoom)
@@ -941,6 +1010,11 @@ juce::Rectangle<float> SpecView::getPlotBounds() const noexcept
 
 void SpecView::timerCallback()
 {
+    const auto restoredViewMode = processor.isSpecMapView()
+        ? ViewMode::map : ViewMode::frequency;
+    if (restoredViewMode != viewMode)
+        setViewMode(restoredViewMode);
+
     syncRangeSliders();
     refreshControls();
 
@@ -1033,9 +1107,12 @@ void SpecView::refreshControls()
     const auto freqMode = viewMode == ViewMode::frequency;
     const auto mapMode = viewMode == ViewMode::map;
     const auto showMonitor = readValue(PluginProcessor::specMonitorControlsParameterId, 1.0f) >= 0.5f;
-    const auto showZoom = readValue(PluginProcessor::specZoomControlsParameterId, 1.0f) >= 0.5f;
-    const auto showRanges = readValue(PluginProcessor::specRangesVisibleParameterId, 1.0f) >= 0.5f;
+    const auto showHorizontalZoom = readValue(PluginProcessor::specHorizontalZoomParameterId, 1.0f) >= 0.5f;
+    const auto showVerticalZoom = readValue(PluginProcessor::specVerticalZoomParameterId, 1.0f) >= 0.5f;
+    const auto showHorizontalReadouts = readValue(PluginProcessor::specHorizontalReadoutsParameterId, 1.0f) >= 0.5f;
+    const auto showVerticalReadouts = readValue(PluginProcessor::specVerticalReadoutsParameterId, 1.0f) >= 0.5f;
     const auto showCursor = readValue(PluginProcessor::specCursorReadoutParameterId, 1.0f) >= 0.5f;
+    const auto showCursorNotes = readValue(PluginProcessor::specCursorNotesParameterId, 1.0f) >= 0.5f;
     freqButton.setToggleState(freqMode, juce::dontSendNotification);
     mapButton.setToggleState(mapMode, juce::dontSendNotification);
     const auto monitorMode = readSpecMonitorMode(processor);
@@ -1043,23 +1120,25 @@ void SpecView::refreshControls()
     const auto splitAvailable = ana::spec::supportsSplitView(monitorMode);
     for (size_t index = 0; index < monitorButtons.size(); ++index)
     {
-        monitorButtons[index]->setVisible(showMonitor && ! monitorButtons[index]->getBounds().isEmpty());
+        monitorButtons[index]->setVisible(showMonitor);
         monitorButtons[index]->setToggleState(static_cast<int>(index) == modeIndex, juce::dontSendNotification);
     }
-    splitButton.setVisible(showMonitor && freqMode && splitButtonFits);
+    splitButton.setVisible(showMonitor && freqMode);
     splitButton.setEnabled(splitAvailable);
     splitButton.setToggleState(splitAvailable
                                    && readValue(PluginProcessor::specSplitViewParameterId, 0.0f) >= 0.5f,
                                juce::dontSendNotification);
-    frequencyRangeSlider.setVisible(showZoom && freqMode);
-    magnitudeRangeSlider.setVisible(showZoom && (freqMode || mapMode));
+    frequencyRangeSlider.setVisible(showHorizontalZoom && freqMode);
+    magnitudeRangeSlider.setVisible(showVerticalZoom && (freqMode || mapMode));
 
-    frequencyLowControl.setVisible((freqMode || mapMode) && showRanges);
-    frequencyHighControl.setVisible((freqMode || mapMode) && showRanges);
-    rangeLowControl.setVisible(freqMode && showRanges);
-    rangeHighControl.setVisible(freqMode && showRanges);
+    frequencyLowControl.setVisible((freqMode && showHorizontalReadouts)
+        || (mapMode && showVerticalReadouts));
+    frequencyHighControl.setVisible((freqMode && showHorizontalReadouts)
+        || (mapMode && showVerticalReadouts));
+    rangeLowControl.setVisible(freqMode && showVerticalReadouts);
+    rangeHighControl.setVisible(freqMode && showVerticalReadouts);
     cursorReadoutLabel.setVisible((freqMode || mapMode) && showCursor);
-    cursorNoteReadoutLabel.setVisible(freqMode && showCursor);
+    cursorNoteReadoutLabel.setVisible(freqMode && showCursor && showCursorNotes);
     cursorVerticalReadoutLabel.setVisible((freqMode || mapMode) && showCursor);
 }
 
@@ -1321,23 +1400,32 @@ void SpecView::syncRangeSliders()
     const auto displayRange = readSpecDisplayRange(processor);
     const auto lowRange = displayRange.low;
     const auto highRange = displayRange.high;
-    const auto* rangesVisible = processor.getParameters().getRawParameterValue(
-        PluginProcessor::specRangesVisibleParameterId);
+    const auto* horizontalReadouts = processor.getParameters().getRawParameterValue(
+        PluginProcessor::specHorizontalReadoutsParameterId);
+    const auto* verticalReadouts = processor.getParameters().getRawParameterValue(
+        PluginProcessor::specVerticalReadoutsParameterId);
     const auto* cursorReadout = processor.getParameters().getRawParameterValue(
         PluginProcessor::specCursorReadoutParameterId);
+    const auto* cursorNotes = processor.getParameters().getRawParameterValue(
+        PluginProcessor::specCursorNotesParameterId);
     const auto freqMode = viewMode == ViewMode::frequency;
     const auto mapMode = viewMode == ViewMode::map;
-    const auto showRanges = rangesVisible == nullptr
-        || rangesVisible->load(std::memory_order_relaxed) >= 0.5f;
+    const auto showHorizontalReadouts = horizontalReadouts == nullptr
+        || horizontalReadouts->load(std::memory_order_relaxed) >= 0.5f;
+    const auto showVerticalReadouts = verticalReadouts == nullptr
+        || verticalReadouts->load(std::memory_order_relaxed) >= 0.5f;
     const auto shouldShowCursor = (freqMode || mapMode)
         && (cursorReadout == nullptr || cursorReadout->load(std::memory_order_relaxed) >= 0.5f);
 
-    frequencyLowControl.setVisible((freqMode || mapMode) && showRanges);
-    frequencyHighControl.setVisible((freqMode || mapMode) && showRanges);
-    rangeLowControl.setVisible(freqMode && showRanges);
-    rangeHighControl.setVisible(freqMode && showRanges);
+    frequencyLowControl.setVisible((freqMode && showHorizontalReadouts)
+        || (mapMode && showVerticalReadouts));
+    frequencyHighControl.setVisible((freqMode && showHorizontalReadouts)
+        || (mapMode && showVerticalReadouts));
+    rangeLowControl.setVisible(freqMode && showVerticalReadouts);
+    rangeHighControl.setVisible(freqMode && showVerticalReadouts);
     cursorReadoutLabel.setVisible(shouldShowCursor);
-    cursorNoteReadoutLabel.setVisible(freqMode && shouldShowCursor);
+    cursorNoteReadoutLabel.setVisible(freqMode && shouldShowCursor
+        && (cursorNotes == nullptr || cursorNotes->load(std::memory_order_relaxed) >= 0.5f));
     cursorVerticalReadoutLabel.setVisible(shouldShowCursor);
     updateCursorReadouts();
 

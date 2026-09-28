@@ -107,7 +107,6 @@ private:
     bool synchronisingRanges = false;
     juce::Point<float> cursorPosition;
     bool cursorInside = false;
-    bool splitButtonFits = true;
     float lastCursorFrequency = 0.0f;
     float renderedMapRangeLow = std::numeric_limits<float>::quiet_NaN();
     float renderedMapRangeHigh = std::numeric_limits<float>::quiet_NaN();

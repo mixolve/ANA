@@ -138,6 +138,7 @@ public:
 
     float getRangeStart() const noexcept { return rangeStart; }
     float getRangeEnd() const noexcept { return rangeEnd; }
+    bool isDragging() const noexcept { return dragMode != DragMode::none; }
     void setRange(float newStart, float newEnd);
 
     void paint(juce::Graphics& graphics) override;

@@ -77,12 +77,20 @@ float PluginProcessor::getScopOpacity() const noexcept
     return ana::scop::defaultOpacityPercent * 0.01f;
 }
 
-bool PluginProcessor::areScopZoomControlsVisible() const noexcept
+bool PluginProcessor::areScopVerticalZoomControlsVisible() const noexcept
 {
-    if (const auto* value = parameters.getRawParameterValue(scopZoomControlsParameterId))
+    if (const auto* value = parameters.getRawParameterValue(scopVerticalZoomControlsParameterId))
         return value->load(std::memory_order_relaxed) >= 0.5f;
 
     return ana::scop::defaultZoomControlsVisible;
+}
+
+bool PluginProcessor::areScopVerticalReadoutsVisible() const noexcept
+{
+    if (const auto* value = parameters.getRawParameterValue(scopVerticalReadoutsParameterId))
+        return value->load(std::memory_order_relaxed) >= 0.5f;
+
+    return true;
 }
 
 bool PluginProcessor::areScopMonitorControlsVisible() const noexcept
@@ -171,6 +179,23 @@ std::array<float, 3> PluginProcessor::getLvlsSectionWeights() const noexcept
     return weights;
 }
 
+std::array<float, ana::dsp::LinkwitzRileyCrossover::numBands>
+PluginProcessor::getScopBandHeightWeights() const noexcept
+{
+    std::array<float, ana::dsp::LinkwitzRileyCrossover::numBands> weights {};
+    auto total = 0.0f;
+    for (size_t index = 0; index < weights.size(); ++index)
+    {
+        const auto stored = static_cast<float>(parameters.state.getProperty(
+            scopBandHeightStateKeys[index], 1.0));
+        weights[index] = std::isfinite(stored) && stored > 0.0f ? stored : 1.0f;
+        total += weights[index];
+    }
+    for (auto& weight : weights)
+        weight /= std::max(0.001f, total);
+    return weights;
+}
+
 int PluginProcessor::getScopSingleViewBand() const noexcept
 {
     return juce::jlimit(-1, static_cast<int>(ana::dsp::LinkwitzRileyCrossover::numBands) - 1,
@@ -222,30 +247,16 @@ void PluginProcessor::setCorrMode(const int mode)
     if (previousMode == nextMode)
         return;
 
-    static constexpr std::array settings {
-        corrFftSizeParameterId, corrFftOverlapParameterId,
-        corrAverageTimeParameterId, corrSmoothingParameterId,
-        corrFilledDisplayParameterId, corrSecondGraphParameterId,
-        corrFirstGraphTypeParameterId, corrSecondGraphTypeParameterId,
-        corrFirstGraphColourParameterId, corrSecondGraphColourParameterId,
-        corrGraphOpacityParameterId,
-        corrClearOnPlayParameterId, corrRangesVisibleParameterId,
-        corrCursorReadoutParameterId, corrZoomControlsParameterId,
-        corrLowParameterId, corrHighParameterId,
-        corrRangeLowParameterId, corrRangeHighParameterId
-    };
-    for (const auto* parameterId : settings)
+    for (const auto* parameterId : ana::corr::modeSettingParameterIds)
     {
         auto* parameter = parameters.getParameter(parameterId);
         if (parameter == nullptr)
             continue;
 
-        const auto previousKey = juce::Identifier(
-            "corrMode" + juce::String(previousMode) + "_" + parameterId);
+        const auto previousKey = ana::corr::modeSettingStateKey(previousMode, parameterId);
         parameters.state.setProperty(previousKey, parameter->getValue(), nullptr);
 
-        const auto nextKey = juce::Identifier(
-            "corrMode" + juce::String(nextMode) + "_" + parameterId);
+        const auto nextKey = ana::corr::modeSettingStateKey(nextMode, parameterId);
         const auto nextValue = parameters.state.hasProperty(nextKey)
             ? static_cast<float>(parameters.state.getProperty(nextKey))
             : parameter->getDefaultValue();
@@ -253,6 +264,7 @@ void PluginProcessor::setCorrMode(const int mode)
     }
     constrainCorrRangeForMode(nextMode);
     modeParameter->setValueNotifyingHost(modeParameter->convertTo0to1(static_cast<float>(nextMode)));
+    parameters.state.setProperty(ana::corr::modeStateKey, nextMode, nullptr);
     corrProcessor.requestClear();
     updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
 }
@@ -338,6 +350,33 @@ void PluginProcessor::setLvlsSectionWeights(const std::array<float, 3>& weights)
         changed = true;
     }
 
+    if (changed)
+        updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
+                              .withNonParameterStateChanged(true));
+}
+
+void PluginProcessor::setScopBandHeightWeights(
+    const std::array<float, ana::dsp::LinkwitzRileyCrossover::numBands>& weights)
+{
+    auto safeWeights = weights;
+    auto total = 0.0f;
+    for (auto& weight : safeWeights)
+    {
+        weight = std::isfinite(weight) ? std::max(0.001f, weight) : 1.0f;
+        total += weight;
+    }
+    for (auto& weight : safeWeights)
+        weight /= total;
+
+    const auto current = getScopBandHeightWeights();
+    auto changed = false;
+    for (size_t index = 0; index < safeWeights.size(); ++index)
+    {
+        if (std::abs(current[index] - safeWeights[index]) <= 1.0e-5f)
+            continue;
+        parameters.state.setProperty(scopBandHeightStateKeys[index], safeWeights[index], nullptr);
+        changed = true;
+    }
     if (changed)
         updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
                               .withNonParameterStateChanged(true));

@@ -1,8 +1,11 @@
 #include "Editor.h"
 #include "Processor.h"
 #include "shared/shell/Theme.h"
+#include "shared/shell/EditorLayout.h"
 #include "shared/shell/AuxiliaryWindowFocus.h"
 #include "shared/shell/GraphColours.h"
+#include "shared/shell/EdgeResizeContent.h"
+#include "shared/scop/Layout.h"
 
 #include <algorithm>
 #include <array>
@@ -12,17 +15,14 @@
 
 namespace
 {
-constexpr int minimumEditorHeight = 300;
+constexpr int minimumEditorHeight = ana::scop::minimumEditorHeightForBands(
+    ana::scop::minimumRtmBandHeight);
 constexpr int maximumEditorSize = 32768;
 constexpr int defaultEditorHeight = minimumEditorHeight;
 constexpr int editorResizeHandleThickness = ana::ui::gap.pixels();
 constexpr int settingsWindowWidth = 300;
-constexpr int defaultSettingsWindowHeight = 800;
-constexpr int minimumSettingsWindowHeight = 300;
 constexpr int maximumSettingsWindowHeight = 1200;
-constexpr int snapshotsWindowWidth = 600;
-constexpr int defaultSnapshotsWindowHeight = 360;
-constexpr int minimumSnapshotsWindowHeight = 180;
+constexpr int minimumSnapshotsWindowWidth = 300;
 constexpr int maximumSnapshotsWindowHeight = 1200;
 constexpr int snapshotFileMagic = 0x414e4153; // "ANAS"
 constexpr int snapshotFileVersion = 3;
@@ -30,22 +30,9 @@ constexpr int maximumSnapshotNameLength = 256;
 constexpr const char* snapshotFileExtension = ".anasnapshot";
 constexpr const char* snapshotFileWildcard = "*.anasnapshot";
 
-int navigationWidth() noexcept
-{
-    return ana::ui::textControlWidth("SPEC") + ana::ui::textControlWidth("CORR")
-        + ana::ui::textControlWidth("LVLS") + ana::ui::textControlWidth("SCOP")
-        + 3 * ana::ui::gap.pixels();
-}
-
 int minimumEditorWidth() noexcept
 {
-    constexpr int regularRightControlCount = 4;
-    const auto regularRightControlsWidth = 3 * ana::ui::iconControlSize
-        + ana::ui::textControlWidth("I")
-        + regularRightControlCount * ana::ui::gap.pixels();
-    const auto regularWidth = 2 * ana::ui::gap.pixels()
-        + navigationWidth() + regularRightControlsWidth;
-    return regularWidth + 2 * (ana::ui::iconControlSize + ana::ui::gap.pixels());
+    return ana::ui::minimumMainEditorWidth();
 }
 
 const auto& snapshotColourOptions = ana::ui::graphColourOptions;
@@ -198,7 +185,8 @@ public:
         numberLabel.setColour(juce::Label::textWhenEditingColourId, ana::ui::white);
         numberLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         numberLabel.setColour(juce::Label::outlineColourId, snapshotFieldBorderColour);
-        numberLabel.setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff444444));
+        numberLabel.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
+        numberLabel.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
         numberLabel.setBorderSize(juce::BorderSize<int>(0, ana::ui::gap.pixels(), 0, ana::ui::gap.pixels()));
         numberLabel.setDrawBackground(false);
         numberLabel.setEditable(false, true, false);
@@ -212,7 +200,8 @@ public:
         gainLabel.setColour(juce::Label::textWhenEditingColourId, ana::ui::white);
         gainLabel.setColour(juce::Label::backgroundColourId, ana::ui::dark);
         gainLabel.setColour(juce::Label::outlineColourId, snapshotFieldBorderColour);
-        gainLabel.setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff444444));
+        gainLabel.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
+        gainLabel.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
         gainLabel.setBorderSize(juce::BorderSize<int>(0));
         gainLabel.setDrawBackground(true);
         gainLabel.setEditable(false, true, false);
@@ -1059,9 +1048,17 @@ protected:
             hasBeenShown = true;
         }
 
-        setAlwaysOnTop(true);
         setVisible(true);
+       #if JUCE_MAC
+        enableAuxiliaryMouseMoveEvents(*this);
+        matchAuxiliaryWindowLevel(*this, owner);
+       #endif
         toFront(false);
+    }
+
+    void hideAuxiliaryWindow()
+    {
+        setVisible(false);
     }
 
     void setTextInputActive(const bool isActive)
@@ -1138,14 +1135,15 @@ public:
         setUsingNativeTitleBar(false);
         setTitleBarHeight(0);
         setDropShadowEnabled(false);
-        setAlwaysOnTop(true);
-        setResizable(true, false);
-        setResizeLimits(settingsWindowWidth, minimumSettingsWindowHeight,
-                        settingsWindowWidth, maximumSettingsWindowHeight);
+        setResizable(false, false);
+        setResizeLimits(settingsWindowWidth, minimumEditorHeight,
+                        maximumEditorSize, maximumSettingsWindowHeight);
 
-        content.setSize(settingsWindowWidth, defaultSettingsWindowHeight);
-        setContentNonOwned(&content, true);
-        setSize(settingsWindowWidth, defaultSettingsWindowHeight);
+        resizeContent = std::make_unique<ana::ui::EdgeResizeContent>(
+            *this, *getConstrainer(), content);
+        resizeContent->setSize(settingsWindowWidth, minimumEditorHeight);
+        setContentNonOwned(resizeContent.get(), false);
+        setSize(settingsWindowWidth, minimumEditorHeight);
         panelRef.onTextEditingChanged = [this] (const bool isEditing)
         {
             setTextInputActive(isEditing);
@@ -1178,7 +1176,7 @@ public:
     {
         content.dismissChoicePrompt();
         content.dismissResetPrompt();
-        setVisible(false);
+        hideAuxiliaryWindow();
     }
 
     void closeButtonPressed() override
@@ -1192,6 +1190,7 @@ public:
 private:
     SettingsPanel& panelRef;
     SettingsWindowContent content;
+    std::unique_ptr<ana::ui::EdgeResizeContent> resizeContent;
     std::function<void()> closeCallback;
 };
 
@@ -1206,10 +1205,9 @@ public:
         setUsingNativeTitleBar(false);
         setTitleBarHeight(0);
         setDropShadowEnabled(false);
-        setAlwaysOnTop(true);
-        setResizable(true, false);
-        setResizeLimits(snapshotsWindowWidth, minimumSnapshotsWindowHeight,
-                        snapshotsWindowWidth, maximumSnapshotsWindowHeight);
+        setResizable(false, false);
+        setResizeLimits(minimumSnapshotsWindowWidth, minimumEditorHeight,
+                        maximumEditorSize, maximumSnapshotsWindowHeight);
 
         content.onCloseRequested = [this]
         {
@@ -1218,9 +1216,11 @@ public:
             else
                 hideWindow();
         };
-        content.setSize(snapshotsWindowWidth, defaultSnapshotsWindowHeight);
-        setContentNonOwned(&content, true);
-        setSize(snapshotsWindowWidth, defaultSnapshotsWindowHeight);
+        resizeContent = std::make_unique<ana::ui::EdgeResizeContent>(
+            *this, *getConstrainer(), content);
+        resizeContent->setSize(minimumSnapshotsWindowWidth, minimumEditorHeight);
+        setContentNonOwned(resizeContent.get(), false);
+        setSize(minimumSnapshotsWindowWidth, minimumEditorHeight);
         content.onTextEditingChanged = [this] (const bool isEditing)
         {
             setTextInputActive(isEditing);
@@ -1246,7 +1246,7 @@ public:
         content.dismissTransferPrompt();
         content.dismissClearPrompt();
         content.dismissGainResetPrompt();
-        setVisible(false);
+        hideAuxiliaryWindow();
     }
 
     void closeButtonPressed() override
@@ -1259,6 +1259,7 @@ public:
 
 private:
     SnapshotsWindowContent content;
+    std::unique_ptr<ana::ui::EdgeResizeContent> resizeContent;
     std::function<void()> closeCallback;
 };
 
@@ -1350,21 +1351,13 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
     timerCallback();
     startTimerHz(15);
     setResizable(true, false);
-    leftEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
-        this, getConstrainer(), juce::ResizableEdgeComponent::leftEdge);
     rightEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
         this, getConstrainer(), juce::ResizableEdgeComponent::rightEdge);
-    topEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
-        this, getConstrainer(), juce::ResizableEdgeComponent::topEdge);
     bottomEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
         this, getConstrainer(), juce::ResizableEdgeComponent::bottomEdge);
-    leftEdgeResizer->setAlwaysOnTop(true);
     rightEdgeResizer->setAlwaysOnTop(true);
-    topEdgeResizer->setAlwaysOnTop(true);
     bottomEdgeResizer->setAlwaysOnTop(true);
-    addAndMakeVisible(*leftEdgeResizer);
     addAndMakeVisible(*rightEdgeResizer);
-    addAndMakeVisible(*topEdgeResizer);
     addAndMakeVisible(*bottomEdgeResizer);
     const auto minimumWidth = minimumEditorWidth();
     setResizeLimits(minimumWidth, minimumEditorHeight, maximumEditorSize, maximumEditorSize);
@@ -1517,6 +1510,10 @@ void PluginEditor::dismissAboutPopup()
 
 void PluginEditor::timerCallback()
 {
+    const auto restoredPage = audioProcessor.getAnalyzerPageState();
+    if (restoredPage != activePage)
+        showAnalyzerPage(restoredPage, showingAnalyzerSettings);
+
     fullSourceButton.setToggleState(audioProcessor.isScopFullSourceView(),
                                     juce::dontSendNotification);
     clearButton.setEnabled(activePage == ana::AnalyzerPage::scop);
@@ -1558,13 +1555,24 @@ void PluginEditor::resized()
 
     auto area = getLocalBounds().reduced(ana::ui::gap.pixels());
     auto controlsRow = area.removeFromTop(ana::ui::controlHeight);
+    const auto scopActions = activePage == ana::AnalyzerPage::scop;
+    const auto rightControlsWidth = aboutButton.getPreferredWidth()
+        + settingsButton.getPreferredWidth() + snapshotsWindowButton.getPreferredWidth()
+        + freezeButton.getPreferredWidth()
+        + (scopActions ? clearButton.getPreferredWidth() + fullSourceButton.getPreferredWidth() : 0)
+        + (scopActions ? 6 : 4) * ana::ui::gap.pixels();
+    const auto wrapRightControls = ana::ui::mainNavigationWidth() + rightControlsWidth > controlsRow.getWidth();
+    auto rightControlsRow = controlsRow;
+    if (wrapRightControls)
+    {
+        ana::ui::gap.removeFromTop(area);
+        rightControlsRow = area.removeFromTop(ana::ui::controlHeight);
+    }
     const auto placeRight = [&] (juce::Component& component, const int width)
     {
-        const auto fits = controlsRow.getWidth() >= width;
-        component.setVisible(fits);
-        component.setBounds(fits ? controlsRow.removeFromRight(width) : juce::Rectangle<int>());
-        if (fits)
-            ana::ui::gap.removeFromRight(controlsRow);
+        component.setVisible(true);
+        component.setBounds(rightControlsRow.removeFromRight(width));
+        ana::ui::gap.removeFromRight(rightControlsRow);
     };
 
     for (auto* component : std::array<juce::Component*, 3> {
@@ -1578,41 +1586,37 @@ void PluginEditor::resized()
     placeRight(settingsButton, settingsButton.getPreferredWidth());
     placeRight(snapshotsWindowButton, snapshotsWindowButton.getPreferredWidth());
     placeRight(freezeButton, freezeButton.getPreferredWidth());
-    if (activePage == ana::AnalyzerPage::scop)
+    if (scopActions)
     {
         placeRight(clearButton, clearButton.getPreferredWidth());
         placeRight(fullSourceButton, fullSourceButton.getPreferredWidth());
     }
+
+    if (! wrapRightControls)
+        controlsRow = rightControlsRow;
 
     ana::ui::FixedGapRow navigationRow(controlsRow);
     for (auto* button : std::array<ControlButton*, 4> {
              &specPageButton, &corrPageButton, &lvlsPageButton, &scopPageButton })
     {
         button->setBounds(navigationRow.takeLeft(button->getPreferredWidth()));
-        button->setVisible(! button->getBounds().isEmpty());
+        button->setVisible(true);
     }
 
     ana::ui::gap.removeFromTop(area);
-    scopDisplay.setBounds(area);
+    auto scopBounds = area;
+    scopBounds.setTop(scopBounds.getY() - ana::ui::gap.pixels());
+    scopBounds.setBottom(getHeight());
+    scopDisplay.setBounds(scopBounds);
     specDisplay.setBounds(area);
     corrDisplay.setBounds(area);
     lvlsDisplay.setBounds(area);
 
-    if (leftEdgeResizer != nullptr)
-    {
-        leftEdgeResizer->setBounds(0, 0, editorResizeHandleThickness, getHeight());
-        leftEdgeResizer->toFront(false);
-    }
     if (rightEdgeResizer != nullptr)
     {
         rightEdgeResizer->setBounds(getWidth() - editorResizeHandleThickness, 0,
                                     editorResizeHandleThickness, getHeight());
         rightEdgeResizer->toFront(false);
-    }
-    if (topEdgeResizer != nullptr)
-    {
-        topEdgeResizer->setBounds(0, 0, getWidth(), editorResizeHandleThickness);
-        topEdgeResizer->toFront(false);
     }
     if (bottomEdgeResizer != nullptr)
     {

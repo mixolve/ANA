@@ -28,7 +28,10 @@ public:
     static constexpr const char* scopNoteLengthParameterId = "scopNoteLength";
     static constexpr const char* scopStyleParameterId = "scopStyle";
     static constexpr const char* scopOpacityParameterId = "scopOpacity";
-    static constexpr const char* scopZoomControlsParameterId = "scopZoomControls";
+    static constexpr const char* scopHorizontalZoomControlsParameterId = "scopHorizontalZoomControls";
+    static constexpr const char* scopVerticalZoomControlsParameterId = "scopVerticalZoomControls";
+    static constexpr const char* scopVerticalReadoutsParameterId = "scopVerticalReadouts";
+    static constexpr const char* scopHorizontalReadoutsParameterId = "scopHorizontalReadouts";
     static constexpr const char* scopMonitorControlsParameterId = "scopMonitorControls";
     static constexpr const char* scopToolsParameterId = "scopTools";
     static constexpr const char* specFftSizeParameterId = "specFftSize";
@@ -38,6 +41,8 @@ public:
     static constexpr const char* specMapTimeBaseParameterId = "specMapTimeBase";
     static constexpr const char* specMapNoteLengthParameterId = "specMapNoteLength";
     static constexpr const char* specMapColourMapParameterId = "specMapColourMap";
+    static constexpr const char* specMapTimeRangeStartParameterId = "specMapTimeRangeStart";
+    static constexpr const char* specMapTimeRangeEndParameterId = "specMapTimeRangeEnd";
     static constexpr const char* specAverageTimeParameterId = "specAverageTime";
     static constexpr const char* specSmoothingParameterId = "specSmoothing";
     static constexpr const char* specFrequencyScaleParameterId = "specFrequencyScale";
@@ -56,11 +61,14 @@ public:
     static constexpr const char* specHighParameterId = "specHigh";
     static constexpr const char* specRangeLowParameterId = "specRangeLow";
     static constexpr const char* specRangeHighParameterId = "specRangeHigh";
-    static constexpr const char* specRangesVisibleParameterId = "specRangesVisible";
+    static constexpr const char* specHorizontalReadoutsParameterId = "specHorizontalReadouts";
+    static constexpr const char* specVerticalReadoutsParameterId = "specVerticalReadouts";
     static constexpr const char* specClearOnPlayParameterId = "specClearOnPlay";
     static constexpr const char* specCursorReadoutParameterId = "specCursorReadout";
+    static constexpr const char* specCursorNotesParameterId = "specCursorNotes";
     static constexpr const char* specMonitorControlsParameterId = "specMonitorControls";
-    static constexpr const char* specZoomControlsParameterId = "specZoomControls";
+    static constexpr const char* specHorizontalZoomParameterId = "specHorizontalZoom";
+    static constexpr const char* specVerticalZoomParameterId = "specVerticalZoom";
     static constexpr const char* specMonitorModeParameterId = "specMonitorMode";
     static constexpr const char* corrFftSizeParameterId = "corrFftSize";
     static constexpr const char* corrFftOverlapParameterId = "corrFftOverlap";
@@ -75,9 +83,11 @@ public:
     static constexpr const char* corrSecondGraphColourParameterId = "corrSecondGraphColour";
     static constexpr const char* corrGraphOpacityParameterId = "corrGraphOpacity";
     static constexpr const char* corrClearOnPlayParameterId = "corrClearOnPlay";
-    static constexpr const char* corrRangesVisibleParameterId = "corrRangesVisible";
+    static constexpr const char* corrHorizontalReadoutsParameterId = "corrHorizontalReadouts";
+    static constexpr const char* corrVerticalReadoutsParameterId = "corrVerticalReadouts";
     static constexpr const char* corrCursorReadoutParameterId = "corrCursorReadout";
-    static constexpr const char* corrZoomControlsParameterId = "corrZoomControls";
+    static constexpr const char* corrHorizontalZoomParameterId = "corrHorizontalZoom";
+    static constexpr const char* corrVerticalZoomParameterId = "corrVerticalZoom";
     static constexpr const char* corrModeParameterId = "corrMode";
     static constexpr const char* corrLowParameterId = "corrLow";
     static constexpr const char* corrHighParameterId = "corrHigh";
@@ -97,7 +107,15 @@ public:
     static constexpr const char* lvlsHistoryMomentaryVisibleParameterId = "lvlsHistoryMomentaryVisible";
     static constexpr const char* lvlsHistoryShortTermVisibleParameterId = "lvlsHistoryShortTermVisible";
     static constexpr const char* lvlsHistoryIntegratedVisibleParameterId = "lvlsHistoryIntegratedVisible";
-    static constexpr const char* lvlsHistoryZoomParameterId = "lvlsHistoryZoom";
+    static constexpr const char* lvlsHistoryHorizontalZoomParameterId = "lvlsHistoryHorizontalZoom";
+    static constexpr const char* lvlsHistoryVerticalZoomParameterId = "lvlsHistoryVerticalZoom";
+    static constexpr const char* lvlsPeakModeParameterId = "lvlsPeakMode";
+    static constexpr const char* lvlsMidSideModeParameterId = "lvlsMidSideMode";
+    static constexpr const char* lvlsHistorySoloParameterId = "lvlsHistorySolo";
+    static constexpr const char* lvlsHistoryHorizontalStartParameterId = "lvlsHistoryHorizontalStart";
+    static constexpr const char* lvlsHistoryHorizontalEndParameterId = "lvlsHistoryHorizontalEnd";
+    static constexpr const char* lvlsHistoryVerticalStartParameterId = "lvlsHistoryVerticalStart";
+    static constexpr const char* lvlsHistoryVerticalEndParameterId = "lvlsHistoryVerticalEnd";
     static constexpr const char* crossoverCountParameterId = "crossoverCount";
     static constexpr const char* editorWidthStateKey = "ana.editor.width";
     static constexpr const char* editorHeightStateKey = "ana.editor.height";
@@ -109,6 +127,10 @@ public:
     static constexpr const char* specViewModeStateKey = "ana.spec.viewMode";
     inline static constexpr std::array<const char*, 3> lvlsSectionWeightStateKeys {
         "ana.lvls.section1", "ana.lvls.section2", "ana.lvls.section3"
+    };
+    inline static constexpr std::array<const char*, ana::dsp::LinkwitzRileyCrossover::numBands> scopBandHeightStateKeys {
+        "ana.scop.height1", "ana.scop.height2", "ana.scop.height3",
+        "ana.scop.height4", "ana.scop.height5", "ana.scop.height6"
     };
     inline static constexpr std::array<const char*, ana::dsp::LinkwitzRileyCrossover::numCrossovers> crossoverParameterIds {
         "crossover1", "crossover2", "crossover3", "crossover4", "crossover5"
@@ -124,6 +146,14 @@ public:
     inline static constexpr std::array<const char*, ana::dsp::LinkwitzRileyCrossover::numBands> scopNormalizeParameterIds {
         "scopBand1Normalize", "scopBand2Normalize", "scopBand3Normalize",
         "scopBand4Normalize", "scopBand5Normalize", "scopBand6Normalize"
+    };
+    inline static constexpr std::array<const char*, ana::dsp::LinkwitzRileyCrossover::numBands> scopRangeStartParameterIds {
+        "scopBand1RangeStart", "scopBand2RangeStart", "scopBand3RangeStart",
+        "scopBand4RangeStart", "scopBand5RangeStart", "scopBand6RangeStart"
+    };
+    inline static constexpr std::array<const char*, ana::dsp::LinkwitzRileyCrossover::numBands> scopRangeEndParameterIds {
+        "scopBand1RangeEnd", "scopBand2RangeEnd", "scopBand3RangeEnd",
+        "scopBand4RangeEnd", "scopBand5RangeEnd", "scopBand6RangeEnd"
     };
 
     PluginProcessor();
@@ -180,7 +210,10 @@ public:
     bool isSpecMapTimeNoteBased() const noexcept;
     bool isScopFilledStyle() const noexcept;
     float getScopOpacity() const noexcept;
-    bool areScopZoomControlsVisible() const noexcept;
+    bool areScopHorizontalZoomControlsVisible() const noexcept;
+    bool areScopVerticalZoomControlsVisible() const noexcept;
+    bool areScopVerticalReadoutsVisible() const noexcept;
+    bool areScopHorizontalReadoutsVisible() const noexcept;
     bool areScopMonitorControlsVisible() const noexcept;
     bool areScopToolsVisible() const noexcept;
     size_t getCrossoverCount() const noexcept;
@@ -190,6 +223,7 @@ public:
     ana::dsp::LinkwitzRileyCrossover::CrossoverFrequencies getCrossoverFrequencies() const noexcept;
     juce::Point<int> getLastEditorSize() const noexcept;
     std::array<float, 3> getLvlsSectionWeights() const noexcept;
+    std::array<float, ana::dsp::LinkwitzRileyCrossover::numBands> getScopBandHeightWeights() const noexcept;
     int getScopSingleViewBand() const noexcept;
     bool isScopFullSourceView() const noexcept;
     ana::AnalyzerPage getAnalyzerPageState() const noexcept;
@@ -198,6 +232,7 @@ public:
     void setCorrMode(int mode);
     void setLastEditorSize(int width, int height) noexcept;
     void setLvlsSectionWeights(const std::array<float, 3>& weights);
+    void setScopBandHeightWeights(const std::array<float, ana::dsp::LinkwitzRileyCrossover::numBands>& weights);
     void setAnalyzerPageState(ana::AnalyzerPage page);
     void setSpecMapView(bool shouldUseMap);
     void setCrossoverCount(size_t crossoverCount);

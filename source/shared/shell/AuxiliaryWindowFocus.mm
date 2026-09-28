@@ -2,6 +2,33 @@
 
 #include "AuxiliaryWindowFocus.h"
 
+namespace
+{
+NSWindow* nativeWindowFor(juce::Component& component)
+{
+    auto* view = static_cast<NSView*>(component.getWindowHandle());
+    return view != nil ? view.window : nil;
+}
+}
+
+void enableAuxiliaryMouseMoveEvents(juce::Component& component)
+{
+    if (auto* window = nativeWindowFor(component))
+        [window setAcceptsMouseMovedEvents:YES];
+}
+
+void matchAuxiliaryWindowLevel(juce::Component& component, juce::Component& owner)
+{
+    auto* window = nativeWindowFor(component);
+    auto* ownerWindow = nativeWindowFor(owner);
+    if (window == nil || ownerWindow == nil || window == ownerWindow)
+        return;
+
+    if (auto* oldParent = window.parentWindow)
+        [oldParent removeChildWindow:window];
+    window.level = ownerWindow.level;
+}
+
 void setAuxiliaryTextInputActive(juce::Component& component, const bool active,
                                  void*& previousKeyWindow)
 {

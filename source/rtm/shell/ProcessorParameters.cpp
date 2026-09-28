@@ -99,9 +99,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
             })));
 
     layout.add(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID { scopZoomControlsParameterId, 1 },
-        "SCOP / ZOOM",
+        juce::ParameterID { scopVerticalZoomControlsParameterId, 1 },
+        "SCOP / ZOOM VERT",
         ana::scop::defaultZoomControlsVisible,
+        juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID { scopVerticalReadoutsParameterId, 1 },
+        "SCOP / RO VERT", true,
         juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
 
     layout.add(std::make_unique<juce::AudioParameterBool>(
@@ -231,11 +236,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
              std::tuple { specAntiAliasParameterId, "SPEC / ANTI ALIAS", true },
              std::tuple { specHighQualityRenderingParameterId, "SPEC MAP / HIGH QUALITY RENDERING", true },
              std::tuple { specMapLeftToRightParameterId, "SPEC MAP / LEFT TO RIGHT", false },
-             std::tuple { specRangesVisibleParameterId, "SPEC / RANGES", true },
+             std::tuple { specHorizontalReadoutsParameterId, "SPEC / READOUT HORIZ", true },
+             std::tuple { specVerticalReadoutsParameterId, "SPEC / READOUT VERT", true },
              std::tuple { specClearOnPlayParameterId, "SPEC / CLEAR ON PLAY", false },
              std::tuple { specCursorReadoutParameterId, "SPEC / CURSOR", true },
+             std::tuple { specCursorNotesParameterId, "SPEC / CURSOR NOTES", true },
              std::tuple { specMonitorControlsParameterId, "SPEC / MONITOR", true },
-             std::tuple { specZoomControlsParameterId, "SPEC / ZOOM", true },
+             std::tuple { specHorizontalZoomParameterId, "SPEC / ZOOM HORIZ", true },
+             std::tuple { specVerticalZoomParameterId, "SPEC / ZOOM VERT", true },
              std::tuple { specSplitViewParameterId, "SPEC / SPLIT", false } })
         layout.add(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID { id, 1 }, name, defaultValue,
@@ -350,9 +358,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
              std::tuple { corrFilledDisplayParameterId, "CORR / FILLED DISPLAY", true },
              std::tuple { corrSecondGraphParameterId, "CORR / 2ND GRAPH", false },
              std::tuple { corrClearOnPlayParameterId, "CORR / CLEAR ON PLAY", false },
-             std::tuple { corrRangesVisibleParameterId, "CORR / RANGES", true },
+             std::tuple { corrHorizontalReadoutsParameterId, "CORR / READOUT HORIZ", true },
+             std::tuple { corrVerticalReadoutsParameterId, "CORR / READOUT VERT", true },
              std::tuple { corrCursorReadoutParameterId, "CORR / CURSOR", true },
-             std::tuple { corrZoomControlsParameterId, "CORR / ZOOM", true } })
+             std::tuple { corrHorizontalZoomParameterId, "CORR / ZOOM HORIZ", true },
+             std::tuple { corrVerticalZoomParameterId, "CORR / ZOOM VERT", true } })
         layout.add(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID { id, 1 }, name, defaultValue,
             juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
@@ -461,10 +471,29 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
              std::pair { lvlsHistoryMomentaryVisibleParameterId, "LVLS / HISTORY MOMENTARY" },
              std::pair { lvlsHistoryShortTermVisibleParameterId, "LVLS / HISTORY SHORT TERM" },
              std::pair { lvlsHistoryIntegratedVisibleParameterId, "LVLS / HISTORY INTEGRATED" },
-             std::pair { lvlsHistoryZoomParameterId, "LVLS / HISTORY ZOOM" } })
+             std::pair { lvlsHistoryHorizontalZoomParameterId, "LVLS / HISTORY ZOOM HORIZ" },
+             std::pair { lvlsHistoryVerticalZoomParameterId, "LVLS / HISTORY ZOOM VERT" } })
         layout.add(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID { id, 1 }, name, true,
             juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name, defaultValue] : std::array {
+             std::tuple { lvlsPeakModeParameterId, "LVLS / PEAK MODE", true },
+             std::tuple { lvlsMidSideModeParameterId, "LVLS / MID SIDE MODE", false },
+             std::tuple { lvlsHistorySoloParameterId, "LVLS / HISTORY SOLO", false } })
+        layout.add(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { id, 1 }, name, defaultValue,
+            juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+
+    for (const auto& [id, name, defaultValue] : std::array {
+             std::tuple { lvlsHistoryHorizontalStartParameterId, "LVLS / HISTORY HORIZONTAL START", 0.0f },
+             std::tuple { lvlsHistoryHorizontalEndParameterId, "LVLS / HISTORY HORIZONTAL END", 1.0f },
+             std::tuple { lvlsHistoryVerticalStartParameterId, "LVLS / HISTORY VERTICAL START", 0.0f },
+             std::tuple { lvlsHistoryVerticalEndParameterId, "LVLS / HISTORY VERTICAL END", 1.0f } })
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { id, 1 }, name,
+            juce::NormalisableRange<float> { 0.0f, 1.0f, 0.001f }, defaultValue,
+            juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
 
     const juce::StringArray scopChannelModes { "LEFT", "RIGHT", "MID", "SIDE", "LR", "MS" };
     for (size_t bandIndex = 0; bandIndex < scopChannelModeParameterIds.size(); ++bandIndex)

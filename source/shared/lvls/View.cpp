@@ -31,17 +31,19 @@ struct LvlsHistoryLayout
     juce::Rectangle<int> plot;
     juce::Rectangle<int> metricLabelRow;
     juce::Rectangle<int> metricReadoutRow;
+    int metricWidth = 0;
     juce::Rectangle<int> sviewButton;
     juce::Rectangle<int> horizontalZoom;
     juce::Rectangle<int> verticalZoom;
 };
 
 LvlsHistoryLayout makeLvlsHistoryLayout(juce::Rectangle<int> bounds,
-                                          const bool showZoomControls) noexcept
+                                          const bool showHorizontalZoom,
+                                          const bool showVerticalZoom) noexcept
 {
     LvlsHistoryLayout layout;
     auto historyArea = bounds;
-    if (showZoomControls)
+    if (showVerticalZoom)
     {
         layout.verticalZoom = historyArea.removeFromRight(
             std::min(bandZoomSliderWidth, historyArea.getWidth()));
@@ -53,7 +55,7 @@ LvlsHistoryLayout makeLvlsHistoryLayout(juce::Rectangle<int> bounds,
     ana::ui::gap.removeFromTop(historyArea);
 
     auto plotArea = historyArea;
-    if (showZoomControls)
+    if (showHorizontalZoom)
     {
         layout.horizontalZoom = plotArea.removeFromBottom(
             std::min(bandRangeSliderHeight, plotArea.getHeight()));
@@ -61,7 +63,7 @@ LvlsHistoryLayout makeLvlsHistoryLayout(juce::Rectangle<int> bounds,
     }
     layout.plot = plotArea;
 
-    const auto sviewWidth = layout.plot.getWidth() >= historySviewWidth ? historySviewWidth : 0;
+    const auto sviewWidth = historySviewWidth;
     const auto sviewY = std::max(layout.plot.getY(),
         layout.plot.getBottom() - ana::ui::controlHeight);
     layout.sviewButton = {
@@ -70,12 +72,13 @@ LvlsHistoryLayout makeLvlsHistoryLayout(juce::Rectangle<int> bounds,
         sviewWidth,
         std::min(ana::ui::controlHeight, layout.plot.getBottom() - sviewY)
     };
-    layout.metricLabelRow = historyArea.withWidth(historyMetricReadoutWidth() * 2
-                                             + ana::ui::gap.pixels())
+    layout.metricWidth = std::min(historyMetricReadoutWidth(),
+        std::max(0, (historyArea.getWidth() - ana::ui::gap.pixels()) / 2));
+    const auto metricRowWidth = layout.metricWidth * 2 + ana::ui::gap.pixels();
+    layout.metricLabelRow = historyArea.withWidth(metricRowWidth)
                                       .withHeight(std::min(ana::ui::controlHeight,
                                                           historyArea.getHeight()));
-    layout.metricReadoutRow = historyArea.withWidth(historyMetricReadoutWidth() * 2
-                                               + ana::ui::gap.pixels())
+    layout.metricReadoutRow = historyArea.withWidth(metricRowWidth)
         .withHeight(layout.metricLabelRow.getHeight())
         .withY(layout.metricLabelRow.getBottom() + ana::ui::gap.pixels());
     return layout;
@@ -102,9 +105,11 @@ LvlsView::LvlsView(PluginProcessor& processorRef)
     : processor(processorRef)
 {
     partWeights = processor.getLvlsSectionWeights();
+    refreshPersistentViewState();
     peakModeButton.onClick = [this]
     {
         showPeakLvls = true;
+        setPersistentParameter(PluginProcessor::lvlsPeakModeParameterId, 1.0f);
         peakModeButton.setToggleState(true, juce::dontSendNotification);
         rmsModeButton.setToggleState(false, juce::dontSendNotification);
         repaint();
@@ -112,6 +117,7 @@ LvlsView::LvlsView(PluginProcessor& processorRef)
     rmsModeButton.onClick = [this]
     {
         showPeakLvls = false;
+        setPersistentParameter(PluginProcessor::lvlsPeakModeParameterId, 0.0f);
         peakModeButton.setToggleState(false, juce::dontSendNotification);
         rmsModeButton.setToggleState(true, juce::dontSendNotification);
         repaint();
@@ -119,19 +125,28 @@ LvlsView::LvlsView(PluginProcessor& processorRef)
     peakChannelModeButton.onClick = [this]
     {
         showMidSideLvls = ! showMidSideLvls;
+        setPersistentParameter(PluginProcessor::lvlsMidSideModeParameterId,
+                               showMidSideLvls ? 1.0f : 0.0f);
         peakChannelModeButton.setToggleState(showMidSideLvls, juce::dontSendNotification);
         repaint();
     };
     historySviewButton.onClick = [this]
     {
         historySolo = ! historySolo;
+        setPersistentParameter(PluginProcessor::lvlsHistorySoloParameterId,
+                               historySolo ? 1.0f : 0.0f);
         historySviewButton.setToggleState(historySolo, juce::dontSendNotification);
         resized();
     };
     historySviewButton.setTooltip("SVIEW");
     historyHorizontalZoom.onRangeChanged = [this] { repaint(); };
     historyVerticalZoom.onRangeChanged = [this] { repaint(); };
-    peakModeButton.setToggleState(true, juce::dontSendNotification);
+    historyHorizontalZoom.onDragEnded = [this] { storeHistoryZoomState(); };
+    historyVerticalZoom.onDragEnded = [this] { storeHistoryZoomState(); };
+    peakModeButton.setToggleState(showPeakLvls, juce::dontSendNotification);
+    rmsModeButton.setToggleState(! showPeakLvls, juce::dontSendNotification);
+    peakChannelModeButton.setToggleState(showMidSideLvls, juce::dontSendNotification);
+    historySviewButton.setToggleState(historySolo, juce::dontSendNotification);
     addAndMakeVisible(peakModeButton);
     addAndMakeVisible(rmsModeButton);
     addAndMakeVisible(peakChannelModeButton);
@@ -430,12 +445,16 @@ void LvlsView::paint(juce::Graphics& graphics)
     if (historyBounds.isEmpty())
         return;
 
-    const auto* historyZoomParameter = processor.getParameters().getRawParameterValue(
-        PluginProcessor::lvlsHistoryZoomParameterId);
-    const auto historyZoomVisible = historyZoomParameter == nullptr
-        || historyZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto* horizontalZoomParameter = processor.getParameters().getRawParameterValue(
+        PluginProcessor::lvlsHistoryHorizontalZoomParameterId);
+    const auto* verticalZoomParameter = processor.getParameters().getRawParameterValue(
+        PluginProcessor::lvlsHistoryVerticalZoomParameterId);
+    const auto horizontalZoomVisible = horizontalZoomParameter == nullptr
+        || horizontalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto verticalZoomVisible = verticalZoomParameter == nullptr
+        || verticalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
     const auto historyLayout = makeLvlsHistoryLayout(historyBounds.toNearestInt(),
-                                                       historyZoomVisible);
+                                                       horizontalZoomVisible, verticalZoomVisible);
     graphics.setFont(displayFont);
     graphics.setColour(ana::ui::light);
     graphics.drawRect(historyLayout.header, 1.0f);
@@ -460,11 +479,11 @@ void LvlsView::paint(juce::Graphics& graphics)
         ana::ui::FixedGapRow metricReadouts(historyLayout.metricReadoutRow);
         const auto truePeak = std::max(peakMaximumValues[0], peakMaximumValues[1]);
         drawMetric("TP", truePeak <= -119.95f ? juce::String("-inf") : formatReadoutLevel(truePeak),
-                   metricLabels.takeLeft(historyMetricReadoutWidth()),
-                   metricReadouts.takeLeft(historyMetricReadoutWidth()));
+                   metricLabels.takeLeft(historyLayout.metricWidth),
+                   metricReadouts.takeLeft(historyLayout.metricWidth));
         drawMetric("LRA", formatReadoutLevel(loudnessRange),
-                   metricLabels.takeLeft(historyMetricReadoutWidth()),
-                   metricReadouts.takeLeft(historyMetricReadoutWidth()));
+                   metricLabels.takeLeft(historyLayout.metricWidth),
+                   metricReadouts.takeLeft(historyLayout.metricWidth));
     };
 
     const auto historyEnabled = [this] (const char* parameterId)
@@ -546,18 +565,24 @@ void LvlsView::resized()
     if (! visibleParts[2])
     {
         historySolo = false;
+        setPersistentParameter(PluginProcessor::lvlsHistorySoloParameterId, 0.0f);
         historySviewButton.setToggleState(false, juce::dontSendNotification);
     }
     layoutPeakModeButtons();
     const auto historyBounds = historySolo ? getLocalBounds() : getPartBounds()[2];
-    const auto* historyZoomParameter = processor.getParameters().getRawParameterValue(
-        PluginProcessor::lvlsHistoryZoomParameterId);
-    const auto historyZoomVisible = historyZoomParameter == nullptr
-        || historyZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
-    const auto historyLayout = makeLvlsHistoryLayout(historyBounds, historyZoomVisible);
+    const auto* horizontalZoomParameter = processor.getParameters().getRawParameterValue(
+        PluginProcessor::lvlsHistoryHorizontalZoomParameterId);
+    const auto* verticalZoomParameter = processor.getParameters().getRawParameterValue(
+        PluginProcessor::lvlsHistoryVerticalZoomParameterId);
+    const auto horizontalZoomVisible = horizontalZoomParameter == nullptr
+        || horizontalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto verticalZoomVisible = verticalZoomParameter == nullptr
+        || verticalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto historyLayout = makeLvlsHistoryLayout(historyBounds,
+                                                     horizontalZoomVisible, verticalZoomVisible);
     historySviewButton.setVisible(visibleParts[2]);
-    historyHorizontalZoom.setVisible(visibleParts[2] && historyZoomVisible);
-    historyVerticalZoom.setVisible(visibleParts[2] && historyZoomVisible);
+    historyHorizontalZoom.setVisible(visibleParts[2] && horizontalZoomVisible);
+    historyVerticalZoom.setVisible(visibleParts[2] && verticalZoomVisible);
     historySviewButton.setBounds(historyLayout.sviewButton);
     historyHorizontalZoom.setBounds(historyLayout.horizontalZoom);
     historyVerticalZoom.setBounds(historyLayout.verticalZoom);
@@ -594,14 +619,21 @@ void LvlsView::layoutPeakModeButtons()
         headerBounds.getWidth() - ana::ui::gap.pixels() * 2);
     const auto preferredWidth = peakModeButton.getPreferredWidth()
         + rmsModeButton.getPreferredWidth() + peakChannelModeButton.getPreferredWidth();
+    const auto peakPreferredWidth = peakModeButton.getPreferredWidth();
+    const auto rmsPreferredWidth = rmsModeButton.getPreferredWidth();
     const auto extraPerButton = std::max(0, availableButtonWidth - preferredWidth) / 3;
+    const auto peakWidth = availableButtonWidth < preferredWidth
+        ? (availableButtonWidth * peakPreferredWidth + preferredWidth / 2) / preferredWidth
+        : peakPreferredWidth + extraPerButton;
+    const auto rmsWidth = availableButtonWidth < preferredWidth
+        ? ((availableButtonWidth - peakWidth) * rmsPreferredWidth
+           + (preferredWidth - peakPreferredWidth) / 2)
+            / (preferredWidth - peakPreferredWidth)
+        : rmsPreferredWidth + extraPerButton;
     ana::ui::FixedGapRow buttonRow(headerBounds);
-    peakModeButton.setBounds(buttonRow.takeLeft(
-        peakModeButton.getPreferredWidth() + extraPerButton));
-    rmsModeButton.setBounds(buttonRow.takeLeft(
-        rmsModeButton.getPreferredWidth() + extraPerButton));
-    peakChannelModeButton.setBounds(buttonRow.remaining().getWidth() >= peakChannelModeButton.getPreferredWidth()
-        ? buttonRow.remaining() : juce::Rectangle<int>());
+    peakModeButton.setBounds(buttonRow.takeLeft(peakWidth));
+    rmsModeButton.setBounds(buttonRow.takeLeft(rmsWidth));
+    peakChannelModeButton.setBounds(buttonRow.remaining());
 }
 
 int LvlsView::getLvlsWidth() const noexcept
@@ -868,6 +900,7 @@ void LvlsView::mouseUp(const juce::MouseEvent&)
 
 void LvlsView::timerCallback()
 {
+    refreshPersistentViewState();
     if (draggedPartSeparator < 0)
     {
         const auto storedWeights = processor.getLvlsSectionWeights();
@@ -921,6 +954,73 @@ void LvlsView::timerCallback()
     for (size_t series = 0; series < loudnessHistories.size(); ++series)
         displayedLvls->copyHistory(series, loudnessHistories[series]);
     repaint();
+}
+
+void LvlsView::setPersistentParameter(const char* parameterId, const float value)
+{
+    auto* parameter = processor.getParameters().getParameter(parameterId);
+    if (parameter == nullptr)
+        return;
+
+    const auto normalised = parameter->convertTo0to1(value);
+    if (juce::approximatelyEqual(parameter->getValue(), normalised))
+        return;
+
+    parameter->beginChangeGesture();
+    parameter->setValueNotifyingHost(normalised);
+    parameter->endChangeGesture();
+}
+
+void LvlsView::storeHistoryZoomState()
+{
+    setPersistentParameter(PluginProcessor::lvlsHistoryHorizontalStartParameterId,
+                           historyHorizontalZoom.getRangeStart());
+    setPersistentParameter(PluginProcessor::lvlsHistoryHorizontalEndParameterId,
+                           historyHorizontalZoom.getRangeEnd());
+    setPersistentParameter(PluginProcessor::lvlsHistoryVerticalStartParameterId,
+                           historyVerticalZoom.getRangeStart());
+    setPersistentParameter(PluginProcessor::lvlsHistoryVerticalEndParameterId,
+                           historyVerticalZoom.getRangeEnd());
+}
+
+void LvlsView::refreshPersistentViewState()
+{
+    const auto read = [this] (const char* parameterId, const float fallback)
+    {
+        if (const auto* value = processor.getParameters().getRawParameterValue(parameterId))
+            return value->load(std::memory_order_relaxed);
+        return fallback;
+    };
+
+    const auto nextShowPeak = read(PluginProcessor::lvlsPeakModeParameterId, 1.0f) >= 0.5f;
+    const auto nextShowMidSide = read(PluginProcessor::lvlsMidSideModeParameterId, 0.0f) >= 0.5f;
+    const auto nextHistorySolo = read(PluginProcessor::lvlsHistorySoloParameterId, 0.0f) >= 0.5f;
+    const auto displayChanged = showPeakLvls != nextShowPeak
+        || showMidSideLvls != nextShowMidSide
+        || historySolo != nextHistorySolo;
+    const auto layoutChanged = historySolo != nextHistorySolo;
+    showPeakLvls = nextShowPeak;
+    showMidSideLvls = nextShowMidSide;
+    historySolo = nextHistorySolo;
+
+    peakModeButton.setToggleState(showPeakLvls, juce::dontSendNotification);
+    rmsModeButton.setToggleState(! showPeakLvls, juce::dontSendNotification);
+    peakChannelModeButton.setToggleState(showMidSideLvls, juce::dontSendNotification);
+    historySviewButton.setToggleState(historySolo, juce::dontSendNotification);
+
+    if (! historyHorizontalZoom.isDragging())
+        historyHorizontalZoom.setRange(
+            read(PluginProcessor::lvlsHistoryHorizontalStartParameterId, 0.0f),
+            read(PluginProcessor::lvlsHistoryHorizontalEndParameterId, 1.0f));
+    if (! historyVerticalZoom.isDragging())
+        historyVerticalZoom.setRange(
+            read(PluginProcessor::lvlsHistoryVerticalStartParameterId, 0.0f),
+            read(PluginProcessor::lvlsHistoryVerticalEndParameterId, 1.0f));
+
+    if (layoutChanged && isShowing())
+        resized();
+    if (displayChanged)
+        repaint();
 }
 
 juce::Rectangle<float> LvlsView::getPlotBounds() const noexcept

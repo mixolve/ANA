@@ -94,13 +94,17 @@ void EllipsisLabel::editorShown(juce::TextEditor* editor)
     if (editor == nullptr)
         return;
 
-    editor->setBorder(juce::BorderSize<int>(0));
+    const auto border = getBorderSize();
+    editor->setBorder(juce::BorderSize<int>(border.getTop(), border.getLeft(),
+                                            border.getBottom(), std::max(0, border.getRight() - 2)));
+    editor->setIndents(border.getRight() >= 2 ? 0 : 2, 0);
+    editor->setJustification(getJustificationType());
     editor->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
     editor->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
     editor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
     editor->setColour(juce::TextEditor::shadowColourId, juce::Colours::transparentBlack);
-    editor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff444444));
-    editor->setColour(juce::TextEditor::highlightedTextColourId, ana::ui::white);
+    editor->setColour(juce::TextEditor::highlightColourId, ana::ui::light);
+    editor->setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
 
     // Auxiliary windows pass shortcuts to the host except while inline text editing is active.
     if (onEditorVisibilityChanged)
@@ -123,22 +127,8 @@ void EllipsisLabel::editorAboutToBeHidden(juce::TextEditor*)
 ControlButton::ControlButton(juce::String text)
     : juce::Button(std::move(text))
 {
-    iconButton = getButtonText() == "adjustments-alt"
-        || getButtonText() == "snowflake"
-        || getButtonText() == "refresh"
-        || getButtonText() == "x"
-        || getButtonText() == "hexagons"
-        || getButtonText() == "plus"
-        || getButtonText() == "camera"
-        || getButtonText() == "eye-off"
-        || getButtonText() == "palette"
-        || getButtonText() == "arrows-up-down"
-        || getButtonText() == "arrows-down"
-        || getButtonText() == "browser-maximize"
-        || getButtonText() == "eraser"
-        || getButtonText() == "layout-rows";
-    if (iconButton)
-        symbolImage = loadTablerIcon(getButtonText(), ana::ui::iconFontSize);
+    symbolImage = loadTablerIcon(getButtonText(), ana::ui::iconFontSize);
+    iconButton = symbolImage.isValid();
     setWantsKeyboardFocus(false);
 }
 
