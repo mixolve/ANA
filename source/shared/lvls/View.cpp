@@ -1,15 +1,12 @@
 #include "View.h"
 #include "shared/lvls/Settings.h"
 #include "shared/lvls/Processor.h"
-#if ANA_VARIANT_RTM
-#include "rtm/shell/Processor.h"
-#else
-#include "ara/shell/Processor.h"
-#endif
+#include "shell/Processor.h"
 #include "shared/shell/Theme.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace
 {
@@ -18,30 +15,45 @@ constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
 int lvlsScaleLabelWidth() noexcept { return ana::ui::textControlWidth(3); }
 int lvlsReadoutWidth() noexcept { return ana::ui::textControlWidth(7); }
 int historyMetricReadoutWidth() noexcept { return ana::ui::textControlWidth(7); }
+int historyMetricLabelWidth(const char* label) noexcept { return ana::ui::textControlWidth(label); }
 constexpr int historySviewWidth = ana::ui::iconControlSize;
 int historyMinimumWidth() noexcept
 {
-    return historyMetricReadoutWidth() * 2 + historySviewWidth + bandZoomSliderWidth
-        + ana::ui::gap.pixels() * 3;
+    return historyMetricLabelWidth("TP") + historyMetricLabelWidth("LRA")
+        + historyMetricReadoutWidth() * 2 + bandZoomSliderWidth
+        + ana::ui::gap.pixels() * 4;
 }
 
 struct LvlsHistoryLayout
 {
     juce::Rectangle<int> header;
     juce::Rectangle<int> plot;
-    juce::Rectangle<int> metricLabelRow;
-    juce::Rectangle<int> metricReadoutRow;
-    int metricWidth = 0;
+    juce::Rectangle<int> truePeakLabel;
+    juce::Rectangle<int> truePeakReadout;
+    juce::Rectangle<int> loudnessRangeLabel;
+    juce::Rectangle<int> loudnessRangeReadout;
     juce::Rectangle<int> sviewButton;
     juce::Rectangle<int> horizontalZoom;
     juce::Rectangle<int> verticalZoom;
+    juce::Rectangle<int> timeStartReadout;
+    juce::Rectangle<int> timeEndReadout;
+    juce::Rectangle<int> levelHighReadout;
+    juce::Rectangle<int> levelLowReadout;
 };
 
 LvlsHistoryLayout makeLvlsHistoryLayout(juce::Rectangle<int> bounds,
                                           const bool showHorizontalZoom,
-                                          const bool showVerticalZoom) noexcept
+                                          const bool showVerticalZoom,
+                                          const bool showHorizontalReadouts,
+                                          const bool showVerticalReadouts,
+                                          const bool cleanView) noexcept
 {
     LvlsHistoryLayout layout;
+    if (cleanView)
+    {
+        layout.plot = bounds;
+        return layout;
+    }
     auto historyArea = bounds;
     if (showVerticalZoom)
     {
@@ -61,26 +73,64 @@ LvlsHistoryLayout makeLvlsHistoryLayout(juce::Rectangle<int> bounds,
             std::min(bandRangeSliderHeight, plotArea.getHeight()));
         ana::ui::gap.removeFromBottom(plotArea);
     }
+
+    const auto tpLabelWidth = historyMetricLabelWidth("TP");
+    const auto lraLabelWidth = historyMetricLabelWidth("LRA");
+    const auto readoutWidth = historyMetricReadoutWidth();
+    const auto singleRowWidth = tpLabelWidth + lraLabelWidth + readoutWidth * 2
+        + ana::ui::gap.pixels() * 3;
+    const auto takeMetric = [&] (juce::Rectangle<int> row, const int labelWidth,
+                                 juce::Rectangle<int>& label,
+                                 juce::Rectangle<int>& readout)
+    {
+        label = row.removeFromLeft(std::min(labelWidth, row.getWidth()));
+        ana::ui::gap.removeFromLeft(row);
+        readout = row.removeFromLeft(std::min(readoutWidth, row.getWidth()));
+    };
+    auto metricRow = plotArea.removeFromTop(
+        std::min(ana::ui::controlHeight, plotArea.getHeight()));
+    if (metricRow.getWidth() >= singleRowWidth)
+    {
+        takeMetric(metricRow.removeFromLeft(tpLabelWidth + ana::ui::gap.pixels() + readoutWidth),
+                   tpLabelWidth, layout.truePeakLabel, layout.truePeakReadout);
+        ana::ui::gap.removeFromLeft(metricRow);
+    }
+    else
+    {
+        takeMetric(metricRow, tpLabelWidth, layout.truePeakLabel, layout.truePeakReadout);
+        ana::ui::gap.removeFromTop(plotArea);
+        metricRow = plotArea.removeFromTop(
+            std::min(ana::ui::controlHeight, plotArea.getHeight()));
+    }
+    takeMetric(metricRow, lraLabelWidth, layout.loudnessRangeLabel, layout.loudnessRangeReadout);
+    ana::ui::gap.removeFromTop(plotArea);
     layout.plot = plotArea;
 
-    const auto sviewWidth = historySviewWidth;
-    const auto sviewY = std::max(layout.plot.getY(),
-        layout.plot.getBottom() - ana::ui::controlHeight);
-    layout.sviewButton = {
-        layout.plot.getX(),
-        sviewY,
-        sviewWidth,
-        std::min(ana::ui::controlHeight, layout.plot.getBottom() - sviewY)
-    };
-    layout.metricWidth = std::min(historyMetricReadoutWidth(),
-        std::max(0, (historyArea.getWidth() - ana::ui::gap.pixels()) / 2));
-    const auto metricRowWidth = layout.metricWidth * 2 + ana::ui::gap.pixels();
-    layout.metricLabelRow = historyArea.withWidth(metricRowWidth)
-                                      .withHeight(std::min(ana::ui::controlHeight,
-                                                          historyArea.getHeight()));
-    layout.metricReadoutRow = historyArea.withWidth(metricRowWidth)
-        .withHeight(layout.metricLabelRow.getHeight())
-        .withY(layout.metricLabelRow.getBottom() + ana::ui::gap.pixels());
+    layout.sviewButton = layout.header.withWidth(
+        std::min(historySviewWidth, layout.header.getWidth()));
+    const auto readoutHeight = std::min(ana::ui::controlHeight, layout.plot.getHeight());
+    const auto levelWidth = showVerticalReadouts
+        ? std::min(lvlsReadoutWidth(), layout.plot.getWidth()) : 0;
+    const auto timeWidth = showHorizontalReadouts
+        ? std::min(lvlsReadoutWidth(), std::max(0,
+            (layout.plot.getWidth() - levelWidth
+             - (showVerticalReadouts ? ana::ui::gap.pixels() : 0)
+             - ana::ui::gap.pixels()) / 2)) : 0;
+    if (showHorizontalReadouts)
+    {
+        layout.timeStartReadout = { layout.plot.getX(),
+            layout.plot.getBottom() - readoutHeight, timeWidth, readoutHeight };
+        layout.timeEndReadout = { layout.plot.getRight() - levelWidth
+            - (showVerticalReadouts ? ana::ui::gap.pixels() : 0) - timeWidth,
+            layout.plot.getBottom() - readoutHeight, timeWidth, readoutHeight };
+    }
+    if (showVerticalReadouts)
+    {
+        layout.levelHighReadout = { layout.plot.getRight() - levelWidth,
+            layout.plot.getY(), levelWidth, readoutHeight };
+        layout.levelLowReadout = { layout.plot.getRight() - levelWidth,
+            layout.plot.getBottom() - readoutHeight, levelWidth, readoutHeight };
+    }
     return layout;
 }
 
@@ -102,7 +152,27 @@ juce::String formatLevelScaleTick(const int value)
 }
 
 LvlsView::LvlsView(PluginProcessor& processorRef)
-    : processor(processorRef)
+    : processor(processorRef),
+      historyTimeStartReadout(processorRef.getParameters(),
+          PluginProcessor::lvlsHistoryHorizontalStartParameterId, "",
+          [this] (const double value) { return juce::String::formatted("%07.2f", value * getHistoryDurationSeconds()); }),
+      historyTimeEndReadout(processorRef.getParameters(),
+          PluginProcessor::lvlsHistoryHorizontalEndParameterId, "",
+          [this] (const double value) { return juce::String::formatted("%07.2f", value * getHistoryDurationSeconds()); }),
+      historyLevelHighReadout(processorRef.getParameters(),
+          PluginProcessor::lvlsHistoryVerticalStartParameterId, "",
+          [this] (const double value)
+          {
+              const auto [low, high] = getHistoryLufsBounds();
+              return formatReadoutLevel(juce::jmap(value, static_cast<double>(high), static_cast<double>(low)));
+          }),
+      historyLevelLowReadout(processorRef.getParameters(),
+          PluginProcessor::lvlsHistoryVerticalEndParameterId, "",
+          [this] (const double value)
+          {
+              const auto [low, high] = getHistoryLufsBounds();
+              return formatReadoutLevel(juce::jmap(value, static_cast<double>(high), static_cast<double>(low)));
+          })
 {
     partWeights = processor.getLvlsSectionWeights();
     refreshPersistentViewState();
@@ -138,7 +208,7 @@ LvlsView::LvlsView(PluginProcessor& processorRef)
         historySviewButton.setToggleState(historySolo, juce::dontSendNotification);
         resized();
     };
-    historySviewButton.setTooltip("SVIEW");
+    historySviewButton.setTooltip("FULL");
     historyHorizontalZoom.onRangeChanged = [this] { repaint(); };
     historyVerticalZoom.onRangeChanged = [this] { repaint(); };
     historyHorizontalZoom.onDragEnded = [this] { storeHistoryZoomState(); };
@@ -153,20 +223,43 @@ LvlsView::LvlsView(PluginProcessor& processorRef)
     addAndMakeVisible(historySviewButton);
     addAndMakeVisible(historyHorizontalZoom);
     addAndMakeVisible(historyVerticalZoom);
+    for (auto* control : std::array<ParameterControl*, 4> {
+             &historyTimeStartReadout, &historyTimeEndReadout,
+             &historyLevelHighReadout, &historyLevelLowReadout })
+        addAndMakeVisible(*control);
+    for (auto* control : std::array<ParameterControl*, 2> {
+             &historyTimeStartReadout, &historyTimeEndReadout })
+        control->getSlider().valueFromTextFunction = [this] (const juce::String& text)
+        {
+            return juce::jlimit(0.0, 1.0,
+                text.getDoubleValue() / std::max(0.1, getHistoryDurationSeconds()));
+        };
+    for (auto* control : std::array<ParameterControl*, 2> {
+             &historyLevelHighReadout, &historyLevelLowReadout })
+        control->getSlider().valueFromTextFunction = [this] (const juce::String& text)
+        {
+            const auto [low, high] = getHistoryLufsBounds();
+            return juce::jlimit(0.0, 1.0,
+                (static_cast<double>(high) - text.getDoubleValue())
+                    / std::max(0.1, static_cast<double>(high - low)));
+        };
     startTimerHz(30);
 }
 
 void LvlsView::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(juce::Colours::black);
+    graphics.fillAll(ana::ui::background);
 
     const auto minimumLvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth());
+    const auto minimumLoudnessColumnWidth = std::max(getLvlsWidth(true) + 2, lvlsReadoutWidth());
     const auto parts = getPartBounds();
     const auto visibleParts = getVisibleParts();
     auto peakRmsBounds = parts[0];
     auto lufsBounds = parts[1];
     const auto historyBounds = (historySolo && visibleParts[2]
         ? getLocalBounds() : parts[2]).toFloat();
+    const auto historyExpanded = historySolo
+        || (visibleParts[2] && (! visibleParts[0] || ! visibleParts[1]));
     const auto scaleSideWidth = lvlsScaleLabelWidth() + ana::ui::gap.pixels();
     const auto peakScalesVisible = peakRmsBounds.getWidth()
         >= minimumLvlsColumnWidth * 2 + ana::ui::gap.pixels() + scaleSideWidth * 2;
@@ -176,7 +269,7 @@ void LvlsView::paint(juce::Graphics& graphics)
     const auto peakLvlsWidth = std::max(1,
         (peakLvlsHorizontalBounds.getWidth() - ana::ui::gap.pixels()) / 2);
     const auto lufsScalesVisible = lufsBounds.getWidth()
-        >= minimumLvlsColumnWidth * 3 + ana::ui::gap.pixels() * 2 + scaleSideWidth * 2;
+        >= minimumLoudnessColumnWidth * 3 + ana::ui::gap.pixels() * 2 + scaleSideWidth * 2;
     auto lufsLvlsHorizontalBounds = lufsBounds;
     if (lufsScalesVisible)
         lufsLvlsHorizontalBounds.reduce(scaleSideWidth, 0);
@@ -187,7 +280,7 @@ void LvlsView::paint(juce::Graphics& graphics)
     const auto displayFont = ana::ui::makeFont();
     const auto readLevelScale = [this] (const char* parameterId, const float fallback)
     {
-        if (const auto* value = processor.getParameters().getRawParameterValue(parameterId))
+        if (const auto* value = processor.getRawParameterValue(parameterId))
             return value->load(std::memory_order_relaxed);
         return fallback;
     };
@@ -239,6 +332,7 @@ void LvlsView::paint(juce::Graphics& graphics)
             const auto labelY = lineY - ana::ui::controlHeight / 2;
             const auto label = lufsScale && tick <= -120 ? juce::String("-inf")
                                                           : formatLevelScaleTick(tick);
+            graphics.setColour(ana::ui::light);
             if (drawLeftLabels)
                 graphics.drawText(label,
                                   juce::roundToInt(bounds.getX()) - ana::ui::gap.pixels() - lvlsScaleLabelWidth(),
@@ -261,7 +355,7 @@ void LvlsView::paint(juce::Graphics& graphics)
         auto bar = barFrame.toFloat().reduced(1.0f, 0.0f);
         if (bar.isEmpty())
             return;
-        graphics.setColour(ana::ui::black);
+        graphics.setColour(ana::ui::background);
         graphics.fillRect(bar);
         const auto lvlsValue = showPeakLvls
             ? peakValues[channel] : rmsValues[channel];
@@ -317,7 +411,7 @@ void LvlsView::paint(juce::Graphics& graphics)
         auto bar = barFrame.toFloat().reduced(1.0f, 0.0f);
         if (bar.isEmpty())
             return;
-        graphics.setColour(ana::ui::black);
+        graphics.setColour(ana::ui::background);
         graphics.fillRect(bar);
         const auto fillRange = [&] (const float low, const float high, const juce::Colour colour)
         {
@@ -445,24 +539,40 @@ void LvlsView::paint(juce::Graphics& graphics)
     if (historyBounds.isEmpty())
         return;
 
-    const auto* horizontalZoomParameter = processor.getParameters().getRawParameterValue(
+    const auto* horizontalZoomParameter = processor.getRawParameterValue(
         PluginProcessor::lvlsHistoryHorizontalZoomParameterId);
-    const auto* verticalZoomParameter = processor.getParameters().getRawParameterValue(
+    const auto* verticalZoomParameter = processor.getRawParameterValue(
         PluginProcessor::lvlsHistoryVerticalZoomParameterId);
+    const auto* horizontalReadoutsParameter = processor.getRawParameterValue(
+        PluginProcessor::lvlsHistoryHorizontalReadoutsParameterId);
+    const auto* verticalReadoutsParameter = processor.getRawParameterValue(
+        PluginProcessor::lvlsHistoryVerticalReadoutsParameterId);
     const auto horizontalZoomVisible = horizontalZoomParameter == nullptr
         || horizontalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
     const auto verticalZoomVisible = verticalZoomParameter == nullptr
         || verticalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto horizontalReadoutsVisible = historyExpanded
+        && (horizontalReadoutsParameter == nullptr
+            || horizontalReadoutsParameter->load(std::memory_order_relaxed) >= 0.5f);
+    const auto verticalReadoutsVisible = historyExpanded
+        && (verticalReadoutsParameter == nullptr
+            || verticalReadoutsParameter->load(std::memory_order_relaxed) >= 0.5f);
     const auto historyLayout = makeLvlsHistoryLayout(historyBounds.toNearestInt(),
-                                                       horizontalZoomVisible, verticalZoomVisible);
+        horizontalZoomVisible, verticalZoomVisible,
+        horizontalReadoutsVisible, verticalReadoutsVisible, isHistoryCleanView());
     graphics.setFont(displayFont);
-    graphics.setColour(ana::ui::light);
-    graphics.drawRect(historyLayout.header, 1.0f);
-    graphics.setColour(ana::ui::white);
-    graphics.drawText("HISTORY", historyLayout.header,
-                      juce::Justification::centred, true);
+    if (! isHistoryCleanView())
+    {
+        graphics.setColour(ana::ui::light);
+        graphics.drawRect(historyLayout.header, 1.0f);
+        graphics.setColour(ana::ui::white);
+        graphics.drawText("HISTORY", historyLayout.header,
+                          juce::Justification::centred, true);
+    }
     const auto drawHistoryMetrics = [&]
     {
+        if (isHistoryCleanView())
+            return;
         const auto drawMetric = [&] (const juce::String& label, const juce::String& readout,
                                      const juce::Rectangle<int> labelBounds,
                                      const juce::Rectangle<int> readoutBounds)
@@ -475,20 +585,16 @@ void LvlsView::paint(juce::Graphics& graphics)
             graphics.drawText(readout, ana::ui::readoutTextBounds(readoutBounds),
                               juce::Justification::centred, true);
         };
-        ana::ui::FixedGapRow metricLabels(historyLayout.metricLabelRow);
-        ana::ui::FixedGapRow metricReadouts(historyLayout.metricReadoutRow);
-        const auto truePeak = std::max(peakMaximumValues[0], peakMaximumValues[1]);
+        const auto truePeak = historyTruePeak;
         drawMetric("TP", truePeak <= -119.95f ? juce::String("-inf") : formatReadoutLevel(truePeak),
-                   metricLabels.takeLeft(historyLayout.metricWidth),
-                   metricReadouts.takeLeft(historyLayout.metricWidth));
+                   historyLayout.truePeakLabel, historyLayout.truePeakReadout);
         drawMetric("LRA", formatReadoutLevel(loudnessRange),
-                   metricLabels.takeLeft(historyLayout.metricWidth),
-                   metricReadouts.takeLeft(historyLayout.metricWidth));
+                   historyLayout.loudnessRangeLabel, historyLayout.loudnessRangeReadout);
     };
 
     const auto historyEnabled = [this] (const char* parameterId)
     {
-        const auto* value = processor.getParameters().getRawParameterValue(parameterId);
+        const auto* value = processor.getRawParameterValue(parameterId);
         return value == nullptr || value->load(std::memory_order_relaxed) >= 0.5f;
     };
     const std::array<bool, 3> visibleHistorySeries {
@@ -510,13 +616,17 @@ void LvlsView::paint(juce::Graphics& graphics)
     const auto firstPosition = visibleStart * static_cast<float>(historySize - 1);
     const auto lastPosition = visibleEnd * static_cast<float>(historySize - 1);
     const auto visibleLength = std::max(0.001f, lastPosition - firstPosition);
-    const auto visibleHigh = juce::jmap(historyVerticalZoom.getRangeStart(), lufsHigh, lufsLow);
-    const auto visibleLow = juce::jmap(historyVerticalZoom.getRangeEnd(), lufsHigh, lufsLow);
+    const auto [historyLow, historyHigh] = getHistoryLufsBounds();
+    const auto visibleHigh = juce::jmap(historyVerticalZoom.getRangeStart(), historyHigh, historyLow);
+    const auto visibleLow = juce::jmap(historyVerticalZoom.getRangeEnd(), historyHigh, historyLow);
+    const auto visibleLevelRange = std::max(0.0001f, visibleHigh - visibleLow);
     const auto historyPoint = [&] (const float position, const float value)
     {
         return juce::Point<float> {
             plotBounds.getX() + (position - firstPosition) / visibleLength * plotBounds.getWidth(),
-            plotBounds.getBottom() - normalise(value, visibleLow, visibleHigh) * plotBounds.getHeight()
+            // Keep the original shape outside the viewport; the drawing clip
+            // trims it instead of flattening the curve onto either edge.
+            plotBounds.getBottom() - (value - visibleLow) / visibleLevelRange * plotBounds.getHeight()
         };
     };
     const auto drawHistorySeries = [&] (const size_t series, const juce::Colour colour,
@@ -552,9 +662,13 @@ void LvlsView::paint(juce::Graphics& graphics)
         graphics.setColour(colour);
         graphics.strokePath(path, juce::PathStrokeType(1.0f));
     };
-    drawHistorySeries(ana::lvls::LvlsProcessor::integratedHistory, ana::ui::white, true);
-    drawHistorySeries(ana::lvls::LvlsProcessor::shortTermHistory, ana::ui::light, false);
-    drawHistorySeries(ana::lvls::LvlsProcessor::momentaryHistory, ana::ui::white, false);
+    {
+        const juce::Graphics::ScopedSaveState state(graphics);
+        graphics.reduceClipRegion(historyLayout.plot);
+        drawHistorySeries(ana::lvls::LvlsProcessor::integratedHistory, ana::ui::white, true);
+        drawHistorySeries(ana::lvls::LvlsProcessor::shortTermHistory, ana::ui::light, false);
+        drawHistorySeries(ana::lvls::LvlsProcessor::momentaryHistory, ana::ui::white, false);
+    }
     drawHistoryMetrics();
 
 }
@@ -570,22 +684,44 @@ void LvlsView::resized()
     }
     layoutPeakModeButtons();
     const auto historyBounds = historySolo ? getLocalBounds() : getPartBounds()[2];
-    const auto* horizontalZoomParameter = processor.getParameters().getRawParameterValue(
+    const auto historyExpanded = historySolo
+        || (visibleParts[2] && (! visibleParts[0] || ! visibleParts[1]));
+    const auto* horizontalZoomParameter = processor.getRawParameterValue(
         PluginProcessor::lvlsHistoryHorizontalZoomParameterId);
-    const auto* verticalZoomParameter = processor.getParameters().getRawParameterValue(
+    const auto* verticalZoomParameter = processor.getRawParameterValue(
         PluginProcessor::lvlsHistoryVerticalZoomParameterId);
+    const auto* horizontalReadoutsParameter = processor.getRawParameterValue(
+        PluginProcessor::lvlsHistoryHorizontalReadoutsParameterId);
+    const auto* verticalReadoutsParameter = processor.getRawParameterValue(
+        PluginProcessor::lvlsHistoryVerticalReadoutsParameterId);
     const auto horizontalZoomVisible = horizontalZoomParameter == nullptr
         || horizontalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
     const auto verticalZoomVisible = verticalZoomParameter == nullptr
         || verticalZoomParameter->load(std::memory_order_relaxed) >= 0.5f;
+    const auto horizontalReadoutsVisible = historyExpanded
+        && (horizontalReadoutsParameter == nullptr
+            || horizontalReadoutsParameter->load(std::memory_order_relaxed) >= 0.5f);
+    const auto verticalReadoutsVisible = historyExpanded
+        && (verticalReadoutsParameter == nullptr
+            || verticalReadoutsParameter->load(std::memory_order_relaxed) >= 0.5f);
     const auto historyLayout = makeLvlsHistoryLayout(historyBounds,
-                                                     horizontalZoomVisible, verticalZoomVisible);
-    historySviewButton.setVisible(visibleParts[2]);
-    historyHorizontalZoom.setVisible(visibleParts[2] && horizontalZoomVisible);
-    historyVerticalZoom.setVisible(visibleParts[2] && verticalZoomVisible);
+        horizontalZoomVisible, verticalZoomVisible,
+        horizontalReadoutsVisible, verticalReadoutsVisible, isHistoryCleanView());
+    const auto showHistoryControls = visibleParts[2] && ! isHistoryCleanView();
+    historySviewButton.setVisible(showHistoryControls);
+    historyHorizontalZoom.setVisible(showHistoryControls && horizontalZoomVisible);
+    historyVerticalZoom.setVisible(showHistoryControls && verticalZoomVisible);
+    historyTimeStartReadout.setVisible(showHistoryControls && horizontalReadoutsVisible);
+    historyTimeEndReadout.setVisible(showHistoryControls && horizontalReadoutsVisible);
+    historyLevelHighReadout.setVisible(showHistoryControls && verticalReadoutsVisible);
+    historyLevelLowReadout.setVisible(showHistoryControls && verticalReadoutsVisible);
     historySviewButton.setBounds(historyLayout.sviewButton);
     historyHorizontalZoom.setBounds(historyLayout.horizontalZoom);
     historyVerticalZoom.setBounds(historyLayout.verticalZoom);
+    historyTimeStartReadout.setBounds(historyLayout.timeStartReadout);
+    historyTimeEndReadout.setBounds(historyLayout.timeEndReadout);
+    historyLevelHighReadout.setBounds(historyLayout.levelHighReadout);
+    historyLevelLowReadout.setBounds(historyLayout.levelLowReadout);
     repaint();
 }
 
@@ -636,10 +772,10 @@ void LvlsView::layoutPeakModeButtons()
     peakChannelModeButton.setBounds(buttonRow.remaining());
 }
 
-int LvlsView::getLvlsWidth() const noexcept
+int LvlsView::getLvlsWidth(const bool loudness) const noexcept
 {
-    const auto* parameter = processor.getParameters().getRawParameterValue(
-        PluginProcessor::lvlsWidthParameterId);
+    const auto* parameter = processor.getRawParameterValue(
+        loudness ? PluginProcessor::lvlsLoudnessWidthParameterId : PluginProcessor::lvlsWidthParameterId);
     return juce::jlimit(ana::lvls::minimumMeterWidth, ana::lvls::maximumMeterWidth,
                         juce::roundToInt(parameter != nullptr
                             ? parameter->load(std::memory_order_relaxed)
@@ -650,7 +786,7 @@ std::array<bool, 3> LvlsView::getVisibleParts() const noexcept
 {
     const auto enabled = [this] (const char* parameterId)
     {
-        const auto* value = processor.getParameters().getRawParameterValue(parameterId);
+        const auto* value = processor.getRawParameterValue(parameterId);
         return value == nullptr || value->load(std::memory_order_relaxed) >= 0.5f;
     };
     return {
@@ -665,7 +801,7 @@ std::array<int, 3> LvlsView::getMinimumPartWidths() const noexcept
     const auto lvlsColumnWidth = std::max(getLvlsWidth() + 2, lvlsReadoutWidth());
     return {
         lvlsColumnWidth * 2 + ana::ui::gap.pixels(),
-        lvlsColumnWidth * 3 + ana::ui::gap.pixels() * 2,
+        std::max(getLvlsWidth(true) + 2, lvlsReadoutWidth()) * 3 + ana::ui::gap.pixels() * 2,
         historyMinimumWidth()
     };
 }
@@ -777,6 +913,9 @@ std::array<juce::Rectangle<int>, 3> LvlsView::getPartBounds() const noexcept
 
 int LvlsView::findPartSeparator(const int x) const noexcept
 {
+    if (historySolo)
+        return -1;
+
     const auto parts = getPartBounds();
     const auto visible = getVisibleParts();
     auto previous = -1;
@@ -831,12 +970,20 @@ void LvlsView::mouseDown(const juce::MouseEvent& event)
     draggedPartSeparator = findPartSeparator(event.x);
     if (draggedPartSeparator < 0)
     {
-       #if ANA_VARIANT_RTM
-        if (! processor.getLvlsProcessor().isFrozen()
-            && ! historySolo
-            && (parts[0].contains(event.getPosition()) || parts[1].contains(event.getPosition())))
-            processor.clearLvlsProcessor();
-       #endif
+        if (! processor.isOfflineMode())
+        {
+        const auto section = historySolo ? 2
+            : parts[0].contains(event.getPosition()) ? 0
+            : parts[1].contains(event.getPosition()) ? 1
+            : parts[2].contains(event.getPosition()) ? 2 : -1;
+        const std::array resetIds { PluginProcessor::lvlsResetClickParameterId,
+            PluginProcessor::lvlsLoudnessResetClickParameterId, PluginProcessor::lvlsHistoryResetClickParameterId };
+        if (section >= 0 && ! processor.getLvlsProcessor().isFrozen())
+            if (const auto* resetClick = processor.getRawParameterValue(resetIds[static_cast<size_t>(section)]);
+                resetClick != nullptr && resetClick->load(std::memory_order_relaxed) >= 0.5f)
+                processor.clearLvlsProcessor(section);
+        }
+
         return;
     }
 
@@ -918,47 +1065,62 @@ void LvlsView::timerCallback()
         }
     }
 
-   #if ANA_VARIANT_RTM
     auto* displayedLvls = &processor.getLvlsProcessor();
-    const auto displayRevision = displayedLvls->getRevision();
-   #else
-    if (processor.getAnalyzerPageState() != ana::AnalyzerPage::lvls)
-        return;
+    auto* displayedLoudness = &processor.getLvlsLoudnessProcessor();
+    auto* displayedHistory = &processor.getLvlsHistoryProcessor();
+    auto displayRevision = displayedLvls->getRevision()
+        + displayedLoudness->getRevision() + displayedHistory->getRevision();
+    std::shared_ptr<const ana::offline::AnalysisResult> analysis;
+    if (processor.isOfflineMode())
+    {
+        if (processor.getAnalyzerPageState() != ana::AnalyzerPage::lvls)
+            return;
+        processor.requestOfflineAnalysis(size_t { 1 });
+        analysis = processor.getAnalysisResult();
+        if (analysis == nullptr || analysis->lvls == nullptr)
+            return;
+        displayedLvls = analysis->lvls.get();
+        displayedLoudness = displayedLvls;
+        displayedHistory = displayedLvls;
+        displayRevision = analysis->revision;
+    }
+    if (displayedOffline != processor.isOfflineMode())
+    {
+        displayedOffline = processor.isOfflineMode();
+        displayedRevision = std::numeric_limits<uint64_t>::max();
+    }
 
-    processor.requestAraAnalysis(size_t { 1 });
-    const auto analysis = processor.getAraAnalysisResult();
-    if (analysis == nullptr || analysis->lvls == nullptr)
-        return;
-
-    auto* displayedLvls = analysis->lvls.get();
-    const auto displayRevision = analysis->revision;
-   #endif
     auto& lastRevision = displayedRevision;
     if (displayRevision == lastRevision)
         return;
 
     lastRevision = displayRevision;
-    const auto values = displayedLvls->getValues();
-    peakValues = values.peakDecibels;
-    rmsValues = values.rmsDecibels;
-    peakMaximumValues = values.peakMaximumDecibels;
-    peakHoldValues = values.peakHoldDecibels;
-    rmsMaximumValues = values.rmsMaximumDecibels;
+    const auto peak = displayedLvls->getValues();
+    const auto values = displayedLoudness->getValues();
+    const auto history = displayedHistory->getValues();
+    peakValues = peak.peakDecibels;
+    rmsValues = peak.rmsDecibels;
+    peakMaximumValues = peak.peakMaximumDecibels;
+    peakHoldValues = peak.peakHoldDecibels;
+    rmsMaximumValues = peak.rmsMaximumDecibels;
+    historyTruePeak = std::max(history.peakMaximumDecibels[0], history.peakMaximumDecibels[1]);
     momentaryMaximumLufs = values.momentaryMaximumLufs;
     shortTermMaximumLufs = values.shortTermMaximumLufs;
     integratedMaximumLufs = values.integratedMaximumLufs;
-    loudnessRange = values.loudnessRange;
+    loudnessRange = history.loudnessRange;
     momentaryLufs = values.momentaryLufs;
     shortTermLufs = values.shortTermLufs;
     integratedLufs = values.integratedLufs;
     for (size_t series = 0; series < loudnessHistories.size(); ++series)
-        displayedLvls->copyHistory(series, loudnessHistories[series]);
+        displayedHistory->copyHistory(series, loudnessHistories[series]);
+    historyTimeStartReadout.repaint();
+    historyTimeEndReadout.repaint();
     repaint();
 }
 
 void LvlsView::setPersistentParameter(const char* parameterId, const float value)
 {
-    auto* parameter = processor.getParameters().getParameter(parameterId);
+    auto* parameter = processor.getActiveParameter(parameterId);
     if (parameter == nullptr)
         return;
 
@@ -983,11 +1145,33 @@ void LvlsView::storeHistoryZoomState()
                            historyVerticalZoom.getRangeEnd());
 }
 
+double LvlsView::getHistoryDurationSeconds() const noexcept
+{
+    return loudnessHistories[0].empty()
+        ? 0.0 : static_cast<double>(loudnessHistories[0].size() - 1) * 0.1;
+}
+
+std::pair<float, float> LvlsView::getHistoryLufsBounds() const noexcept
+{
+    const auto read = [this] (const char* parameterId, const float fallback)
+    {
+        if (const auto* value = processor.getRawParameterValue(parameterId))
+            return value->load(std::memory_order_relaxed);
+        return fallback;
+    };
+    const auto low = read(PluginProcessor::lvlsHistoryRangeLowParameterId,
+                          ana::lvls::defaultDisplayLowDecibels);
+    const auto high = std::max(low + 0.1f,
+        read(PluginProcessor::lvlsHistoryRangeHighParameterId,
+             ana::lvls::defaultDisplayHighDecibels));
+    return { low, high };
+}
+
 void LvlsView::refreshPersistentViewState()
 {
     const auto read = [this] (const char* parameterId, const float fallback)
     {
-        if (const auto* value = processor.getParameters().getRawParameterValue(parameterId))
+        if (const auto* value = processor.getRawParameterValue(parameterId))
             return value->load(std::memory_order_relaxed);
         return fallback;
     };
@@ -1008,14 +1192,32 @@ void LvlsView::refreshPersistentViewState()
     peakChannelModeButton.setToggleState(showMidSideLvls, juce::dontSendNotification);
     historySviewButton.setToggleState(historySolo, juce::dontSendNotification);
 
+    const auto horizontalStart = read(PluginProcessor::lvlsHistoryHorizontalStartParameterId, 0.0f);
+    const auto horizontalEnd = read(PluginProcessor::lvlsHistoryHorizontalEndParameterId, 1.0f);
+    const auto verticalStart = read(PluginProcessor::lvlsHistoryVerticalStartParameterId, 0.0f);
+    const auto verticalEnd = read(PluginProcessor::lvlsHistoryVerticalEndParameterId, 1.0f);
     if (! historyHorizontalZoom.isDragging())
-        historyHorizontalZoom.setRange(
-            read(PluginProcessor::lvlsHistoryHorizontalStartParameterId, 0.0f),
-            read(PluginProcessor::lvlsHistoryHorizontalEndParameterId, 1.0f));
+    {
+        historyHorizontalZoom.setRange(horizontalStart, horizontalEnd);
+        if (horizontalStart > horizontalEnd)
+        {
+            setPersistentParameter(PluginProcessor::lvlsHistoryHorizontalStartParameterId,
+                                   historyHorizontalZoom.getRangeStart());
+            setPersistentParameter(PluginProcessor::lvlsHistoryHorizontalEndParameterId,
+                                   historyHorizontalZoom.getRangeEnd());
+        }
+    }
     if (! historyVerticalZoom.isDragging())
-        historyVerticalZoom.setRange(
-            read(PluginProcessor::lvlsHistoryVerticalStartParameterId, 0.0f),
-            read(PluginProcessor::lvlsHistoryVerticalEndParameterId, 1.0f));
+    {
+        historyVerticalZoom.setRange(verticalStart, verticalEnd);
+        if (verticalStart > verticalEnd)
+        {
+            setPersistentParameter(PluginProcessor::lvlsHistoryVerticalStartParameterId,
+                                   historyVerticalZoom.getRangeStart());
+            setPersistentParameter(PluginProcessor::lvlsHistoryVerticalEndParameterId,
+                                   historyVerticalZoom.getRangeEnd());
+        }
+    }
 
     if (layoutChanged && isShowing())
         resized();
@@ -1023,7 +1225,9 @@ void LvlsView::refreshPersistentViewState()
         repaint();
 }
 
-juce::Rectangle<float> LvlsView::getPlotBounds() const noexcept
+bool LvlsView::isHistoryCleanView() const noexcept
 {
-    return getLocalBounds().toFloat();
+    const auto visible = getVisibleParts();
+    return processor.isCleanView()
+        && (historySolo || (visible[2] && ! visible[0] && ! visible[1]));
 }

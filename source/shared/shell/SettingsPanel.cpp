@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <utility>
+#include <tuple>
 
 namespace
 {
@@ -58,8 +59,22 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     configureHeading(generalHeadingLabel, "SPEC FREQ MAIN");
     configureHeading(controlsVisibilityHeadingLabel, "VIEW");
     configureHeading(scopMainHeadingLabel, "SCOP MAIN");
+    configureHeading(lvlsPeakHeadingLabel, "LVLS - PEAK/RMS");
+    configureHeading(lvlsLoudnessHeadingLabel, "LVLS - LOUDNESS");
+    configureHeading(lvlsHistoryHeadingLabel, "LVLS - HISTORY");
 
-    for (auto* component : std::array<juce::Component*, 81> {
+    for (auto* button : std::array<ControlButton*, 6> {
+             &specSettings.cursorButton, &specSettings.cursorNotesButton,
+             &specSettings.cursorVerticalButton, &corrSettings.cursorButton,
+             &corrSettings.cursorNotesButton, &corrSettings.cursorVerticalButton })
+        button->setCondenseTextToFit(true);
+    for (auto* button : std::array<ControlButton*, 6> {
+             &specSettings.clearOnPlayButton, &specSettings.resetClickButton,
+             &corrSettings.clearOnPlayButton, &corrSettings.resetClickButton,
+             &lvlsSettings.clearOnPlayButton, &lvlsSettings.resetClickButton })
+        button->setCondenseTextToFit(true);
+
+    for (auto* component : std::array<juce::Component*, 89> {
              &scopSettings.addCrossoverButton, &scopSettings.removeCrossoverButton, &scopSettings.equalHeightButton,
              &scopSettings.styleControl, &scopSettings.opacityControl,
              &scopSettings.horizontalZoomButton, &scopSettings.verticalZoomButton,
@@ -79,9 +94,10 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
              &specSettings.antiAliasButton, &specSettings.highQualityRenderingButton, &specSettings.mapLeftToRightButton,
              &specSettings.slopeControl,
              &specSettings.rangeLowControl, &specSettings.rangeHighControl,
-             &specSettings.clearOnPlayButton, &specSettings.horizontalReadoutsButton,
+             &specSettings.clearOnPlayButton, &specSettings.resetClickButton,
+             &specSettings.horizontalReadoutsButton,
              &specSettings.verticalReadoutsButton, &specSettings.cursorButton,
-             &specSettings.cursorNotesButton,
+             &specSettings.cursorNotesButton, &specSettings.cursorVerticalButton,
              &specSettings.monitorControlsButton, &specSettings.horizontalZoomButton,
              &specSettings.verticalZoomButton,
              &corrSettings.fftSizeControl, &corrSettings.fftOverlapControl, &corrSettings.averageTimeControl,
@@ -89,18 +105,21 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
              &corrSettings.firstGraphTypeControl, &corrSettings.firstGraphColourControl,
              &corrSettings.secondGraphTypeControl, &corrSettings.secondGraphColourControl,
              &corrSettings.graphOpacityControl,
-             &corrSettings.filledDisplayButton, &corrSettings.secondGraphButton, &corrSettings.clearOnPlayButton,
+             &corrSettings.filledDisplayButton, &corrSettings.secondGraphButton,
+             &corrSettings.clearOnPlayButton, &corrSettings.resetClickButton,
              &corrSettings.horizontalReadoutsButton, &corrSettings.verticalReadoutsButton,
-             &corrSettings.cursorButton, &corrSettings.horizontalZoomButton,
+             &corrSettings.cursorButton, &corrSettings.cursorNotesButton, &corrSettings.cursorVerticalButton, &corrSettings.horizontalZoomButton,
              &corrSettings.verticalZoomButton, &lvlsSettings.widthControl,
              &lvlsSettings.peakRangeHighControl, &lvlsSettings.peakRangeLowControl,
              &lvlsSettings.rmsWindowControl, &lvlsSettings.peakHoldControl,
              &lvlsSettings.loudnessRangeHighControl, &lvlsSettings.loudnessRangeLowControl,
-             &lvlsSettings.clearOnPlayButton, &lvlsSettings.centerSectionsButton,
+             &lvlsSettings.clearOnPlayButton, &lvlsSettings.resetClickButton,
+             &lvlsSettings.centerSectionsButton,
              &lvlsSettings.peakRmsVisibleButton, &lvlsSettings.loudnessVisibleButton,
              &lvlsSettings.historyVisibleButton, &lvlsSettings.historyMomentaryButton,
              &lvlsSettings.historyShortTermButton, &lvlsSettings.historyIntegratedButton,
-             &lvlsSettings.historyHorizontalZoomButton, &lvlsSettings.historyVerticalZoomButton })
+             &lvlsSettings.historyHorizontalZoomButton, &lvlsSettings.historyVerticalZoomButton,
+             &lvlsSettings.historyHorizontalReadoutsButton, &lvlsSettings.historyVerticalReadoutsButton })
         settingsContent.addAndMakeVisible(*component);
 
     addAndMakeVisible(focusedParameterControl);
@@ -140,108 +159,145 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
         button->setClickingTogglesState(true);
         button->onClick = displaySettingChanged;
     }
-    scopSettings.verticalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    scopSettings.verticalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopVerticalZoomControlsParameterId,
         scopSettings.verticalZoomButton);
-    scopSettings.verticalReadoutsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    scopSettings.verticalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopVerticalReadoutsParameterId,
         scopSettings.verticalReadoutsButton);
-   #if ! ANA_VARIANT_RTM
     scopSettings.horizontalZoomButton.setClickingTogglesState(true);
     scopSettings.horizontalZoomButton.onClick = displaySettingChanged;
-    scopSettings.horizontalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    scopSettings.horizontalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopHorizontalZoomControlsParameterId,
         scopSettings.horizontalZoomButton);
     scopSettings.horizontalReadoutsButton.setClickingTogglesState(true);
     scopSettings.horizontalReadoutsButton.onClick = displaySettingChanged;
-    scopSettings.horizontalReadoutsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    scopSettings.horizontalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopHorizontalReadoutsParameterId,
         scopSettings.horizontalReadoutsButton);
-   #endif
-    scopSettings.monitorControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    scopSettings.monitorControlsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopMonitorControlsParameterId, scopSettings.monitorControlsButton);
-    scopSettings.toolsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    scopSettings.toolsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopToolsParameterId, scopSettings.toolsButton);
-   #if ANA_VARIANT_RTM
     scopSettings.leftToRightButton.setClickingTogglesState(true);
     scopSettings.leftToRightButton.onClick = displaySettingChanged;
-    scopSettings.leftToRightAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    scopSettings.leftToRightAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::scopLeftToRightParameterId,
         scopSettings.leftToRightButton);
     scopSettings.leftToRightButton.setTooltip(
-        "Draw RTM SCOP from left to right; clear and restart at the left edge after reaching the right edge");
-   #endif
-    for (auto* button : std::array<ControlButton*, 13> {
+        "Draw REALTIME SCOP from left to right; clear and restart at the left edge after reaching the right edge");
+    for (auto* button : std::array<ControlButton*, 15> {
              &specSettings.filledDisplayButton, &specSettings.secondGraphButton,
              &specSettings.antiAliasButton, &specSettings.highQualityRenderingButton,
              &specSettings.mapLeftToRightButton, &specSettings.clearOnPlayButton,
+             &specSettings.resetClickButton,
              &specSettings.horizontalReadoutsButton, &specSettings.verticalReadoutsButton,
              &specSettings.cursorButton, &specSettings.cursorNotesButton,
+             &specSettings.cursorVerticalButton,
              &specSettings.monitorControlsButton,
              &specSettings.horizontalZoomButton, &specSettings.verticalZoomButton })
     {
         button->setClickingTogglesState(true);
         button->onClick = displaySettingChanged;
     }
-    specSettings.filledDisplayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.filledDisplayAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specFilledDisplayParameterId, specSettings.filledDisplayButton);
-    specSettings.secondGraphAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.secondGraphAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specSecondGraphParameterId, specSettings.secondGraphButton);
-    specSettings.antiAliasAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.antiAliasAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specAntiAliasParameterId, specSettings.antiAliasButton);
-    specSettings.highQualityRenderingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.highQualityRenderingAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specHighQualityRenderingParameterId, specSettings.highQualityRenderingButton);
     specSettings.highQualityRenderingButton.setTooltip(
         "Accurate max-bilinear interpolation of a spectrogram (recommended)");
-    specSettings.mapLeftToRightAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.mapLeftToRightAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specMapLeftToRightParameterId, specSettings.mapLeftToRightButton);
     specSettings.mapLeftToRightButton.setTooltip(
-        "Draw RTM SPEC MAP from left to right; clear and restart at the left edge after reaching the right edge");
-    specSettings.horizontalReadoutsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        "Draw REALTIME SPEC MAP from left to right; clear and restart at the left edge after reaching the right edge");
+    specSettings.horizontalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specHorizontalReadoutsParameterId, specSettings.horizontalReadoutsButton);
-    specSettings.verticalReadoutsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.verticalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specVerticalReadoutsParameterId, specSettings.verticalReadoutsButton);
-    specSettings.clearOnPlayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.clearOnPlayAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specClearOnPlayParameterId, specSettings.clearOnPlayButton);
-    specSettings.cursorAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.resetClickAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::specResetClickParameterId, specSettings.resetClickButton);
+    specSettings.cursorAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specCursorReadoutParameterId, specSettings.cursorButton);
-    specSettings.cursorNotesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.cursorNotesAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specCursorNotesParameterId, specSettings.cursorNotesButton);
-    specSettings.monitorControlsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.cursorVerticalAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::specCursorVerticalReadoutParameterId,
+        specSettings.cursorVerticalButton);
+    specSettings.monitorControlsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specMonitorControlsParameterId, specSettings.monitorControlsButton);
-    specSettings.horizontalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.horizontalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specHorizontalZoomParameterId, specSettings.horizontalZoomButton);
-    specSettings.verticalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    specSettings.verticalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::specVerticalZoomParameterId, specSettings.verticalZoomButton);
-    for (auto* button : std::array<ControlButton*, 8> {
+    for (auto* button : std::array<ControlButton*, 11> {
         &corrSettings.filledDisplayButton, &corrSettings.clearOnPlayButton,
+        &corrSettings.resetClickButton,
         &corrSettings.horizontalReadoutsButton, &corrSettings.verticalReadoutsButton,
-        &corrSettings.cursorButton, &corrSettings.horizontalZoomButton, &corrSettings.verticalZoomButton,
+        &corrSettings.cursorButton, &corrSettings.cursorNotesButton, &corrSettings.cursorVerticalButton,
+        &corrSettings.horizontalZoomButton, &corrSettings.verticalZoomButton,
         &corrSettings.secondGraphButton })
     {
         button->setClickingTogglesState(true);
         button->onClick = displaySettingChanged;
     }
-    corrSettings.filledDisplayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.filledDisplayAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrFilledDisplayParameterId, corrSettings.filledDisplayButton);
-    corrSettings.secondGraphAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.secondGraphAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrSecondGraphParameterId, corrSettings.secondGraphButton);
-    corrSettings.clearOnPlayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.clearOnPlayAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrClearOnPlayParameterId, corrSettings.clearOnPlayButton);
-    corrSettings.horizontalReadoutsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.resetClickAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::corrResetClickParameterId, corrSettings.resetClickButton);
+    corrSettings.horizontalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrHorizontalReadoutsParameterId, corrSettings.horizontalReadoutsButton);
-    corrSettings.verticalReadoutsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.verticalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrVerticalReadoutsParameterId, corrSettings.verticalReadoutsButton);
-    corrSettings.cursorAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.cursorAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrCursorReadoutParameterId, corrSettings.cursorButton);
-    corrSettings.horizontalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.cursorNotesAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::corrCursorNotesParameterId, corrSettings.cursorNotesButton);
+    corrSettings.cursorVerticalAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::corrCursorVerticalReadoutParameterId,
+        corrSettings.cursorVerticalButton);
+    corrSettings.horizontalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrHorizontalZoomParameterId, corrSettings.horizontalZoomButton);
-    corrSettings.verticalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    corrSettings.verticalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::corrVerticalZoomParameterId, corrSettings.verticalZoomButton);
+    for (auto* component : std::array<juce::Component*, 7> {
+             &lvlsSettings.loudnessWidthControl, &lvlsSettings.historyRangeHighControl,
+             &lvlsSettings.historyRangeLowControl, &lvlsSettings.loudnessClearOnPlayButton,
+             &lvlsSettings.loudnessResetClickButton, &lvlsSettings.historyClearOnPlayButton,
+             &lvlsSettings.historyResetClickButton })
+        settingsContent.addAndMakeVisible(*component);
+    for (const auto& [button, id, attachment] : std::array {
+             std::tuple { &lvlsSettings.loudnessClearOnPlayButton, PluginProcessor::lvlsLoudnessClearOnPlayParameterId,
+                          &lvlsSettings.loudnessClearOnPlayAttachment },
+             std::tuple { &lvlsSettings.loudnessResetClickButton, PluginProcessor::lvlsLoudnessResetClickParameterId,
+                          &lvlsSettings.loudnessResetClickAttachment },
+             std::tuple { &lvlsSettings.historyClearOnPlayButton, PluginProcessor::lvlsHistoryClearOnPlayParameterId,
+                          &lvlsSettings.historyClearOnPlayAttachment },
+             std::tuple { &lvlsSettings.historyResetClickButton, PluginProcessor::lvlsHistoryResetClickParameterId,
+                          &lvlsSettings.historyResetClickAttachment } })
+    {
+        button->setClickingTogglesState(true);
+        button->setCondenseTextToFit(true);
+        button->onClick = displaySettingChanged;
+        *attachment = std::make_unique<SubmoduleButtonAttachment>(processor.getParameters(), id, *button);
+    }
     lvlsSettings.clearOnPlayButton.setClickingTogglesState(true);
     lvlsSettings.clearOnPlayButton.onClick = displaySettingChanged;
-    lvlsSettings.clearOnPlayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.clearOnPlayAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsClearOnPlayParameterId, lvlsSettings.clearOnPlayButton);
+    lvlsSettings.resetClickButton.setClickingTogglesState(true);
+    lvlsSettings.resetClickButton.onClick = displaySettingChanged;
+    lvlsSettings.resetClickAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::lvlsResetClickParameterId, lvlsSettings.resetClickButton);
     for (const auto& [button, parameterId] : std::array {
              std::pair { &lvlsSettings.peakRmsVisibleButton, PluginProcessor::lvlsPeakRmsVisibleParameterId },
              std::pair { &lvlsSettings.loudnessVisibleButton, PluginProcessor::lvlsLoudnessVisibleParameterId },
@@ -255,22 +311,21 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
                 || lvlsSettings.historyVisibleButton.getToggleState();
             if (! anyVisible)
             {
-                if (auto* parameter = processor.getParameters().getParameter(parameterId))
+                if (auto* parameter = processor.getActiveParameter(parameterId))
                     parameter->setValueNotifyingHost(1.0f);
                 button->setToggleState(true, juce::dontSendNotification);
             }
-           #if ANA_VARIANT_RTM
-            processor.clearLvlsProcessor();
-           #endif
+            processor.clearLvlsProcessor(parameterId == PluginProcessor::lvlsPeakRmsVisibleParameterId ? 0
+                                         : parameterId == PluginProcessor::lvlsLoudnessVisibleParameterId ? 1 : 2);
             displaySettingChanged();
         };
     }
-    lvlsSettings.peakRmsVisibleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.peakRmsVisibleAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsPeakRmsVisibleParameterId, lvlsSettings.peakRmsVisibleButton);
-    lvlsSettings.loudnessVisibleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.loudnessVisibleAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsLoudnessVisibleParameterId,
         lvlsSettings.loudnessVisibleButton);
-    lvlsSettings.historyVisibleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.historyVisibleAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsHistoryVisibleParameterId,
         lvlsSettings.historyVisibleButton);
     for (const auto& [button, parameterId] : std::array {
@@ -286,34 +341,41 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
                 || lvlsSettings.historyIntegratedButton.getToggleState();
             if (! anyVisible)
             {
-                if (auto* parameter = processor.getParameters().getParameter(parameterId))
+                if (auto* parameter = processor.getActiveParameter(parameterId))
                     parameter->setValueNotifyingHost(1.0f);
                 button->setToggleState(true, juce::dontSendNotification);
             }
             displaySettingChanged();
         };
     }
-    lvlsSettings.historyMomentaryAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.historyMomentaryAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsHistoryMomentaryVisibleParameterId,
         lvlsSettings.historyMomentaryButton);
-    lvlsSettings.historyShortTermAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.historyShortTermAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsHistoryShortTermVisibleParameterId,
         lvlsSettings.historyShortTermButton);
-    lvlsSettings.historyIntegratedAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.historyIntegratedAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsHistoryIntegratedVisibleParameterId,
         lvlsSettings.historyIntegratedButton);
-    for (auto* button : std::array<ControlButton*, 2> {
-             &lvlsSettings.historyHorizontalZoomButton, &lvlsSettings.historyVerticalZoomButton })
+    for (auto* button : std::array<ControlButton*, 4> {
+             &lvlsSettings.historyHorizontalZoomButton, &lvlsSettings.historyVerticalZoomButton,
+             &lvlsSettings.historyHorizontalReadoutsButton, &lvlsSettings.historyVerticalReadoutsButton })
     {
         button->setClickingTogglesState(true);
         button->onClick = displaySettingChanged;
     }
-    lvlsSettings.historyHorizontalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.historyHorizontalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsHistoryHorizontalZoomParameterId,
         lvlsSettings.historyHorizontalZoomButton);
-    lvlsSettings.historyVerticalZoomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    lvlsSettings.historyVerticalZoomAttachment = std::make_unique<SubmoduleButtonAttachment>(
         processor.getParameters(), PluginProcessor::lvlsHistoryVerticalZoomParameterId,
         lvlsSettings.historyVerticalZoomButton);
+    lvlsSettings.historyHorizontalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::lvlsHistoryHorizontalReadoutsParameterId,
+        lvlsSettings.historyHorizontalReadoutsButton);
+    lvlsSettings.historyVerticalReadoutsAttachment = std::make_unique<SubmoduleButtonAttachment>(
+        processor.getParameters(), PluginProcessor::lvlsHistoryVerticalReadoutsParameterId,
+        lvlsSettings.historyVerticalReadoutsButton);
     const auto requestChoice = [this] (ParameterControl& control)
     {
         if (onChoiceRequested)
@@ -344,7 +406,7 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
         if (onResetRequested)
             onResetRequested(control);
     };
-    for (auto* control : std::array<ParameterControl*, 40> {
+    for (auto* control : std::array<ParameterControl*, 43> {
              &scopSettings.styleControl, &scopSettings.opacityControl, &scopSettings.timeControl,
              &scopSettings.timeNoteControl, &scopSettings.timeBaseControl,
              &specSettings.fftSizeControl, &specSettings.fftOverlapControl, &specSettings.mapTimeOverlapControl,
@@ -364,7 +426,9 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
              &corrSettings.graphOpacityControl,
              &lvlsSettings.widthControl, &lvlsSettings.peakRangeHighControl, &lvlsSettings.peakRangeLowControl,
              &lvlsSettings.rmsWindowControl, &lvlsSettings.peakHoldControl,
-             &lvlsSettings.loudnessRangeHighControl, &lvlsSettings.loudnessRangeLowControl })
+             &lvlsSettings.loudnessRangeHighControl, &lvlsSettings.loudnessRangeLowControl,
+             &lvlsSettings.loudnessWidthControl, &lvlsSettings.historyRangeHighControl,
+             &lvlsSettings.historyRangeLowControl })
     {
         control->onResetRequested = requestReset;
         control->onTextEditingChanged = [this] (const bool isEditing)
@@ -406,10 +470,18 @@ SettingsPanel::SettingsPanel(PluginProcessor& processorRef)
     lvlsSettings.peakHoldControl.onValueChanged = displaySettingChanged;
     lvlsSettings.loudnessRangeHighControl.onValueChanged = displaySettingChanged;
     lvlsSettings.loudnessRangeLowControl.onValueChanged = displaySettingChanged;
+    for (auto* control : { &lvlsSettings.loudnessWidthControl,
+                           &lvlsSettings.historyRangeHighControl,
+                           &lvlsSettings.historyRangeLowControl })
+    {
+        control->onFocusRequested = focusControl;
+        control->onValueChanged = displaySettingChanged;
+    }
     specSettings.smoothingControl.onValueChanged = displaySettingChanged;
     specSettings.frequencyScaleControl.onValueChanged = displaySettingChanged;
     specSettings.mapColourMapControl.onValueChanged = displaySettingChanged;
     specSettings.firstGraphColourControl.onValueChanged = displaySettingChanged;
+    specSettings.firstGraphTypeControl.onValueChanged = displaySettingChanged;
     specSettings.secondGraphColourControl.onValueChanged = displaySettingChanged;
     specSettings.graphOpacityControl.onValueChanged = displaySettingChanged;
     specSettings.slopeControl.onValueChanged = displaySettingChanged;
@@ -508,14 +580,14 @@ SettingsPanel::~SettingsPanel()
     settingsViewport.setLookAndFeel(nullptr);
 }
 
-void SettingsPanel::setAnalyzerContext(const ana::AnalyzerPage page,
+bool SettingsPanel::setAnalyzerContext(const ana::AnalyzerPage page,
                                        const juce::String& viewMode)
 {
     const auto normalisedViewMode = viewMode.trim().toUpperCase();
     const auto pageChanged = analyzerPage != page;
     const auto viewModeChanged = analyzerViewMode != normalisedViewMode;
     if (! pageChanged && ! viewModeChanged)
-        return;
+        return false;
 
     analyzerPage = page;
     analyzerViewMode = normalisedViewMode;
@@ -524,6 +596,7 @@ void SettingsPanel::setAnalyzerContext(const ana::AnalyzerPage page,
     clearFocusedParameterControl();
     refreshExternalState();
     resized();
+    return true;
 }
 
 void SettingsPanel::updateGeneralHeading()
@@ -550,7 +623,7 @@ void SettingsPanel::updateGeneralHeading()
 
 void SettingsPanel::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(ana::ui::black);
+    graphics.fillAll(ana::ui::background);
 }
 
 void SettingsPanel::resized()
@@ -561,26 +634,18 @@ void SettingsPanel::resized()
     const auto scopPage = analyzerPage == ana::AnalyzerPage::scop;
     const auto specPage = analyzerPage == ana::AnalyzerPage::spec;
     const auto specMapPage = specPage && analyzerViewMode == "MAP";
-    const auto specHorizontalControls = ! specMapPage || ! ANA_VARIANT_RTM;
-   #if ANA_VARIANT_RTM
-    const auto rtmSpecMapPage = specMapPage;
-   #else
-    constexpr auto rtmSpecMapPage = false;
-   #endif
+    const auto specHorizontalControls = ! specMapPage || processor.isOfflineMode();
+    const auto realtimeSpecMapPage = specMapPage && ! processor.isOfflineMode();
     const auto lvlsPage = analyzerPage == ana::AnalyzerPage::lvls;
-   #if ANA_VARIANT_RTM
-    constexpr auto scopRowCount = 19;
-   #else
-    constexpr auto scopRowCount = 18;
-   #endif
+    const auto scopRowCount = processor.isOfflineMode() ? 18 : 19;
     const auto pageContentHeight = scopPage
         ? scopRowCount * rowHeight + (scopRowCount - 1) * fixedGap.pixels()
         : specPage ? (specMapPage
-            ? (rtmSpecMapPage
+            ? (realtimeSpecMapPage
                 ? 18 * rowHeight + 17 * fixedGap.pixels()
                 : 17 * rowHeight + 16 * fixedGap.pixels())
             : 21 * rowHeight + 20 * fixedGap.pixels())
-        : lvlsPage ? 16 * rowHeight + 15 * fixedGap.pixels() : 18 * rowHeight + 17 * fixedGap.pixels();
+        : lvlsPage ? 24 * rowHeight + 23 * fixedGap.pixels() : 18 * rowHeight + 17 * fixedGap.pixels();
     const auto contentHeight = pageContentHeight;
     auto innerBounds = getLocalBounds().reduced(fixedGap.pixels());
     const auto potentiometerBounds = innerBounds.removeFromBottom(rowHeight);
@@ -606,6 +671,17 @@ void SettingsPanel::resized()
         fixedGap.removeFromLeft(row);
         right.setBounds(row);
     };
+    const auto placeButtonTriple = [&] (ControlButton& first, ControlButton& second,
+                                       ControlButton& third)
+    {
+        auto row = area.removeFromTop(rowHeight);
+        const auto firstWidth = std::max(0, (row.getWidth() - fixedGap.pixels() * 2) / 3);
+        first.setBounds(row.removeFromLeft(firstWidth));
+        fixedGap.removeFromLeft(row);
+        second.setBounds(row.removeFromLeft(firstWidth));
+        fixedGap.removeFromLeft(row);
+        third.setBounds(row);
+    };
 
 
     if (! scopPage)
@@ -616,43 +692,50 @@ void SettingsPanel::resized()
 
     if (lvlsPage)
     {
-        lvlsSettings.rmsWindowControl.setBounds(area.removeFromTop(rowHeight));
+        const auto placeControl = [&] (juce::Component& component)
+        {
+            component.setBounds(area.removeFromTop(rowHeight));
+            fixedGap.removeFromTop(area);
+        };
+        const auto placeReset = [&] (ControlButton& clear, ControlButton& reset)
+        {
+           if (! processor.isOfflineMode())
+           {
+            placeButtonPair(clear, reset);
+           }
+           else
+           {
+            placeButton(clear);
+            reset.setBounds({});
+           }
+            fixedGap.removeFromTop(area);
+        };
+        placeControl(lvlsSettings.centerSectionsButton);
+        placeControl(lvlsPeakHeadingLabel);
+        placeControl(lvlsSettings.peakRmsVisibleButton);
+        placeControl(lvlsSettings.rmsWindowControl);
+        placeControl(lvlsSettings.peakHoldControl);
+        placeControl(lvlsSettings.widthControl);
+        placeControl(lvlsSettings.peakRangeHighControl);
+        placeControl(lvlsSettings.peakRangeLowControl);
+        placeReset(lvlsSettings.clearOnPlayButton, lvlsSettings.resetClickButton);
+        placeControl(lvlsLoudnessHeadingLabel);
+        placeControl(lvlsSettings.loudnessVisibleButton);
+        placeControl(lvlsSettings.loudnessWidthControl);
+        placeControl(lvlsSettings.loudnessRangeHighControl);
+        placeControl(lvlsSettings.loudnessRangeLowControl);
+        placeReset(lvlsSettings.loudnessClearOnPlayButton, lvlsSettings.loudnessResetClickButton);
+        placeControl(lvlsHistoryHeadingLabel);
+        placeControl(lvlsSettings.historyVisibleButton);
+        placeControl(lvlsSettings.historyRangeHighControl);
+        placeControl(lvlsSettings.historyRangeLowControl);
+        placeReset(lvlsSettings.historyClearOnPlayButton, lvlsSettings.historyResetClickButton);
+        placeButtonTriple(lvlsSettings.historyMomentaryButton,
+                          lvlsSettings.historyShortTermButton, lvlsSettings.historyIntegratedButton);
         fixedGap.removeFromTop(area);
-        lvlsSettings.peakHoldControl.setBounds(area.removeFromTop(rowHeight));
+        placeButtonPair(lvlsSettings.historyHorizontalZoomButton, lvlsSettings.historyVerticalZoomButton);
         fixedGap.removeFromTop(area);
-        controlsVisibilityHeadingLabel.setBounds(area.removeFromTop(headingHeight));
-        fixedGap.removeFromTop(area);
-        placeButton(lvlsSettings.clearOnPlayButton);
-        fixedGap.removeFromTop(area);
-        lvlsSettings.widthControl.setBounds(area.removeFromTop(rowHeight));
-        fixedGap.removeFromTop(area);
-        placeButton(lvlsSettings.centerSectionsButton);
-        fixedGap.removeFromTop(area);
-        lvlsSettings.peakRangeHighControl.setBounds(area.removeFromTop(rowHeight));
-        fixedGap.removeFromTop(area);
-        lvlsSettings.peakRangeLowControl.setBounds(area.removeFromTop(rowHeight));
-        fixedGap.removeFromTop(area);
-        lvlsSettings.loudnessRangeHighControl.setBounds(area.removeFromTop(rowHeight));
-        fixedGap.removeFromTop(area);
-        lvlsSettings.loudnessRangeLowControl.setBounds(area.removeFromTop(rowHeight));
-        fixedGap.removeFromTop(area);
-        placeButton(lvlsSettings.peakRmsVisibleButton);
-        fixedGap.removeFromTop(area);
-        placeButton(lvlsSettings.loudnessVisibleButton);
-        fixedGap.removeFromTop(area);
-        placeButton(lvlsSettings.historyVisibleButton);
-        fixedGap.removeFromTop(area);
-        auto historyButtons = area.removeFromTop(rowHeight);
-        const auto historyButtonWidth = std::max(0,
-            (historyButtons.getWidth() - fixedGap.pixels() * 2) / 3);
-        lvlsSettings.historyMomentaryButton.setBounds(historyButtons.removeFromLeft(historyButtonWidth));
-        fixedGap.removeFromLeft(historyButtons);
-        lvlsSettings.historyShortTermButton.setBounds(historyButtons.removeFromLeft(historyButtonWidth));
-        fixedGap.removeFromLeft(historyButtons);
-        lvlsSettings.historyIntegratedButton.setBounds(historyButtons);
-        fixedGap.removeFromTop(area);
-        placeButtonPair(lvlsSettings.historyHorizontalZoomButton,
-                        lvlsSettings.historyVerticalZoomButton);
+        placeButtonPair(lvlsSettings.historyHorizontalReadoutsButton, lvlsSettings.historyVerticalReadoutsButton);
         return;
     }
 
@@ -728,7 +811,7 @@ void SettingsPanel::resized()
             fixedGap.removeFromTop(area);
             placeButton(specSettings.highQualityRenderingButton);
             fixedGap.removeFromTop(area);
-            if (rtmSpecMapPage)
+            if (realtimeSpecMapPage)
             {
                 placeButton(specSettings.mapLeftToRightButton);
                 fixedGap.removeFromTop(area);
@@ -778,7 +861,16 @@ void SettingsPanel::resized()
             specSettings.graphOpacityControl.setBounds({});
         }
 
+       if (! processor.isOfflineMode())
+
+       {
+        placeButtonPair(specSettings.clearOnPlayButton, specSettings.resetClickButton);
+       }
+       else
+       {
         placeButton(specSettings.clearOnPlayButton);
+        specSettings.resetClickButton.setBounds({});
+       }
         fixedGap.removeFromTop(area);
         if (specHorizontalControls)
             placeButtonPair(specSettings.horizontalZoomButton,
@@ -798,13 +890,8 @@ void SettingsPanel::resized()
             placeButton(specSettings.verticalReadoutsButton);
         }
         fixedGap.removeFromTop(area);
-        if (specMapPage)
-        {
-            placeButton(specSettings.cursorButton);
-            specSettings.cursorNotesButton.setBounds({});
-        }
-        else
-            placeButtonPair(specSettings.cursorButton, specSettings.cursorNotesButton);
+        placeButtonTriple(specSettings.cursorButton, specSettings.cursorNotesButton,
+                          specSettings.cursorVerticalButton);
         fixedGap.removeFromTop(area);
         placeButton(specSettings.monitorControlsButton);
 
@@ -848,7 +935,15 @@ void SettingsPanel::resized()
         fixedGap.removeFromTop(area);
         corrSettings.graphOpacityControl.setBounds(area.removeFromTop(rowHeight));
         fixedGap.removeFromTop(area);
+       if (! processor.isOfflineMode())
+       {
+        placeButtonPair(corrSettings.clearOnPlayButton, corrSettings.resetClickButton);
+       }
+       else
+       {
         placeButton(corrSettings.clearOnPlayButton);
+        corrSettings.resetClickButton.setBounds({});
+       }
         fixedGap.removeFromTop(area);
         placeButtonPair(corrSettings.horizontalZoomButton,
                         corrSettings.verticalZoomButton);
@@ -856,7 +951,8 @@ void SettingsPanel::resized()
         placeButtonPair(corrSettings.horizontalReadoutsButton,
                         corrSettings.verticalReadoutsButton);
         fixedGap.removeFromTop(area);
-        placeButton(corrSettings.cursorButton);
+        placeButtonTriple(corrSettings.cursorButton, corrSettings.cursorNotesButton,
+                          corrSettings.cursorVerticalButton);
         return;
     }
 
@@ -893,25 +989,34 @@ void SettingsPanel::resized()
     fixedGap.removeFromTop(area);
     scopSettings.opacityControl.setBounds(area.removeFromTop(rowHeight));
     fixedGap.removeFromTop(area);
-   #if ANA_VARIANT_RTM
+   if (! processor.isOfflineMode())
+   {
     placeButton(scopSettings.leftToRightButton);
     fixedGap.removeFromTop(area);
-   #else
+   }
+   else
+   {
     scopSettings.leftToRightButton.setBounds({});
-   #endif
-   #if ANA_VARIANT_RTM
+   }
+   if (! processor.isOfflineMode())
+   {
     scopSettings.horizontalZoomButton.setBounds({});
     placeButton(scopSettings.verticalZoomButton);
-   #else
+   }
+   else
+   {
     placeButtonPair(scopSettings.horizontalZoomButton, scopSettings.verticalZoomButton);
-   #endif
+   }
     fixedGap.removeFromTop(area);
-   #if ANA_VARIANT_RTM
+   if (! processor.isOfflineMode())
+   {
     scopSettings.horizontalReadoutsButton.setBounds({});
     placeButton(scopSettings.verticalReadoutsButton);
-   #else
+   }
+   else
+   {
     placeButtonPair(scopSettings.horizontalReadoutsButton, scopSettings.verticalReadoutsButton);
-   #endif
+   }
     fixedGap.removeFromTop(area);
     placeButton(scopSettings.monitorControlsButton);
     fixedGap.removeFromTop(area);
@@ -996,34 +1101,49 @@ void SettingsPanel::constrainFrequency(const size_t crossoverIndex)
 
 void SettingsPanel::refreshExternalState()
 {
-   #if ANA_VARIANT_RTM
-    constexpr auto rtmControlsEnabled = true;
-   #else
-    constexpr auto rtmControlsEnabled = false;
-   #endif
+    const auto realtimeControlsEnabled = ! processor.isOfflineMode();
     const auto scopPage = analyzerPage == ana::AnalyzerPage::scop;
     const auto specPage = analyzerPage == ana::AnalyzerPage::spec;
     const auto specMapPage = specPage && analyzerViewMode == "MAP";
-    const auto specHorizontalControls = ! specMapPage || ! ANA_VARIANT_RTM;
+    const auto specHorizontalControls = ! specMapPage || processor.isOfflineMode();
     const auto corrPage = analyzerPage == ana::AnalyzerPage::corr;
     const auto lvlsPage = analyzerPage == ana::AnalyzerPage::lvls;
 
     // ARA exposes only controls used by its offline analysis workflow.
-    scopSettings.timeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    scopSettings.timeNoteControl.setInteractionEnabled(rtmControlsEnabled, true);
-    scopSettings.timeBaseControl.setInteractionEnabled(rtmControlsEnabled, true);
-    specSettings.mapTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    specSettings.mapTimeNoteControl.setInteractionEnabled(rtmControlsEnabled, true);
-    specSettings.mapTimeBaseControl.setInteractionEnabled(rtmControlsEnabled, true);
-    specSettings.averageTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    corrSettings.averageTimeControl.setInteractionEnabled(rtmControlsEnabled, true);
-    lvlsSettings.rmsWindowControl.setInteractionEnabled(rtmControlsEnabled, true);
-    lvlsSettings.peakHoldControl.setInteractionEnabled(rtmControlsEnabled, true);
-    specSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
-    specSettings.secondGraphButton.setEnabled(rtmControlsEnabled);
-    corrSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
-    lvlsSettings.clearOnPlayButton.setEnabled(rtmControlsEnabled);
-    controlsVisibilityHeadingLabel.setVisible(scopPage || specPage || corrPage || lvlsPage);
+    scopSettings.timeControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    scopSettings.timeNoteControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    scopSettings.timeBaseControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    specSettings.mapTimeControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    specSettings.mapTimeNoteControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    specSettings.mapTimeBaseControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    specSettings.averageTimeControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    corrSettings.averageTimeControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    specSettings.firstGraphTypeControl.setInteractionEnabled(true);
+    specSettings.secondGraphTypeControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    specSettings.secondGraphColourControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    corrSettings.firstGraphTypeControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    corrSettings.secondGraphTypeControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    corrSettings.secondGraphColourControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    lvlsSettings.rmsWindowControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    lvlsSettings.peakHoldControl.setInteractionEnabled(realtimeControlsEnabled, true);
+    specSettings.clearOnPlayButton.setEnabled(realtimeControlsEnabled);
+    specSettings.secondGraphButton.setEnabled(realtimeControlsEnabled);
+    corrSettings.clearOnPlayButton.setEnabled(realtimeControlsEnabled);
+    lvlsSettings.clearOnPlayButton.setEnabled(realtimeControlsEnabled);
+    controlsVisibilityHeadingLabel.setVisible(scopPage || specPage || corrPage);
+    lvlsPeakHeadingLabel.setVisible(lvlsPage);
+    lvlsLoudnessHeadingLabel.setVisible(lvlsPage);
+    lvlsHistoryHeadingLabel.setVisible(lvlsPage);
+    for (auto* component : std::array<juce::Component*, 7> {
+             &lvlsSettings.loudnessWidthControl, &lvlsSettings.historyRangeHighControl,
+             &lvlsSettings.historyRangeLowControl, &lvlsSettings.loudnessClearOnPlayButton,
+             &lvlsSettings.loudnessResetClickButton, &lvlsSettings.historyClearOnPlayButton,
+             &lvlsSettings.historyResetClickButton })
+        component->setVisible(lvlsPage);
+    lvlsSettings.loudnessResetClickButton.setVisible(lvlsPage && realtimeControlsEnabled);
+    lvlsSettings.historyResetClickButton.setVisible(lvlsPage && realtimeControlsEnabled);
+    lvlsSettings.loudnessClearOnPlayButton.setEnabled(realtimeControlsEnabled);
+    lvlsSettings.historyClearOnPlayButton.setEnabled(realtimeControlsEnabled);
     for (auto* component : std::array<juce::Component*, 15> {
              &scopSettings.addCrossoverButton, &scopSettings.removeCrossoverButton, &scopSettings.equalHeightButton,
              &scopSettings.styleControl, &scopSettings.opacityControl,
@@ -1033,12 +1153,15 @@ void SettingsPanel::refreshExternalState()
              &scopSettings.timeNoteControl, &scopSettings.timeBaseControl,
              &scopSettings.leftToRightButton })
         component->setVisible(scopPage);
-   #if ! ANA_VARIANT_RTM
+   if (processor.isOfflineMode())
+   {
     scopSettings.leftToRightButton.setVisible(false);
-   #else
+   }
+   else
+   {
     scopSettings.horizontalZoomButton.setVisible(false);
     scopSettings.horizontalReadoutsButton.setVisible(false);
-   #endif
+   }
     for (auto& control : scopSettings.crossoverControls)
         control->setVisible(scopPage);
     scopMainHeadingLabel.setVisible(scopPage);
@@ -1053,12 +1176,14 @@ void SettingsPanel::refreshExternalState()
     specSettings.rangeLowControl.setVisible(specMapPage);
     specSettings.rangeHighControl.setVisible(specMapPage);
     specSettings.highQualityRenderingButton.setVisible(specMapPage);
-    specSettings.mapLeftToRightButton.setVisible(specMapPage && rtmControlsEnabled);
+    specSettings.mapLeftToRightButton.setVisible(specMapPage && realtimeControlsEnabled);
     specSettings.clearOnPlayButton.setVisible(specPage);
+    specSettings.resetClickButton.setVisible(specPage && realtimeControlsEnabled);
     specSettings.horizontalReadoutsButton.setVisible(specPage && specHorizontalControls);
     specSettings.verticalReadoutsButton.setVisible(specPage);
     specSettings.cursorButton.setVisible(specPage);
-    specSettings.cursorNotesButton.setVisible(specPage && ! specMapPage);
+    specSettings.cursorNotesButton.setVisible(specPage);
+    specSettings.cursorVerticalButton.setVisible(specPage);
     specSettings.monitorControlsButton.setVisible(specPage);
     specSettings.horizontalZoomButton.setVisible(specPage && specHorizontalControls);
     specSettings.verticalZoomButton.setVisible(specPage);
@@ -1082,28 +1207,34 @@ void SettingsPanel::refreshExternalState()
     specSettings.graphOpacityControl.setVisible(showFreqOnlySpecSettings);
     specSettings.antiAliasButton.setVisible(showFreqOnlySpecSettings);
 
-    for (auto* component : std::array<juce::Component*, 17> {
+    for (auto* component : std::array<juce::Component*, 20> {
              &corrSettings.fftSizeControl, &corrSettings.fftOverlapControl, &corrSettings.averageTimeControl,
              &corrSettings.smoothingControl, &corrSettings.firstGraphTypeControl,
              &corrSettings.firstGraphColourControl, &corrSettings.secondGraphTypeControl,
              &corrSettings.secondGraphColourControl, &corrSettings.graphOpacityControl,
              &corrSettings.filledDisplayButton, &corrSettings.secondGraphButton,
-             &corrSettings.clearOnPlayButton, &corrSettings.horizontalReadoutsButton,
-             &corrSettings.verticalReadoutsButton, &corrSettings.cursorButton,
+             &corrSettings.clearOnPlayButton, &corrSettings.resetClickButton,
+             &corrSettings.horizontalReadoutsButton,
+             &corrSettings.verticalReadoutsButton, &corrSettings.cursorButton, &corrSettings.cursorNotesButton,
+             &corrSettings.cursorVerticalButton,
              &corrSettings.horizontalZoomButton, &corrSettings.verticalZoomButton })
         component->setVisible(corrPage);
+    corrSettings.resetClickButton.setVisible(corrPage && realtimeControlsEnabled);
     corrSettings.frequencyScaleControl.setVisible(corrPage);
 
-    for (auto* component : std::array<juce::Component*, 16> {
+    for (auto* component : std::array<juce::Component*, 19> {
              &lvlsSettings.widthControl, &lvlsSettings.peakRangeHighControl, &lvlsSettings.peakRangeLowControl,
              &lvlsSettings.rmsWindowControl, &lvlsSettings.peakHoldControl,
              &lvlsSettings.loudnessRangeHighControl, &lvlsSettings.loudnessRangeLowControl,
-             &lvlsSettings.clearOnPlayButton, &lvlsSettings.peakRmsVisibleButton,
+             &lvlsSettings.clearOnPlayButton, &lvlsSettings.resetClickButton,
+             &lvlsSettings.peakRmsVisibleButton,
              &lvlsSettings.loudnessVisibleButton, &lvlsSettings.historyVisibleButton,
              &lvlsSettings.historyMomentaryButton, &lvlsSettings.historyShortTermButton,
              &lvlsSettings.historyIntegratedButton, &lvlsSettings.historyHorizontalZoomButton,
-             &lvlsSettings.historyVerticalZoomButton })
+             &lvlsSettings.historyVerticalZoomButton,
+             &lvlsSettings.historyHorizontalReadoutsButton, &lvlsSettings.historyVerticalReadoutsButton })
         component->setVisible(lvlsPage);
+    lvlsSettings.resetClickButton.setVisible(lvlsPage && realtimeControlsEnabled);
     lvlsSettings.centerSectionsButton.setVisible(lvlsPage);
 
     if (focusedParameterTarget != nullptr
@@ -1191,6 +1322,9 @@ void SettingsPanel::dismissParameterEditors()
     lvlsSettings.peakHoldControl.commitPendingEditor();
     lvlsSettings.loudnessRangeHighControl.commitPendingEditor();
     lvlsSettings.loudnessRangeLowControl.commitPendingEditor();
+    lvlsSettings.loudnessWidthControl.commitPendingEditor();
+    lvlsSettings.historyRangeHighControl.commitPendingEditor();
+    lvlsSettings.historyRangeLowControl.commitPendingEditor();
 
     for (auto& control : scopSettings.crossoverControls)
         control->commitPendingEditor();

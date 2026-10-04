@@ -102,11 +102,12 @@ inline const auto white = juce::Colour(0xffffffff);
 inline const auto light = juce::Colour(0xffbbbbbb);
 inline const auto dark = juce::Colour(0xff444444);
 inline const auto black = juce::Colour(0xff000000);
+inline const auto background = juce::Colour(0xff222222);
 
 inline juce::Colour opacityShade(const float opacity) noexcept
 {
     if (opacity <= 0.0f)
-        return black;
+        return background;
     if (opacity < 0.5f)
         return dark;
     if (opacity < 0.8f)

@@ -1,10 +1,38 @@
 #include "Controls.h"
+#include "SubmoduleButtonAttachment.h"
+#include "Processor.h"
 #include "TablerIcons.h"
 #include "Theme.h"
 
 #include <algorithm>
 #include <cmath>
 #include <utility>
+
+SubmoduleButtonAttachment::SubmoduleButtonAttachment(
+    juce::AudioProcessorValueTreeState& stateIn, const juce::String& id, juce::Button& buttonIn)
+    : state(stateIn), sourceId(id), button(buttonIn)
+{
+    refreshBinding();
+    button.addMouseListener(this, false);
+    startTimerHz(30);
+}
+
+SubmoduleButtonAttachment::~SubmoduleButtonAttachment()
+{
+    stopTimer();
+    button.removeMouseListener(this);
+}
+
+void SubmoduleButtonAttachment::refreshBinding()
+{
+    auto& processor = static_cast<PluginProcessor&>(state.processor);
+    const auto id = juce::String(processor.resolveParameterId(sourceId.toRawUTF8()));
+    if (boundId == id)
+        return;
+    attachment.reset();
+    boundId = id;
+    attachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, id, button);
+}
 
 void LongPressGesture::begin(const bool shouldArmLongPress)
 {
@@ -144,15 +172,19 @@ void ControlButton::paintButton(juce::Graphics& graphics,
     const auto bounds = getLocalBounds();
     const auto hovered = isEnabled()
         && (shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown);
-    const auto fill = hovered ? ana::ui::light : ana::ui::dark;
+    const auto active = isEnabled() && getToggleState();
+    const auto highlighted = hovered || (fillWhenSelected && getToggleState());
+    const auto fill = highlighted ? ana::ui::light : ana::ui::dark;
 
     graphics.setColour(fill);
     graphics.fillRect(bounds);
-    const auto active = isEnabled() && getToggleState();
-    graphics.setColour(active ? ana::ui::white : ana::ui::light);
-    graphics.drawRect(bounds, active ? ana::ui::activeBorderWidth : 1);
-    const auto foreground = ! isEnabled() ? ana::ui::light
-        : hovered ? juce::Colours::black : ana::ui::white;
+    if (drawBorder)
+    {
+        graphics.setColour(active ? ana::ui::white : ana::ui::light);
+        graphics.drawRect(bounds, active ? ana::ui::activeBorderWidth : 1);
+    }
+    const auto foreground = highlighted ? ana::ui::black
+        : ! isEnabled() ? ana::ui::light : ana::ui::white;
     graphics.setColour(foreground);
     if (symbolImage.isValid())
     {
@@ -168,6 +200,15 @@ void ControlButton::paintButton(juce::Graphics& graphics,
         auto font = ana::ui::makeFont();
         if (iconButton)
             font.setHeight(ana::ui::iconFontSize);
+        if (condenseTextToFit)
+        {
+            const auto availableWidth = std::max(1, bounds.getWidth() - 2 * ana::ui::gap.pixels());
+            juce::GlyphArrangement glyphs;
+            glyphs.addLineOfText(font, getButtonText(), 0.0f, 0.0f);
+            const auto textWidth = std::max(1.0f,
+                glyphs.getBoundingBox(0, glyphs.getNumGlyphs(), true).getWidth());
+            font.setHorizontalScale(std::min(1.0f, static_cast<float>(availableWidth) / textWidth));
+        }
         graphics.setFont(font);
         graphics.drawText(getButtonText(), getLocalBounds().reduced(ana::ui::gap.pixels(), 1),
                           juce::Justification::centred, true);
@@ -310,6 +351,27 @@ FocusedPotentiometer::~FocusedPotentiometer()
     setLookAndFeel(nullptr);
 }
 
+void ClickArmedSlider::mouseDown(const juce::MouseEvent& event)
+{
+    wheelArmed = event.mods.isLeftButtonDown();
+    juce::Slider::mouseDown(event);
+}
+
+void ClickArmedSlider::mouseExit(const juce::MouseEvent& event)
+{
+    wheelArmed = false;
+    juce::Slider::mouseExit(event);
+}
+
+void ClickArmedSlider::mouseWheelMove(const juce::MouseEvent& event,
+                                      const juce::MouseWheelDetails& wheel)
+{
+    if (wheelArmed)
+        juce::Slider::mouseWheelMove(event, wheel);
+    else
+        juce::Component::mouseWheelMove(event, wheel);
+}
+
 ChoicePopup::ChoicePopup(juce::Rectangle<int> anchorBoundsIn,
                                  juce::StringArray choicesIn,
                                  std::vector<bool> enabledChoices,
@@ -330,12 +392,14 @@ ChoicePopup::ChoicePopup(juce::Rectangle<int> anchorBoundsIn,
     for (int index = 0; index < choices.size(); ++index)
     {
         auto button = std::make_unique<ControlButton>(choices[index]);
+        button->setFillWhenSelected(true);
+        button->setDrawBorder(false);
         const auto enabled = enabledChoices.empty()
             || (static_cast<size_t>(index) < enabledChoices.size()
                 && enabledChoices[static_cast<size_t>(index)]);
-        button->setEnabled(enabled);
-        button->setToggleState(enabled && index == selectedIndex,
+        button->setToggleState(index == selectedIndex,
                                juce::dontSendNotification);
+        button->setEnabled(enabled);
         button->onClick = [this, index] { choose(index); };
         addAndMakeVisible(*button);
         choiceButtons.push_back(std::move(button));
@@ -344,8 +408,16 @@ ChoicePopup::ChoicePopup(juce::Rectangle<int> anchorBoundsIn,
 
 void ChoicePopup::paintOverChildren(juce::Graphics& graphics)
 {
+    constexpr auto popupBorderWidth = ana::ui::activeBorderWidth;
     graphics.setColour(ana::ui::white);
-    graphics.drawRect(panelBounds, 2);
+    graphics.drawRect(panelBounds, popupBorderWidth);
+    for (size_t index = 1; index < choiceButtons.size(); ++index)
+    {
+        const auto row = choiceButtons[index]->getBounds();
+        if (! row.isEmpty())
+            graphics.fillRect(panelBounds.getX(), row.getY() - popupBorderWidth / 2,
+                              panelBounds.getWidth(), popupBorderWidth);
+    }
 }
 
 void ChoicePopup::resized()
@@ -421,24 +493,26 @@ void ChoicePopup::close()
 void RangeSlider::paint(juce::Graphics& graphics)
 {
     const auto frameBounds = getLocalBounds();
-    const auto bounds = frameBounds.toFloat();
+    const auto bounds = frameBounds.reduced(1);
+    if (bounds.isEmpty())
+        return;
 
     graphics.setColour(ana::ui::dark);
     graphics.fillRect(bounds);
     graphics.setColour(ana::ui::light);
 
-    constexpr float handleThickness = 8.0f;
+    constexpr int handleThickness = 8;
 
     if (orientation == Orientation::horizontal)
     {
-        const auto startX = juce::jmap(rangeStart, bounds.getX(), bounds.getRight());
-        const auto endX = juce::jmap(rangeEnd, bounds.getX(), bounds.getRight());
+        const auto startX = bounds.getX() + juce::roundToInt(rangeStart * static_cast<float>(bounds.getWidth()));
+        const auto endX = bounds.getX() + juce::roundToInt(rangeEnd * static_cast<float>(bounds.getWidth()));
         graphics.fillRect(bounds.withLeft(startX).withRight(endX));
 
-        const auto handleX = [bounds] (const float centreX)
+        const auto handleX = [bounds] (const int centreX)
         {
             return juce::jlimit(bounds.getX(), bounds.getRight() - handleThickness,
-                                centreX - handleThickness * 0.5f);
+                                centreX - handleThickness / 2);
         };
         graphics.setColour(ana::ui::white);
         graphics.fillRect(handleX(startX), bounds.getY(), handleThickness, bounds.getHeight());
@@ -446,14 +520,14 @@ void RangeSlider::paint(juce::Graphics& graphics)
     }
     else
     {
-        const auto startY = juce::jmap(rangeStart, bounds.getY(), bounds.getBottom());
-        const auto endY = juce::jmap(rangeEnd, bounds.getY(), bounds.getBottom());
+        const auto startY = bounds.getY() + juce::roundToInt(rangeStart * static_cast<float>(bounds.getHeight()));
+        const auto endY = bounds.getY() + juce::roundToInt(rangeEnd * static_cast<float>(bounds.getHeight()));
         graphics.fillRect(bounds.withTop(startY).withBottom(endY));
 
-        const auto handleY = [bounds] (const float centreY)
+        const auto handleY = [bounds] (const int centreY)
         {
             return juce::jlimit(bounds.getY(), bounds.getBottom() - handleThickness,
-                                centreY - handleThickness * 0.5f);
+                                centreY - handleThickness / 2);
         };
         graphics.setColour(ana::ui::white);
         graphics.fillRect(bounds.getX(), handleY(startY), bounds.getWidth(), handleThickness);
@@ -466,6 +540,7 @@ void RangeSlider::paint(juce::Graphics& graphics)
 
 void RangeSlider::mouseDown(const juce::MouseEvent& event)
 {
+    wheelArmed = event.mods.isLeftButtonDown();
     constexpr float handleHitRadius = 8.0f;
     const auto length = static_cast<float>(std::max(1, orientation == Orientation::horizontal
         ? getWidth() - 1 : getHeight() - 1));
@@ -526,6 +601,34 @@ void RangeSlider::mouseUp(const juce::MouseEvent&)
 
     if (wasDragging && onDragEnded)
         onDragEnded();
+}
+
+void RangeSlider::mouseExit(const juce::MouseEvent&)
+{
+    wheelArmed = false;
+}
+
+void RangeSlider::mouseWheelMove(const juce::MouseEvent& event,
+                                 const juce::MouseWheelDetails& wheel)
+{
+    if (! wheelArmed || wheel.deltaY == 0.0f)
+    {
+        juce::Component::mouseWheelMove(event, wheel);
+        return;
+    }
+
+    const auto currentWidth = rangeEnd - rangeStart;
+    if (currentWidth >= 1.0f - 1.0e-6f)
+        return;
+
+    const auto delta = -wheel.deltaY * std::max(0.002f, currentWidth * 0.1f);
+    const auto nextStart = juce::jlimit(0.0f, 1.0f - currentWidth, rangeStart + delta);
+    if (std::abs(nextStart - rangeStart) > 1.0e-6f)
+    {
+        updateRange(nextStart, nextStart + currentWidth);
+        if (onDragEnded)
+            onDragEnded();
+    }
 }
 
 void RangeSlider::setRange(const float newStart, const float newEnd)

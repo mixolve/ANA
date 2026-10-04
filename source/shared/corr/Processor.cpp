@@ -1,8 +1,4 @@
-#if ANA_VARIANT_RTM
-#include "rtm/corr/Processor.h"
-#else
-#include "ara/corr/Processor.h"
-#endif
+#include "Processor.h"
 #include "shared/corr/Settings.h"
 
 #include <algorithm>
@@ -12,12 +8,10 @@ namespace ana::corr
 {
 namespace
 {
-#if ! ANA_VARIANT_RTM
 juce::Point<float> complexBin(const float* data, const int bin) noexcept
 {
     return { data[2 * bin], data[2 * bin + 1] };
 }
-#endif
 
 size_t modeArrayIndex(const CorrProcessor::Mode mode) noexcept
 {
@@ -59,12 +53,10 @@ void CorrProcessor::prepare(const double newSampleRate) noexcept
 void CorrProcessor::reset() noexcept
 {
     fftStream.reset();
-   #if ANA_VARIANT_RTM
     fillModeBins(averages, 1.0f);
     fillModeBins(minimums, 1.0f);
-   #else
-    resetAraAccumulators();
-   #endif
+    resetOfflineAccumulators();
+
     storeModeBins(publishedAverages, 1.0f);
     storeModeBins(publishedMinimums, 1.0f);
     publishedFftSize.store(0, std::memory_order_release);
@@ -112,7 +104,6 @@ uint64_t CorrProcessor::getRevision() const noexcept
     return revision.load(std::memory_order_acquire);
 }
 
-#if ! ANA_VARIANT_RTM
 void CorrProcessor::resetMinimumWindowState(MinimumWindowState& state) noexcept
 {
     state.numeratorWindowSum.fill(0.0);
@@ -217,5 +208,4 @@ void CorrProcessor::updateMinimumWindow(
     state.ringPosition = (state.ringPosition + 1) % state.windowFrames;
     state.frameCount = std::min(state.frameCount + 1, state.windowFrames);
 }
-#endif
 }

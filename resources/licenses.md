@@ -33,7 +33,7 @@ Licence: https://github.com/tabler/tabler-icons/blob/main/LICENSE
 
 Copyright Celemony Software GmbH and contributors.
 
-Licensed under the Apache License, Version 2.0. Used by ANA_ARA only.
+Licensed under the Apache License, Version 2.0.
 
 Licence: https://www.apache.org/licenses/LICENSE-2.0
 

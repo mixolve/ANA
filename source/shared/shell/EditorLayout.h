@@ -13,13 +13,14 @@ inline int mainNavigationWidth() noexcept
 
 inline int minimumMainEditorWidth() noexcept
 {
-    constexpr int araRightControlCount = 7;
-    const auto araRightControlsWidth = 3 * iconControlSize
+    constexpr int offlineRightControlCount = 8;
+    const auto offlineRightControlsWidth = 3 * iconControlSize
         + iconControlSize + textControlWidth("TAKE")
-        + textControlWidth("SOURCE") + textControlWidth(11)
-        + araRightControlCount * gap.pixels();
+        + textControlWidth("KST") + textControlWidth("SOURCE") + textControlWidth(2)
+        + offlineRightControlCount * gap.pixels();
     const auto regularWidth = 2 * gap.pixels()
-        + mainNavigationWidth() + araRightControlsWidth;
-    return regularWidth + iconControlSize + gap.pixels();
+        + mainNavigationWidth() + offlineRightControlsWidth
+        + textControlWidth("MODE") + gap.pixels() + iconControlSize + gap.pixels();
+    return regularWidth;
 }
 } // namespace ana::ui

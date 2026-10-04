@@ -65,10 +65,16 @@ public:
                      bool shouldDrawButtonAsHighlighted,
                      bool shouldDrawButtonAsDown) override;
     int getPreferredWidth() const noexcept;
+    void setCondenseTextToFit(bool shouldCondense) noexcept { condenseTextToFit = shouldCondense; }
+    void setFillWhenSelected(bool shouldFill) noexcept { fillWhenSelected = shouldFill; repaint(); }
+    void setDrawBorder(bool shouldDraw) noexcept { drawBorder = shouldDraw; repaint(); }
 
 private:
     juce::Image symbolImage;
     bool iconButton = false;
+    bool condenseTextToFit = false;
+    bool fillWhenSelected = false;
+    bool drawBorder = true;
 };
 
 class SliderLookAndFeel final : public juce::LookAndFeel_V4
@@ -99,6 +105,18 @@ public:
 
 private:
     SliderLookAndFeel lookAndFeel;
+};
+
+class ClickArmedSlider final : public juce::Slider
+{
+public:
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseExit(const juce::MouseEvent& event) override;
+    void mouseWheelMove(const juce::MouseEvent& event,
+                        const juce::MouseWheelDetails& wheel) override;
+
+private:
+    bool wheelArmed = false;
 };
 
 class ChoicePopup final : public juce::Component
@@ -145,6 +163,9 @@ public:
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
+    void mouseExit(const juce::MouseEvent& event) override;
+    void mouseWheelMove(const juce::MouseEvent& event,
+                        const juce::MouseWheelDetails& wheel) override;
     std::function<void()> onRangeChanged;
     std::function<void()> onDragEnded;
 
@@ -159,4 +180,5 @@ private:
     float dragStartRangeEnd = 1.0f;
     DragMode dragMode = DragMode::none;
     Orientation orientation;
+    bool wheelArmed = false;
 };

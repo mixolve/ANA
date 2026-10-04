@@ -29,7 +29,8 @@ inline constexpr float mapTimeStepMilliseconds = 10.0f;
 inline constexpr float mapTimeRangeSkewCentreMilliseconds = 5000.0f;
 
 inline constexpr float minimumDisplayDecibels = -200.0f;
-inline constexpr float maximumDisplayDecibels = 10.0f;
+inline constexpr float maximumDisplayDecibels = 24.0f;
+inline constexpr float maximumMapDisplayDecibels = 10.0f;
 inline constexpr float defaultDisplayLowDecibels = -96.0f;
 inline constexpr float defaultDisplayHighDecibels = 0.0f;
 inline constexpr float displayRangeStepDecibels = 0.01f;

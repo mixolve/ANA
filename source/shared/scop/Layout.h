@@ -6,9 +6,9 @@
 namespace ana::scop
 {
 inline constexpr int bandRangeSliderHeight = 14;
-inline constexpr int minimumRtmBandHeight = ana::ui::controlHeight
+inline constexpr int minimumRealtimeBandHeight = ana::ui::controlHeight
     + 2 * ana::ui::gap.pixels();
-inline constexpr int minimumAraBandHeight = ana::ui::controlHeight
+inline constexpr int minimumOfflineBandHeight = ana::ui::controlHeight
     + 3 * ana::ui::gap.pixels() + bandRangeSliderHeight;
 
 constexpr int minimumEditorHeightForBands(const int minimumBandHeight) noexcept

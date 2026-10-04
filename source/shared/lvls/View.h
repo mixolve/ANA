@@ -1,12 +1,14 @@
 #pragma once
 
 #include "shared/shell/Controls.h"
+#include "shared/shell/ParameterControl.h"
 #include "shared/lvls/Processor.h"
 
 #include <cstdint>
 #include <JuceHeader.h>
 
 #include <array>
+#include <utility>
 #include <vector>
 
 class PluginProcessor;
@@ -30,11 +32,13 @@ private:
     void refreshPersistentViewState();
     void setPersistentParameter(const char* parameterId, float value);
     void storeHistoryZoomState();
+    double getHistoryDurationSeconds() const noexcept;
+    std::pair<float, float> getHistoryLufsBounds() const noexcept;
     void layoutPeakModeButtons();
-    int getLvlsWidth() const noexcept;
+    int getLvlsWidth(bool loudness = false) const noexcept;
     std::array<bool, 3> getVisibleParts() const noexcept;
+    bool isHistoryCleanView() const noexcept;
     std::array<int, 3> getMinimumPartWidths() const noexcept;
-    juce::Rectangle<float> getPlotBounds() const noexcept;
     std::array<juce::Rectangle<int>, 3> getPartBounds() const noexcept;
     int findPartSeparator(int x) const noexcept;
 
@@ -51,8 +55,10 @@ private:
     float shortTermMaximumLufs = ana::lvls::LvlsProcessor::minimumDecibels;
     float integratedMaximumLufs = ana::lvls::LvlsProcessor::minimumDecibels;
     float loudnessRange = 0.0f;
+    float historyTruePeak = ana::lvls::LvlsProcessor::minimumDecibels;
     std::array<std::vector<float>, ana::lvls::LvlsProcessor::historySeriesCount> loudnessHistories;
     uint64_t displayedRevision = 0;
+    bool displayedOffline = false;
     std::array<float, 3> partWeights { 1.0f, 1.0f, 1.0f };
     std::array<int, 3> dragStartWidths {};
     int draggedPartSeparator = -1;
@@ -66,6 +72,10 @@ private:
     ControlButton historySviewButton { "browser-maximize" };
     RangeSlider historyHorizontalZoom;
     RangeSlider historyVerticalZoom { RangeSlider::Orientation::vertical };
+    ParameterControl historyTimeStartReadout;
+    ParameterControl historyTimeEndReadout;
+    ParameterControl historyLevelHighReadout;
+    ParameterControl historyLevelLowReadout;
     bool showPeakLvls = true;
     bool showMidSideLvls = false;
     bool historySolo = false;

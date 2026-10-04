@@ -14,7 +14,12 @@ NSWindow* nativeWindowFor(juce::Component& component)
 void enableAuxiliaryMouseMoveEvents(juce::Component& component)
 {
     if (auto* window = nativeWindowFor(component))
+    {
         [window setAcceptsMouseMovedEvents:YES];
+        // REAPER's floating FX level is app-local in intent. Do not let our
+        // independent auxiliary peers float over another active application.
+        [window setHidesOnDeactivate:YES];
+    }
 }
 
 void matchAuxiliaryWindowLevel(juce::Component& component, juce::Component& owner)
@@ -27,6 +32,30 @@ void matchAuxiliaryWindowLevel(juce::Component& component, juce::Component& owne
     if (auto* oldParent = window.parentWindow)
         [oldParent removeChildWindow:window];
     window.level = ownerWindow.level;
+    window.hidesOnDeactivate = YES;
+}
+
+void attachAuxiliaryWindowToOwner(juce::Component& component, juce::Component& owner)
+{
+    auto* window = nativeWindowFor(component);
+    auto* ownerWindow = nativeWindowFor(owner);
+    if (window == nil || ownerWindow == nil || window == ownerWindow)
+        return;
+
+    if (window.parentWindow != ownerWindow)
+    {
+        if (auto* oldParent = window.parentWindow)
+            [oldParent removeChildWindow:window];
+        [ownerWindow addChildWindow:window ordered:NSWindowAbove];
+    }
+    window.hidesOnDeactivate = YES;
+}
+
+void detachAuxiliaryWindowFromOwner(juce::Component& component)
+{
+    if (auto* window = nativeWindowFor(component))
+        if (auto* parent = window.parentWindow)
+            [parent removeChildWindow:window];
 }
 
 void setAuxiliaryTextInputActive(juce::Component& component, const bool active,

@@ -64,8 +64,8 @@ AboutPopup::AboutPopup(std::function<void()> closeCallback)
         label->setFont(ana::ui::makeFont());
         label->setJustificationType(juce::Justification::centred);
         label->setColour(juce::Label::textColourId, ana::ui::white);
-        label->setColour(juce::Label::backgroundColourId, ana::ui::black);
-        label->setColour(juce::Label::outlineColourId, ana::ui::black);
+        label->setColour(juce::Label::backgroundColourId, ana::ui::background);
+        label->setColour(juce::Label::outlineColourId, ana::ui::background);
         addAndMakeVisible(*label);
         contentRows.push_back(label.get());
         textLabels.push_back(std::move(label));
@@ -77,7 +77,7 @@ AboutPopup::AboutPopup(std::function<void()> closeCallback)
 
 void AboutPopup::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(juce::Colours::black);
+    graphics.fillAll(ana::ui::background);
 }
 
 void AboutPopup::resized()

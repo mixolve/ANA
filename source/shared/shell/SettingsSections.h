@@ -2,6 +2,7 @@
 
 #include "Controls.h"
 #include "ParameterControl.h"
+#include "SubmoduleButtonAttachment.h"
 #include "shared/scop/Crossover.h"
 
 #include <JuceHeader.h>
@@ -30,13 +31,13 @@ struct ScopSettingsSection
     ControlButton monitorControlsButton { "MONITOR" };
     ControlButton toolsButton { "TOOLS" };
     ControlButton leftToRightButton { "LEFT-TO-RIGHT" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> horizontalZoomAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> verticalZoomAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> horizontalReadoutsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> verticalReadoutsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> monitorControlsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> toolsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> leftToRightAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> horizontalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> verticalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> horizontalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> verticalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> monitorControlsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> toolsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> leftToRightAttachment;
     std::array<std::unique_ptr<ParameterControl>, ana::dsp::LinkwitzRileyCrossover::numCrossovers> crossoverControls;
 };
 
@@ -70,24 +71,28 @@ struct SpecSettingsSection
     ControlButton horizontalReadoutsButton { "RO-HORIZ" };
     ControlButton verticalReadoutsButton { "RO-VERT" };
     ControlButton clearOnPlayButton { "CLEAR-ON-PLAY" };
-    ControlButton cursorButton { "CURSOR" };
-    ControlButton cursorNotesButton { "NOTES" };
+    ControlButton resetClickButton { "RESET-CLICK" };
+    ControlButton cursorButton { "CUR-HORIZ" };
+    ControlButton cursorNotesButton { "CUR-NOTES" };
+    ControlButton cursorVerticalButton { "CUR-VERT" };
     ControlButton monitorControlsButton { "MONITOR" };
     ControlButton horizontalZoomButton { "ZOOM-HORIZ" };
     ControlButton verticalZoomButton { "ZOOM-VERT" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> filledDisplayAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> secondGraphAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> antiAliasAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> highQualityRenderingAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mapLeftToRightAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> horizontalReadoutsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> verticalReadoutsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> clearOnPlayAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> cursorAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> cursorNotesAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> monitorControlsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> horizontalZoomAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> verticalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> filledDisplayAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> secondGraphAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> antiAliasAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> highQualityRenderingAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> mapLeftToRightAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> horizontalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> verticalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> clearOnPlayAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> resetClickAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> cursorAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> cursorNotesAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> cursorVerticalAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> monitorControlsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> horizontalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> verticalZoomAttachment;
 };
 
 struct CorrSettingsSection
@@ -107,19 +112,25 @@ struct CorrSettingsSection
     ControlButton filledDisplayButton { "FILLED-DISPLAY" };
     ControlButton secondGraphButton { "2ND-GRAPH" };
     ControlButton clearOnPlayButton { "CLEAR-ON-PLAY" };
+    ControlButton resetClickButton { "RESET-CLICK" };
     ControlButton horizontalReadoutsButton { "RO-HORIZ" };
     ControlButton verticalReadoutsButton { "RO-VERT" };
-    ControlButton cursorButton { "CURSOR" };
+    ControlButton cursorButton { "CUR-HORIZ" };
+    ControlButton cursorNotesButton { "CUR-NOTES" };
+    ControlButton cursorVerticalButton { "CUR-VERT" };
     ControlButton horizontalZoomButton { "ZOOM-HORIZ" };
     ControlButton verticalZoomButton { "ZOOM-VERT" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> filledDisplayAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> secondGraphAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> clearOnPlayAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> horizontalReadoutsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> verticalReadoutsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> cursorAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> horizontalZoomAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> verticalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> filledDisplayAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> secondGraphAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> clearOnPlayAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> resetClickAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> horizontalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> verticalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> cursorAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> cursorNotesAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> cursorVerticalAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> horizontalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> verticalZoomAttachment;
 };
 
 struct LvlsSettingsSection
@@ -133,8 +144,20 @@ struct LvlsSettingsSection
     ParameterControl peakHoldControl;
     ParameterControl loudnessRangeHighControl;
     ParameterControl loudnessRangeLowControl;
+    ParameterControl loudnessWidthControl;
+    ParameterControl historyRangeHighControl;
+    ParameterControl historyRangeLowControl;
+    ControlButton loudnessClearOnPlayButton { "CLEAR-ON-PLAY" };
+    ControlButton loudnessResetClickButton { "RESET-CLICK" };
+    ControlButton historyClearOnPlayButton { "CLEAR-ON-PLAY" };
+    ControlButton historyResetClickButton { "RESET-CLICK" };
+    std::unique_ptr<SubmoduleButtonAttachment> loudnessClearOnPlayAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> loudnessResetClickAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyClearOnPlayAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyResetClickAttachment;
     ControlButton centerSectionsButton { "CENTER-PARTS" };
     ControlButton clearOnPlayButton { "CLEAR-ON-PLAY" };
+    ControlButton resetClickButton { "RESET-CLICK" };
     ControlButton peakRmsVisibleButton { "PEAK/RMS" };
     ControlButton loudnessVisibleButton { "LOUDNESS" };
     ControlButton historyVisibleButton { "HISTORY" };
@@ -143,13 +166,18 @@ struct LvlsSettingsSection
     ControlButton historyIntegratedButton { "I" };
     ControlButton historyHorizontalZoomButton { "ZOOM-HORIZ" };
     ControlButton historyVerticalZoomButton { "ZOOM-VERT" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> clearOnPlayAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> peakRmsVisibleAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loudnessVisibleAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> historyVisibleAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> historyMomentaryAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> historyShortTermAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> historyIntegratedAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> historyHorizontalZoomAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> historyVerticalZoomAttachment;
+    ControlButton historyHorizontalReadoutsButton { "RO-HORIZ" };
+    ControlButton historyVerticalReadoutsButton { "RO-VERT" };
+    std::unique_ptr<SubmoduleButtonAttachment> clearOnPlayAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> resetClickAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> peakRmsVisibleAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> loudnessVisibleAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyVisibleAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyMomentaryAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyShortTermAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyIntegratedAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyHorizontalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyVerticalZoomAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyHorizontalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> historyVerticalReadoutsAttachment;
 };

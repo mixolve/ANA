@@ -1,7 +1,7 @@
 #include "SettingsSections.h"
 #include "Processor.h"
-#include "shell/StereoFftStream.h"
-#include "shared/analyzer/Frequency.h"
+#include "shared/shell/StereoFftStream.h"
+#include "shared/spec/FrequencyScale.h"
 #include "shared/scop/TimeScale.h"
 #include "shared/shell/GraphColours.h"
 #include "shared/spec/Settings.h"
@@ -188,6 +188,12 @@ LvlsSettingsSection::LvlsSettingsSection(PluginProcessor& processor)
       loudnessRangeHighControl(processor.getParameters(), PluginProcessor::lvlsLoudnessRangeHighParameterId,
                                "LUFS-HIGH", formatSignedValue),
       loudnessRangeLowControl(processor.getParameters(), PluginProcessor::lvlsLoudnessRangeLowParameterId,
-                              "LUFS-LOW", formatSignedValue)
+                              "LUFS-LOW", formatSignedValue),
+      loudnessWidthControl(processor.getParameters(), PluginProcessor::lvlsLoudnessWidthParameterId,
+                           "WIDTH", [] (const double value) { return juce::String(juce::roundToInt(value)); }),
+      historyRangeHighControl(processor.getParameters(), PluginProcessor::lvlsHistoryRangeHighParameterId,
+                              "LUFS-HIGH", formatSignedValue),
+      historyRangeLowControl(processor.getParameters(), PluginProcessor::lvlsHistoryRangeLowParameterId,
+                             "LUFS-LOW", formatSignedValue)
 {
 }

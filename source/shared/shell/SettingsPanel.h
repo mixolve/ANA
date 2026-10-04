@@ -3,7 +3,7 @@
 #include "Controls.h"
 #include "ParameterControl.h"
 #include "SettingsSections.h"
-#include "shared/analyzer/Page.h"
+#include "shared/shell/Page.h"
 #include "shared/scop/Crossover.h"
 
 #include <cstddef>
@@ -19,7 +19,8 @@ public:
     explicit SettingsPanel(PluginProcessor& processorRef);
     ~SettingsPanel() override;
 
-    void setAnalyzerContext(ana::AnalyzerPage page, const juce::String& viewMode);
+    bool setAnalyzerContext(ana::AnalyzerPage page, const juce::String& viewMode);
+    void refreshExternalState();
     void paint(juce::Graphics& graphics) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
@@ -37,7 +38,6 @@ private:
     void timerCallback() override;
     void changeCrossoverCount(int delta);
     void constrainFrequency(size_t crossoverIndex);
-    void refreshExternalState();
     void focusParameterControl(ParameterControl& control);
     void clearFocusedParameterControl();
     void dismissParameterEditors();
@@ -58,6 +58,9 @@ private:
     EllipsisLabel generalHeadingLabel;
     EllipsisLabel controlsVisibilityHeadingLabel;
     EllipsisLabel scopMainHeadingLabel;
+    EllipsisLabel lvlsPeakHeadingLabel;
+    EllipsisLabel lvlsLoudnessHeadingLabel;
+    EllipsisLabel lvlsHistoryHeadingLabel;
     ana::AnalyzerPage analyzerPage = ana::AnalyzerPage::spec;
     juce::String analyzerViewMode { "FREQ" };
     juce::Component* draggedWindow = nullptr;

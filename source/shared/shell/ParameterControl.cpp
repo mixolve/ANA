@@ -1,5 +1,6 @@
 #include "ParameterControl.h"
 #include "Theme.h"
+#include "Processor.h"
 
 #include <algorithm>
 #include <utility>
@@ -8,7 +9,8 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
                                    const juce::String& parameterId,
                                    juce::String title,
                                    Formatter formatter)
-    : titleText(std::move(title)), valueFormatter(std::move(formatter)), compact(titleText.isEmpty())
+    : parameterState(state), sourceParameterId(parameterId),
+      titleText(std::move(title)), valueFormatter(std::move(formatter)), compact(titleText.isEmpty())
 {
     pressGesture.onArmed = [this]
     {
@@ -19,14 +21,11 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
         pressGesture.cancel();
         repaint();
     };
-    parameter = state.getParameter(parameterId);
-    choiceParameter = dynamic_cast<juce::AudioParameterChoice*>(parameter);
-    boolParameter = dynamic_cast<juce::AudioParameterBool*>(parameter);
     slider.onValueChange = [this]
     {
         repaint();
 
-        if (onValueChanged)
+        if (! updatingBinding && onValueChanged)
             onValueChanged();
     };
     valueEditor.setFont(ana::ui::makeFont());
@@ -50,18 +49,47 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
             hideValueEditor(false);
     };
     addChildComponent(valueEditor);
-    attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(state, parameterId, slider);
-    // SliderAttachment installs the parameter's default text formatter, so the UI-specific
-    // formatter must be applied afterwards.
-    slider.textFromValueFunction = [this] (const double value)
-    {
-        return valueFormatter != nullptr ? valueFormatter(value) : juce::String(value);
-    };
+    refreshBinding();
+    startTimerHz(30);
 }
 
 ParameterControl::~ParameterControl()
 {
+    stopTimer();
     pressGesture.cancel();
+}
+
+void ParameterControl::refreshBinding()
+{
+    if (updatingBinding)
+        return;
+    auto& processor = static_cast<PluginProcessor&>(parameterState.processor);
+    const auto id = juce::String(processor.resolveParameterId(sourceParameterId.toRawUTF8()));
+    if (boundParameterId == id)
+        return;
+    const auto previousParser = slider.valueFromTextFunction;
+    const auto wasBound = boundParameterId.isNotEmpty();
+    const juce::ScopedValueSetter<bool> blockNotifications(updatingBinding, true);
+    hideValueEditor(true);
+    pressGesture.cancel();
+    pressHighlighted = false;
+    pressRegion = PressRegion::none;
+    attachment.reset();
+    boundParameterId = id;
+    parameter = parameterState.getParameter(id);
+    choiceParameter = dynamic_cast<juce::AudioParameterChoice*>(parameter);
+    boolParameter = dynamic_cast<juce::AudioParameterBool*>(parameter);
+    attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        parameterState, id, slider);
+    if (wasBound && previousParser)
+        slider.valueFromTextFunction = previousParser;
+    slider.textFromValueFunction = [this] (const double value)
+    {
+        return valueFormatter != nullptr ? valueFormatter(value) : juce::String(value);
+    };
+    wheelArmed = false;
+    wheelStepRemainder = 0.0f;
+    repaint();
 }
 
 void ParameterControl::setInteractionEnabled(const bool shouldEnable,
@@ -77,6 +105,7 @@ void ParameterControl::setInteractionEnabled(const bool shouldEnable,
     if (! interactionEnabled)
     {
         selected = false;
+        wheelArmed = false;
         hideValueEditor(true);
     }
 
@@ -95,6 +124,7 @@ int ParameterControl::getSelectedChoiceIndex() const noexcept
 
 void ParameterControl::setSelectedChoiceIndex(const int choiceIndex)
 {
+    refreshBinding();
     if (choiceParameter == nullptr || ! juce::isPositiveAndBelow(choiceIndex, choiceParameter->choices.size()))
         return;
 
@@ -169,8 +199,13 @@ void ParameterControl::resized()
 
 void ParameterControl::mouseDown(const juce::MouseEvent& event)
 {
+    refreshBinding();
     if (! interactionEnabled || ! event.mods.isLeftButtonDown())
         return;
+
+    wheelArmed = supportsFocusedPotentiometer()
+        && valueBounds.contains(event.getPosition());
+    wheelStepRemainder = 0.0f;
 
     pressHighlighted = true;
     pressRegion = titleBounds.contains(event.getPosition()) ? PressRegion::title
@@ -249,6 +284,7 @@ void ParameterControl::mouseUp(const juce::MouseEvent& event)
 
 void ParameterControl::mouseDoubleClick(const juce::MouseEvent& event)
 {
+    refreshBinding();
     if (! interactionEnabled || ! event.mods.isLeftButtonDown()
         || ! valueBounds.contains(event.getPosition())
         || parameter == nullptr || choiceParameter != nullptr || boolParameter != nullptr)
@@ -265,12 +301,15 @@ void ParameterControl::mouseDoubleClick(const juce::MouseEvent& event)
 
 void ParameterControl::commitPendingEditor()
 {
+    refreshBinding();
     hideValueEditor(false);
 }
 
 void ParameterControl::mouseExit(const juce::MouseEvent&)
 {
     hoverRegion = PressRegion::none;
+    wheelArmed = false;
+    wheelStepRemainder = 0.0f;
 
     if (! pressGesture.isActive())
     {
@@ -281,6 +320,37 @@ void ParameterControl::mouseExit(const juce::MouseEvent&)
     pressHighlighted = false;
     pressGesture.cancelArming();
     repaint();
+}
+
+void ParameterControl::mouseWheelMove(const juce::MouseEvent& event,
+                                      const juce::MouseWheelDetails& wheel)
+{
+    if (! wheelArmed || ! interactionEnabled || valueEditorActive
+        || ! supportsFocusedPotentiometer()
+        || ! valueBounds.contains(event.getPosition()) || wheel.deltaY == 0.0f)
+    {
+        juce::Component::mouseWheelMove(event, wheel);
+        return;
+    }
+
+    const auto interval = slider.getInterval();
+    if (interval > 0.0)
+    {
+        wheelStepRemainder += wheel.deltaY * 10.0f * wheelSpeedMultiplier;
+        const auto steps = static_cast<int>(wheelStepRemainder);
+        wheelStepRemainder -= static_cast<float>(steps);
+        if (steps != 0)
+            slider.setValue(slider.getValue() + static_cast<double>(steps) * interval,
+                            juce::sendNotificationSync);
+    }
+    else
+    {
+        const auto proportion = slider.valueToProportionOfLength(slider.getValue());
+        const auto nextProportion = juce::jlimit(0.0, 1.0,
+            proportion + static_cast<double>(wheel.deltaY) * 0.2 * wheelSpeedMultiplier);
+        slider.setValue(slider.proportionOfLengthToValue(nextProportion),
+                        juce::sendNotificationSync);
+    }
 }
 
 void ParameterControl::showValueEditor()
@@ -323,6 +393,7 @@ void ParameterControl::hideValueEditor(const bool discardChanges)
 
 void ParameterControl::resetToDefault()
 {
+    refreshBinding();
     if (parameter == nullptr || ! interactionEnabled)
         return;
 
