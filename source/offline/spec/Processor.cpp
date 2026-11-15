@@ -1,5 +1,5 @@
 #include "shared/spec/Processor.h"
-#include "shared/spec/SpectrumChannelLevels.h"
+#include "shared/spec/ChannelLevels.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,19 +14,6 @@ float powerToDecibels(const double power) noexcept
         static_cast<float>(std::sqrt(std::max(0.0, power))), SpecProcessor::minimumDecibels);
 }
 
-using ChannelValues = std::array<float, channelCount>;
-
-ChannelValues decibelValues(const fft::StereoSpectrumLevels& levels) noexcept
-{
-    return { levels.stereoDecibels, levels.leftDecibels, levels.rightDecibels,
-             levels.midDecibels, levels.sideDecibels };
-}
-
-ChannelValues gainValues(const fft::StereoSpectrumLevels& levels) noexcept
-{
-    return { levels.stereoGain, levels.leftGain, levels.rightGain,
-             levels.midGain, levels.sideGain };
-}
 }
 
 void SpecProcessor::resetOfflineStream() noexcept
@@ -70,7 +57,7 @@ void SpecProcessor::resetOfflineAccumulators() noexcept
 {
     for (auto& channel : offlinePowerSums)
         channel.fill(0.0);
-    offlineMagnitudeCount.fill(0);
+    offlineFrameCount = 0;
 }
 
 void SpecProcessor::publishOffline(const fft::StereoFftFrame& frame) noexcept
@@ -84,14 +71,13 @@ void SpecProcessor::publishOffline(const fft::StereoFftFrame& frame) noexcept
     }
 
     const auto binCount = fftSize / 2 + 1;
+    const auto inverseCount = 1.0 / static_cast<double>(++offlineFrameCount);
     for (int bin = 0; bin < binCount; ++bin)
     {
         const auto binIndex = static_cast<size_t>(bin);
         const auto levels = fft::calculateStereoSpectrumLevels(frame, bin, 2.0f, minimumDecibels);
-        const auto gains = gainValues(levels);
-        const auto decibels = decibelValues(levels);
-        const auto count = ++offlineMagnitudeCount[binIndex];
-        const auto inverseCount = 1.0 / static_cast<double>(count);
+        const auto gains = levels.gainValues();
+        const auto decibels = levels.decibelValues();
 
         for (size_t channel = 0; channel < channelCount; ++channel)
         {

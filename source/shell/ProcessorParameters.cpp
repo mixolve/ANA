@@ -1,5 +1,8 @@
+#include "shared/shell/HostSlots.h"
+#include "shared/animation/State.h"
 #include "Processor.h"
 #include "shared/shell/GraphColours.h"
+#include "shared/shell/AnalyzerViewUtilities.h"
 #include "shared/spec/SpectrumProcessing.h"
 #include "shared/spec/FrequencyScale.h"
 #include "shared/scop/Settings.h"
@@ -15,11 +18,6 @@
 
 namespace
 {
-juce::String formatFrequency(const float value)
-{
-    return juce::String::formatted("%08.2f", std::max(0.0f, value));
-}
-
 juce::String formatScopTime(const float milliseconds)
 {
     return juce::String(juce::roundToInt(milliseconds));
@@ -36,6 +34,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID { cleanViewParameterId, 1 }, ana::submodules::parameterName(cleanViewParameterId), false,
         juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID { screensaverParameterId, 1 }, ana::submodules::parameterName(screensaverParameterId), false,
+        juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
     layout.add(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID { moduleParameterId, 1 }, ana::submodules::parameterName(moduleParameterId),
         juce::StringArray { "SPEC", "CORR", "LVLS", "SCOP" }, 0,
@@ -48,23 +49,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
         juce::ParameterID { lvlsLoudnessWidthParameterId, 1 }, ana::submodules::parameterName(lvlsLoudnessWidthParameterId),
         ana::lvls::minimumMeterWidth, ana::lvls::maximumMeterWidth, ana::lvls::defaultMeterWidth,
         juce::AudioParameterIntAttributes().withAutomatable(false).withMeta(true)));
-    for (const auto& [id, defaultValue] : std::array {
-             std::pair { lvlsLoudnessClearOnPlayParameterId, false },
-             std::pair { lvlsLoudnessResetClickParameterId, true },
-             std::pair { lvlsHistoryClearOnPlayParameterId, false },
-             std::pair { lvlsHistoryResetClickParameterId, true } })
-        layout.add(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID { id, 1 }, ana::submodules::parameterName(id), defaultValue,
-            juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
-    for (const auto& [id, defaultValue] : std::array {
-             std::pair { lvlsHistoryRangeLowParameterId, ana::lvls::defaultDisplayLowDecibels },
-             std::pair { lvlsHistoryRangeHighParameterId, ana::lvls::defaultDisplayHighDecibels } })
-        layout.add(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID { id, 1 }, ana::submodules::parameterName(id),
-            juce::NormalisableRange<float> { ana::lvls::minimumDisplayDecibels,
-                                           ana::lvls::maximumDisplayDecibels,
-                                           ana::lvls::displayDecibelStep }, defaultValue,
-            juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
     juce::StringArray fftSizeChoices;
     for (const auto size : ana::fft::StereoFftStream::supportedFftSizes)
         fftSizeChoices.add(juce::String(size));
@@ -288,7 +272,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
              std::tuple { specFilledDisplayParameterId, true },
              std::tuple { specSecondGraphParameterId, false },
              std::tuple { specAntiAliasParameterId, true },
-             std::tuple { specHighQualityRenderingParameterId, true },
+             std::tuple { specMapHighQualityRenderingParameterId, true },
              std::tuple { specMapLeftToRightParameterId, false },
              std::tuple { specHorizontalReadoutsParameterId, true },
              std::tuple { specVerticalReadoutsParameterId, true },
@@ -330,7 +314,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
 
     layout.add(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID { specGraphOpacityParameterId, 1 },
-        ana::submodules::parameterName(specGraphOpacityParameterId), 1, 100, 100,
+        ana::submodules::parameterName(specGraphOpacityParameterId), 1, 100, 50,
         juce::AudioParameterIntAttributes().withAutomatable(false).withMeta(true)));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
@@ -441,7 +425,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
 
     layout.add(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID { corrGraphOpacityParameterId, 1 },
-        ana::submodules::parameterName(corrGraphOpacityParameterId), 1, 100, 100,
+        ana::submodules::parameterName(corrGraphOpacityParameterId), 1, 100, 50,
         juce::AudioParameterIntAttributes().withAutomatable(false).withMeta(true)));
 
     layout.add(std::make_unique<juce::AudioParameterChoice>(
@@ -458,8 +442,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
                       ana::corr::defaultHighCoefficient, ana::corr::coefficientStep);
 
     layout.add(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID { lvlsWidthParameterId, 1 },
-        ana::submodules::parameterName(lvlsWidthParameterId), ana::lvls::minimumMeterWidth, ana::lvls::maximumMeterWidth,
+        juce::ParameterID { lvlsPeakRmsWidthParameterId, 1 },
+        ana::submodules::parameterName(lvlsPeakRmsWidthParameterId), ana::lvls::minimumMeterWidth, ana::lvls::maximumMeterWidth,
         ana::lvls::defaultMeterWidth,
         juce::AudioParameterIntAttributes().withAutomatable(false).withMeta(true)));
 
@@ -502,6 +486,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
         juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { lvlsReadoutIntervalMsParameterId, 1 },
+        ana::submodules::parameterName(lvlsReadoutIntervalMsParameterId),
+        juce::NormalisableRange<float> { ana::lvls::minimumReadoutIntervalMilliseconds,
+                                           ana::lvls::maximumReadoutIntervalMilliseconds,
+                                           ana::lvls::readoutIntervalStepMilliseconds },
+        ana::lvls::defaultReadoutIntervalMilliseconds,
+        juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
+
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { lvlsPeakHoldMsParameterId, 1 },
         ana::submodules::parameterName(lvlsPeakHoldMsParameterId), juce::NormalisableRange<float> { ana::lvls::minimumPeakHoldMilliseconds,
                                                ana::lvls::maximumPeakHoldMilliseconds,
@@ -519,42 +513,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
     for (const auto* id : std::array {
              lvlsPeakRmsVisibleParameterId,
              lvlsLoudnessVisibleParameterId,
-             lvlsHistoryVisibleParameterId })
-        layout.add(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID { id, 1 }, ana::submodules::parameterName(id), true,
-            juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
-
-    for (const auto* id : std::array {
-             lvlsHistoryMomentaryVisibleParameterId,
-             lvlsHistoryShortTermVisibleParameterId,
-             lvlsHistoryIntegratedVisibleParameterId,
-             lvlsHistoryHorizontalZoomParameterId,
-             lvlsHistoryVerticalZoomParameterId,
-             lvlsHistoryHorizontalReadoutsParameterId,
-             lvlsHistoryVerticalReadoutsParameterId })
+             lvlsMetricsVisibleParameterId })
         layout.add(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID { id, 1 }, ana::submodules::parameterName(id), true,
             juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
 
     for (const auto& [id, defaultValue] : std::array {
              std::tuple { lvlsPeakModeParameterId, true },
-             std::tuple { lvlsMidSideModeParameterId, false },
-             std::tuple { lvlsHistorySoloParameterId, false } })
+             std::tuple { lvlsMidSideModeParameterId, false } })
         layout.add(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID { id, 1 }, ana::submodules::parameterName(id), defaultValue,
             juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
 
-    for (const auto& [id, defaultValue] : std::array {
-             std::tuple { lvlsHistoryHorizontalStartParameterId, 0.0f },
-             std::tuple { lvlsHistoryHorizontalEndParameterId, 1.0f },
-             std::tuple { lvlsHistoryVerticalStartParameterId, 0.0f },
-             std::tuple { lvlsHistoryVerticalEndParameterId, 1.0f } })
-        layout.add(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID { id, 1 }, ana::submodules::parameterName(id),
-            juce::NormalisableRange<float> { 0.0f, 1.0f, 0.001f }, defaultValue,
-            juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
-
-    const juce::StringArray scopChannelModes { "LEFT", "RIGHT", "MID", "SIDE", "LR", "MS" };
+    const juce::StringArray scopChannelModes { "LEFT", "RIGHT", "MID", "SIDE", "LR", "MS", "ST" };
     for (size_t bandIndex = 0; bandIndex < scopChannelModeParameterIds.size(); ++bandIndex)
     {
         layout.add(std::make_unique<juce::AudioParameterChoice>(
@@ -618,9 +589,64 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
                 .withMeta(true)
                 .withStringFromValueFunction([] (const float value, int)
                 {
-                    return formatFrequency(value);
+                    return ana::ui::analyzer_detail::formatReadoutFrequency(value);
                 })));
     }
 
-    return layout.release();
+    // Append the new mode without reordering existing parameters for host compatibility.
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID { scopLinkedNormalizeParameterId, 1 },
+        ana::submodules::parameterName(scopLinkedNormalizeParameterId), false,
+        juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
+
+    // Append after all existing parameters, including NALL, for host compatibility.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { scopSlopeParameterId, 1 },
+        ana::submodules::parameterName(scopSlopeParameterId),
+        juce::NormalisableRange<float> { ana::scop::minimumSlopeDecibelsPerOctave,
+                                         ana::scop::maximumSlopeDecibelsPerOctave,
+                                         ana::scop::slopeStepDecibelsPerOctave },
+        ana::scop::defaultSlopeDecibelsPerOctave,
+        juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
+
+    // Append the seven-way Settings selector: no existing host parameter IDs move.
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { displayChoiceParameterId, 1 },
+        ana::submodules::parameterName(displayChoiceParameterId),
+        juce::StringArray { "SPEC FREQ", "SPEC MAP", "CORR SIGNED", "CORR PHASE",
+                            "CORR FREQ", "LVLS", "SCOP" }, 0,
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+
+    // Preserve all existing host parameter indices.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { compensationParameterId, 1 },
+        ana::submodules::parameterName(compensationParameterId),
+        juce::NormalisableRange<float> { -96.0f, 96.0f, 0.01f }, 0.0f));
+
+    for(int slot=0;slot<HostSlots::count;++slot)
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { HostSlots::id(slot),1 },juce::String::formatted("%02d-",slot+1)+HostSlots::letter(slot),juce::NormalisableRange<float>(0.0f,1.0f),0.0f));
+    for (const auto* id : { offlineMonitorParameterId, offlineKeepTakeParameterId, offlineRefreshParameterId })
+        layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { id, 1 },
+            ana::submodules::parameterName(id), false));
+    // One host-assignable gain for each of the first 64 snapshot slots.
+    // These IDs are appended to preserve existing parameter indices and slot IDs.
+    for (int index = 0; index < 64; ++index)
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { "snapshot_gain_" + juce::String(index + 1), 1 },
+            "SNAPSHOT " + juce::String(index + 1) + " GAIN",
+            juce::NormalisableRange<float> { -48.0f, 48.0f, 0.01f }, 0.0f));
+    auto result=layout.release();
+    addAnimationParameterLayout(result);
+    for(const auto* id:{scopEqualHeightParameterId,scopOverallFullParameterId,scopClearParameterId})
+        result.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID {id,1},ana::submodules::parameterName(id),false));
+    result.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID {dockCountParameterId,1},ana::submodules::parameterName(dockCountParameterId),1,16,6));
+    // Keep existing parameter indices unchanged: OVERALL MONITOR is independent
+    // of band 1's mode and is used only for the Overall Full display.
+    result.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { scopOverallMonitorParameterId, 1 },
+        ana::submodules::parameterName(scopOverallMonitorParameterId),
+        juce::StringArray { "LEFT", "RIGHT", "MID", "SIDE", "LR", "MS", "ST" },
+        static_cast<int>(ana::scop::defaultChannelMode),
+        juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
+    return result;
 }

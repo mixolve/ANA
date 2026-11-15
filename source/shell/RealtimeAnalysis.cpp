@@ -5,25 +5,35 @@
 
 void PluginProcessor::prepareToPlay(const double sampleRate, const int samplesPerBlock)
 {
+    analysisScratch.setSize(2, juce::jmax(1, samplesPerBlock));
     multibandScop.prepare(sampleRate);
     specProcessor.prepare(sampleRate);
     corrProcessor.prepare(sampleRate);
     lvlsProcessor.prepare(sampleRate, samplesPerBlock);
     lvlsLoudnessProcessor.prepare(sampleRate, samplesPerBlock);
-    lvlsHistoryProcessor.prepare(sampleRate, samplesPerBlock);
+    lvlsMetricsProcessor.prepare(sampleRate, samplesPerBlock);
     prepareToPlayForARA(sampleRate, samplesPerBlock, getMainBusNumOutputChannels(), getProcessingPrecision());
     processingOffline = isOfflineMode();
+    hostWasPlaying = false;
+    hostTransportState.store(-1, std::memory_order_relaxed);
 }
 
-void PluginProcessor::releaseResources()
+void PluginProcessor::resetRealtimeAnalysis()
 {
-    releaseResourcesForARA();
     multibandScop.reset();
     specProcessor.reset();
     corrProcessor.reset();
     lvlsProcessor.reset();
     lvlsLoudnessProcessor.reset();
-    lvlsHistoryProcessor.reset();
+    lvlsMetricsProcessor.reset();
+    hostWasPlaying = false;
+    hostTransportState.store(-1, std::memory_order_relaxed);
+}
+
+void PluginProcessor::releaseResources()
+{
+    releaseResourcesForARA();
+    resetRealtimeAnalysis();
 }
 
 void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -35,17 +45,8 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     {
         processingOffline = offline;
         // Only the audio thread resets streaming DSP during mode changes.
-        multibandScop.reset();
-        specProcessor.reset();
-        corrProcessor.reset();
-        lvlsProcessor.reset();
-        lvlsLoudnessProcessor.reset();
-        lvlsHistoryProcessor.reset();
-        hostWasPlaying = false;
+        resetRealtimeAnalysis();
     }
-    if (offline)
-        return;
-
     auto* playHead = getPlayHead();
     auto hostIsPlaying = false;
     auto hostTransportStateAvailable = false;
@@ -58,6 +59,14 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             hostTransportStateAvailable = true;
             hostIsPlaying = position->getIsPlaying();
         }
+    hostTransportState.store(hostTransportStateAvailable ? (hostIsPlaying ? 1 : 0) : -1,
+                             std::memory_order_relaxed);
+    if (offline)
+        return;
+
+    const auto* compensation = getRawParameterValue(compensationParameterId);
+    const auto analysisGain = compensation != nullptr
+        ? juce::Decibels::decibelsToGain(compensation->load(std::memory_order_relaxed), -100.0f) : 1.0f;
 
     const auto transportStarted = hostTransportStateAvailable
         && hostIsPlaying
@@ -75,21 +84,34 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                             index);
     };
 
-    switch (getAnalyzerPageState())
+    const auto page = getAnalyzerPageState();
+    const auto channels = juce::jmin(buffer.getNumChannels(), analysisScratch.getNumChannels());
+    for (int offset = 0; offset < buffer.getNumSamples(); offset += analysisScratch.getNumSamples())
     {
+        const auto count = juce::jmin(analysisScratch.getNumSamples(), buffer.getNumSamples() - offset);
+        for (int channel = 0; channel < channels; ++channel)
+            analysisScratch.copyFromWithRamp(channel, 0, buffer.getReadPointer(channel, offset), count, analysisGain, analysisGain);
+        juce::AudioBuffer<float> analysisBuffer(analysisScratch.getArrayOfWritePointers(), channels, count);
+        const auto chunkTransportStarted = transportStarted && offset == 0;
+        switch (page)
+        {
         case ana::AnalyzerPage::scop:
             multibandScop.setCrossoverSettings(getCrossoverCount(), getCrossoverFrequencies());
-            multibandScop.processBlock(buffer);
+            if (const auto* slope = getRawParameterValue(scopSlopeParameterId))
+                multibandScop.setSlope(slope->load(std::memory_order_relaxed));
+            multibandScop.processBlock(analysisBuffer);
             break;
 
         case ana::AnalyzerPage::spec:
         {
+            // Slot/host automation must switch FREQ/MAP even with the editor closed.
+            specProcessor.setRealtimeMapMode(isSpecMapView());
             const auto fftSizeIndex = fftSizeChoice(specFftSizeParameterId);
             const auto* fftOverlapValue = getRawParameterValue(specFftOverlapParameterId);
             const auto* averagingTime = getRawParameterValue(specAverageTimeParameterId);
             const auto* mapTimeOverlap = getRawParameterValue(specMapTimeOverlapParameterId);
             const auto* clearOnPlay = getRawParameterValue(specClearOnPlayParameterId);
-            if (transportStarted)
+            if (chunkTransportStarted)
             {
                 if (clearOnPlay != nullptr && clearOnPlay->load(std::memory_order_relaxed) >= 0.5f)
                     specProcessor.requestClear();
@@ -97,7 +119,7 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     specProcessor.requestRealtimeReset();
             }
             specProcessor.processBlock(
-                buffer, fftSizes[static_cast<size_t>(fftSizeIndex)],
+                analysisBuffer, fftSizes[static_cast<size_t>(fftSizeIndex)],
                 fftOverlapValue != nullptr ? fftOverlapValue->load(std::memory_order_relaxed)
                                            : ana::fft::StereoFftStream::defaultOverlap,
                 averagingTime != nullptr ? averagingTime->load(std::memory_order_relaxed)
@@ -115,7 +137,7 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             const auto* mode = getRawParameterValue(corrModeParameterId);
             const auto* clearOnPlay = getRawParameterValue(corrClearOnPlayParameterId);
             if (clearOnPlay != nullptr && clearOnPlay->load(std::memory_order_relaxed) >= 0.5f
-                && transportStarted)
+                && chunkTransportStarted)
                 corrProcessor.requestClear();
             const auto modeIndex = mode != nullptr
                 ? juce::jlimit(0, ana::corr::CorrProcessor::modeCount - 1,
@@ -123,7 +145,7 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 : 0;
             const auto corrMode = ana::corr::CorrProcessor::modeFromIndex(modeIndex);
             corrProcessor.processBlock(
-                buffer, fftSizes[static_cast<size_t>(fftSizeIndex)],
+                analysisBuffer, fftSizes[static_cast<size_t>(fftSizeIndex)],
                 fftOverlapValue != nullptr ? fftOverlapValue->load(std::memory_order_relaxed)
                                            : ana::fft::StereoFftStream::defaultOverlap,
                 averagingTime != nullptr ? averagingTime->load(std::memory_order_relaxed)
@@ -134,36 +156,39 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 
         case ana::AnalyzerPage::lvls:
         {
-            if (transportStarted)
+            if (chunkTransportStarted)
             {
                 if (isParameterEnabled(lvlsClearOnPlayParameterId))
+                {
                     lvlsProcessor.requestClear();
-                if (isParameterEnabled(lvlsLoudnessClearOnPlayParameterId))
                     lvlsLoudnessProcessor.requestClear();
-                if (isParameterEnabled(lvlsHistoryClearOnPlayParameterId))
-                    lvlsHistoryProcessor.requestClear();
+                    lvlsMetricsProcessor.requestClear();
+                }
             }
             const auto* rmsWindow = getRawParameterValue(lvlsRmsWindowMsParameterId);
             const auto* peakHoldTime = getRawParameterValue(lvlsPeakHoldMsParameterId);
             const auto hold = hostTransportStateAvailable && ! hostIsPlaying;
-            lvlsProcessor.processBlock(buffer,
-                rmsWindow != nullptr ? rmsWindow->load(std::memory_order_relaxed)
-                                     : ana::lvls::defaultRmsWindowMilliseconds,
+            const auto selectedRmsWindowMs = rmsWindow != nullptr
+                ? rmsWindow->load(std::memory_order_relaxed)
+                : ana::lvls::defaultRmsWindowMilliseconds;
+            lvlsProcessor.processBlock(analysisBuffer,
+                selectedRmsWindowMs,
                 peakHoldTime != nullptr ? peakHoldTime->load(std::memory_order_relaxed)
                                         : ana::lvls::defaultPeakHoldMilliseconds,
                 hold, { isParameterEnabled(lvlsPeakRmsVisibleParameterId), false, false });
-            lvlsLoudnessProcessor.processBlock(buffer,
+            lvlsLoudnessProcessor.processBlock(analysisBuffer,
                 ana::lvls::defaultRmsWindowMilliseconds, ana::lvls::defaultPeakHoldMilliseconds,
                 hold, { false, isParameterEnabled(lvlsLoudnessVisibleParameterId), false });
-            const auto historyVisible = isParameterEnabled(lvlsHistoryVisibleParameterId);
-            lvlsHistoryProcessor.processBlock(buffer,
-                ana::lvls::defaultRmsWindowMilliseconds, ana::lvls::defaultPeakHoldMilliseconds,
-                hold, { historyVisible, false, historyVisible });
+            const auto metricsVisible = isParameterEnabled(lvlsMetricsVisibleParameterId);
+            lvlsMetricsProcessor.processBlock(analysisBuffer,
+                selectedRmsWindowMs, ana::lvls::defaultPeakHoldMilliseconds,
+                hold, { metricsVisible, false, metricsVisible });
             break;
         }
 
         default:
             break;
+        }
     }
 
     if (hostTransportStateAvailable)

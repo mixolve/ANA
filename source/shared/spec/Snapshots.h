@@ -7,6 +7,7 @@ namespace ana::spec
 {
 struct SpectrumSnapshot
 {
+    juce::String name;
     std::vector<float> primary;
     std::vector<float> secondary;
     int fftSize = 0;
@@ -22,6 +23,13 @@ struct SpectrumSnapshot
 class SnapshotStore
 {
 public:
+    explicit SnapshotStore(juce::ValueTree* state = nullptr);
+    bool synchroniseState();
+    static bool isValidState(const juce::var&);
+    void persistState();
+    size_t size() const noexcept { return snapshots.size(); }
+    juce::String getName(size_t index) const;
+    void setName(size_t index, const juce::String& name);
     static constexpr float snapshotGainMinimumDb = -48.0f;
     static constexpr float snapshotGainMaximumDb = 48.0f;
     size_t addSnapshotSlot();
@@ -38,6 +46,9 @@ public:
 
     std::vector<SpectrumSnapshot>& getSnapshots() noexcept { return snapshots; }
 private:
+    bool loadState(const juce::var&);
     std::vector<SpectrumSnapshot> snapshots;
+    juce::ValueTree* state = nullptr;
+    juce::var lastState;
 };
 }

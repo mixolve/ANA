@@ -55,38 +55,35 @@ std::optional<uint64_t> getAudioContentFingerprint(juce::ARAAudioSource& source)
     return hash;
 }
 
+template <typename Object>
+juce::String getPersistentOrRuntimeId(const Object* object, const void* fallback,
+                                      const char* persistentPrefix,
+                                      const char* runtimePrefix)
+{
+    if (object != nullptr && ! object->getPersistentID().empty())
+        return juce::String(persistentPrefix)
+            + juce::String::fromUTF8(object->getPersistentID().c_str());
+
+    return juce::String(runtimePrefix) + juce::String::toHexString(
+        static_cast<juce::int64>(reinterpret_cast<intptr_t>(object != nullptr
+            ? static_cast<const void*>(object) : fallback)));
+}
+
 juce::String getSourceId(const juce::ARAAudioSource* source, const void* fallback)
 {
-    if (source != nullptr && ! source->getPersistentID().empty())
-        return "SRC:" + juce::String::fromUTF8(source->getPersistentID().c_str());
-
-    return "SRC-RUNTIME:" + juce::String::toHexString(
-        static_cast<juce::int64>(reinterpret_cast<intptr_t>(source != nullptr
-                                                                 ? static_cast<const void*>(source)
-                                                                 : fallback)));
+    return getPersistentOrRuntimeId(source, fallback, "SRC:", "SRC-RUNTIME:");
 }
 
 juce::String getTakeId(const juce::ARAAudioModification* modification, const void* fallback)
 {
-    if (modification != nullptr && ! modification->getPersistentID().empty())
-        return "MOD:" + juce::String::fromUTF8(modification->getPersistentID().c_str());
-
-    return "MOD-RUNTIME:" + juce::String::toHexString(
-        static_cast<juce::int64>(reinterpret_cast<intptr_t>(modification != nullptr
-                                                                 ? static_cast<const void*>(modification)
-                                                                 : fallback)));
-}
-
-juce::String getPlaybackItemId(const juce::ARAPlaybackRegion& playbackRegion)
-{
-    const auto startMicroseconds = static_cast<juce::int64>(std::llround(
-        playbackRegion.getStartInPlaybackTime() * 1000000.0));
-    return "ITEM:" + juce::String(startMicroseconds);
+    return getPersistentOrRuntimeId(modification, fallback, "MOD:", "MOD-RUNTIME:");
 }
 
 juce::String getLogicalSourceId(const juce::ARAPlaybackRegion& playbackRegion)
 {
-    return getPlaybackItemId(playbackRegion);
+    const auto startMicroseconds = static_cast<juce::int64>(std::llround(
+        playbackRegion.getStartInPlaybackTime() * 1000000.0));
+    return "ITEM:" + juce::String(startMicroseconds);
 }
 
 juce::String getLogicalTakeId(const juce::ARAPlaybackRegion& playbackRegion)
@@ -248,8 +245,15 @@ bool matchesSelection(const juce::ARAPlaybackRegion& playbackRegion,
     if (sourceId.isNotEmpty() && getLogicalSourceId(playbackRegion) != sourceId)
         return false;
 
-    return takeNumber <= 0
-        || getTakeNumber(playbackRegion, choices) == takeNumber;
+    if (takeNumber <= 0)
+        return getTakeNumber(playbackRegion, choices) == 1;
+    const auto logicalSourceId = getLogicalSourceId(playbackRegion);
+    const auto hasSecond = takeNumber == 2 && std::any_of(choices.begin(), choices.end(),
+        [&logicalSourceId] (const auto& choice)
+        {
+            return choice.sourceId == logicalSourceId && choice.takeNumber == 2;
+        });
+    return getTakeNumber(playbackRegion, choices) == (hasSecond ? 2 : 1);
 }
 
 juce::ARAAudioModification* findTakeModification(
@@ -265,8 +269,14 @@ juce::ARAAudioModification* findTakeModification(
     const auto selectedChoice = std::find_if(choices.begin(), choices.end(),
         [&] (const auto& choice)
         {
-            return (sourceId.isEmpty() || choice.sourceId == sourceId)
-                && choice.takeNumber == takeNumber;
+            if (sourceId.isNotEmpty() && choice.sourceId != sourceId)
+                return false;
+            const auto hasSecond = takeNumber == 2 && std::any_of(choices.begin(), choices.end(),
+                [&choice] (const auto& candidate)
+                {
+                    return candidate.sourceId == choice.sourceId && candidate.takeNumber == 2;
+                });
+            return choice.takeNumber == (hasSecond ? 2 : 1);
         });
     if (selectedChoice == choices.end())
         return nullptr;

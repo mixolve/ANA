@@ -36,6 +36,9 @@ public:
                                              void* parameter1,
                                              void* parameter2,
                                              void* parameter3) = 0;
+
+protected:
+    ~IReaperHostApplication() = default;
 };
 
 static constexpr Steinberg::TUID reaperHostApplicationIid = INLINE_UID(
@@ -132,8 +135,10 @@ std::optional<uint64_t> getReaperAudioContentFingerprint(
 #endif
 }
 
-ReaperHostBridge::ReaperHostBridge(ApplyTakeChoices applyTakeChoicesIn, const bool followSelectedTrackIn)
-    : applyTakeChoices(std::move(applyTakeChoicesIn)), followSelectedTrack(followSelectedTrackIn)
+ReaperHostBridge::ReaperHostBridge(ApplyTakeChoices applyTakeChoicesIn, const bool followSelectedTrackIn,
+                                   ShouldScan shouldScanIn)
+    : applyTakeChoices(std::move(applyTakeChoicesIn)), shouldScan(std::move(shouldScanIn)),
+      followSelectedTrack(followSelectedTrackIn)
 {
 }
 
@@ -181,6 +186,7 @@ void ReaperHostBridge::setHostApplication(Steinberg::FUnknown* newHostApplicatio
         if (currentHost != nullptr)
             currentHost->release();
         hostApplication = nextHost;
+        hostInterfaceAvailable.store(nextHost != nullptr, std::memory_order_release);
     }
 #else
     juce::ignoreUnused(newHostApplication);
@@ -189,6 +195,42 @@ void ReaperHostBridge::setHostApplication(Steinberg::FUnknown* newHostApplicatio
     // Host-interface reattachment is not a media edit; retain the last valid catalogue and rescan semantically.
     lastProjectState.store(-1, std::memory_order_release);
     emptyScanConfirmations.store(0, std::memory_order_release);
+}
+
+bool ReaperHostBridge::registerScreensetWindow(const char* id,
+                                                ScreensetCallback callback,
+                                                void* context) const
+{
+#if JucePlugin_Build_VST3
+    const juce::ScopedLock scopedLock(hostLock);
+    auto* host = static_cast<IReaperHostApplication*>(hostApplication);
+    if (host == nullptr || id == nullptr || callback == nullptr)
+        return false;
+    using Register = void (*)(char*, ScreensetCallback, void*);
+    const auto registerWindow = getReaperApi<Register>(*host, "screenset_registerNew");
+    if (registerWindow == nullptr)
+        return false;
+    registerWindow(const_cast<char*>(id), callback, context);
+    return true;
+#else
+    juce::ignoreUnused(id, callback, context);
+    return false;
+#endif
+}
+
+void ReaperHostBridge::unregisterScreensetWindow(void* context) const
+{
+#if JucePlugin_Build_VST3
+    const juce::ScopedLock scopedLock(hostLock);
+    auto* host = static_cast<IReaperHostApplication*>(hostApplication);
+    if (host == nullptr)
+        return;
+    using Unregister = void (*)(void*);
+    if (const auto unregisterWindow = getReaperApi<Unregister>(*host, "screenset_unregisterByParam"))
+        unregisterWindow(context);
+#else
+    juce::ignoreUnused(context);
+#endif
 }
 
 int ReaperHostBridge::getProjectStateChangeCount() const
@@ -221,7 +263,12 @@ void ReaperHostBridge::refresh()
 void ReaperHostBridge::updateCatalogue(const bool forceScan)
 {
 #if JucePlugin_Build_VST3
-    if (! enabled.load(std::memory_order_acquire))
+    if (! enabled.load(std::memory_order_acquire) || ! juce::Process::isForegroundProcess())
+        return;
+    // Retained MONITOR/TRACK settings are not permission to scan host media
+    // in realtime. Check before any host API or pending ARA matching retry.
+    // Keep the catalogue cached so switching back to offline remains stable.
+    if (shouldScan != nullptr && ! shouldScan())
         return;
     const auto projectState = getProjectStateChangeCount();
 
@@ -232,17 +279,27 @@ void ReaperHostBridge::updateCatalogue(const bool forceScan)
     const auto target = getTargetTrack();
     if (! target.has_value())
         return;
+    // TRACK is bound to this plugin instance's parent track and must not react
+    // to REAPER's global item selection. Only MONITOR follows selected items.
+    // Selection-only changes may not increase GetProjectStateChangeCount, so
+    // MONITOR explicitly polls them on the message thread.
+    const auto selectedItems = followSelectedTrack
+        ? getSelectedItems().value_or(std::vector<void*>{})
+        : std::vector<void*>{};
     bool targetChanged = false;
+    bool selectionChanged = false;
     {
         const juce::ScopedLock scopedLock(choicesLock);
         targetChanged = *target != cachedTarget;
+        selectionChanged = selectedItems != cachedSelectedItems;
     }
 
     const auto cachedProjectState = lastProjectState.load(std::memory_order_acquire);
     const auto cacheValid = takeChoicesCacheValid.load(std::memory_order_acquire);
-    if (forceScan || ! cacheValid || targetChanged || projectState != cachedProjectState)
+    if (forceScan || ! cacheValid || targetChanged || selectionChanged
+        || projectState != cachedProjectState)
     {
-        auto scannedChoices = scanTakeChoices(target->track);
+        auto scannedChoices = scanTakeChoices(target->track, selectedItems);
         if (! scannedChoices.has_value())
             return;
 
@@ -250,7 +307,8 @@ void ReaperHostBridge::updateCatalogue(const bool forceScan)
             const juce::ScopedLock scopedLock(choicesLock);
 
             // Debounce transient empty scans before accepting a destructive catalogue transition.
-            if (! forceScan && ! targetChanged && scannedChoices->empty() && ! cachedTakeChoices.empty())
+            if (! forceScan && ! targetChanged && ! selectionChanged
+                && scannedChoices->empty() && ! cachedTakeChoices.empty())
             {
                 const auto confirmations = emptyScanConfirmations.fetch_add(
                     1, std::memory_order_acq_rel) + 1;
@@ -285,12 +343,13 @@ void ReaperHostBridge::updateCatalogue(const bool forceScan)
 
             const auto choicesChanged = *scannedChoices != cachedTakeChoices;
             cachedTarget = *target;
+            cachedSelectedItems = selectedItems;
             if (choicesChanged)
             {
                 cachedTakeChoices = std::move(*scannedChoices);
-                // Publish only semantic catalogue changes; REAPER project-state churn also covers editor bookkeeping.
-                takeChoicesInitialised.store(false, std::memory_order_release);
             }
+            if (choicesChanged || targetChanged || selectionChanged)
+                takeChoicesInitialised.store(false, std::memory_order_release);
         }
         takeChoicesCacheValid.store(true, std::memory_order_release);
         lastProjectState.store(projectState, std::memory_order_release);
@@ -326,8 +385,9 @@ std::optional<ReaperHostBridge::TrackTarget> ReaperHostBridge::getTargetTrack() 
         track = getSelectedTrack2 != nullptr ? getSelectedTrack2(nullptr, 0, true)
                                              : getSelectedTrack(nullptr, 0);
     }
+    // Missing focus/selection is not a request to clear the last analysed track.
     if (track == nullptr)
-        return followSelectedTrack ? std::optional<TrackTarget>(TrackTarget {}) : std::nullopt;
+        return std::nullopt;
 
     using GetSetMediaTrackInfoString = bool (*)(MediaTrack*, const char*, char*, bool);
     using GetMediaTrackInfoValue = double (*)(MediaTrack*, const char*);
@@ -348,7 +408,33 @@ std::optional<ReaperHostBridge::TrackTarget> ReaperHostBridge::getTargetTrack() 
 #endif
 }
 
-std::optional<std::vector<ana::offline::SourceChoice>> ReaperHostBridge::scanTakeChoices(void* targetTrack) const
+std::optional<std::vector<void*>> ReaperHostBridge::getSelectedItems() const
+{
+#if JucePlugin_Build_VST3
+    const juce::ScopedLock scopedLock(hostLock);
+    auto* host = static_cast<IReaperHostApplication*>(hostApplication);
+    if (host == nullptr)
+        return std::nullopt;
+    using CountSelectedMediaItems = int (*)(ReaProject*);
+    using GetSelectedMediaItem = MediaItem* (*)(ReaProject*, int);
+    const auto countItems = getReaperApi<CountSelectedMediaItems>(*host, "CountSelectedMediaItems");
+    const auto getItem = getReaperApi<GetSelectedMediaItem>(*host, "GetSelectedMediaItem");
+    if (countItems == nullptr || getItem == nullptr)
+        return std::nullopt;
+    std::vector<void*> items;
+    const auto count = std::max(0, countItems(nullptr));
+    items.reserve(static_cast<size_t>(count));
+    for (int index = 0; index < count; ++index)
+        if (auto* item = getItem(nullptr, index))
+            items.push_back(item);
+    return items;
+#else
+    return std::nullopt;
+#endif
+}
+
+std::optional<std::vector<ana::offline::SourceChoice>> ReaperHostBridge::scanTakeChoices(
+    void* targetTrack, const std::vector<void*>& selectedItems) const
 {
     std::vector<ana::offline::SourceChoice> choices;
 
@@ -401,10 +487,15 @@ std::optional<std::vector<ana::offline::SourceChoice>> ReaperHostBridge::scanTak
         || getSetMediaItemTakeInfoString == nullptr)
         return std::nullopt;
 
-    const auto itemCount = std::max(0, countTrackMediaItems(track));
+    // Only MONITOR can override its selected track with items selected across
+    // the project. TRACK always enumerates its own containing track.
+    const auto selectionActive = followSelectedTrack && ! selectedItems.empty();
+    const auto itemCount = selectionActive ? static_cast<int>(selectedItems.size())
+                                           : std::max(0, countTrackMediaItems(track));
     for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex)
     {
-        auto* item = getTrackMediaItem(track, itemIndex);
+        auto* item = selectionActive ? static_cast<MediaItem*>(selectedItems[static_cast<size_t>(itemIndex)])
+                                     : getTrackMediaItem(track, itemIndex);
         if (item == nullptr)
             continue;
 
@@ -417,13 +508,16 @@ std::optional<std::vector<ana::offline::SourceChoice>> ReaperHostBridge::scanTak
         const auto itemDuration = std::max(0.0, getMediaItemInfoValue(item, "D_LENGTH"));
         const auto itemGainValue = getMediaItemInfoValue(item, "D_VOL");
         const auto itemGain = std::isfinite(itemGainValue) ? itemGainValue : 1.0;
-        auto* activeTake = getActiveTake != nullptr ? getActiveTake(item) : nullptr;
+        auto* activeTake = getActiveTake(item);
         auto activeSourceName = getReaperSourceName(
             getMediaSourceFileName,
             activeTake != nullptr ? getMediaItemTakeSource(activeTake) : nullptr);
 
         const auto takeCount = std::max(0, getMediaItemNumTakes(item));
-        for (int takeIndex = 0; takeIndex < takeCount; ++takeIndex)
+        // Only the first two takes are relevant to ANA, even if REAPER's
+        // active take happens to be #3 or later. Item selection does not
+        // change which takes are available to the analyzer.
+        for (int takeIndex = 0; takeIndex < std::min(takeCount, 2); ++takeIndex)
         {
             auto* take = getMediaItemTake(item, takeIndex);
             if (take == nullptr)
@@ -431,9 +525,14 @@ std::optional<std::vector<ana::offline::SourceChoice>> ReaperHostBridge::scanTak
 
             const auto audioSourceName = getReaperSourceName(
                 getMediaSourceFileName, getMediaItemTakeSource(take));
-            const auto audioContentFingerprint = getReaperAudioContentFingerprint(
-                getMediaItemTakeSource(take), getMediaSourceLength, getMediaSourceSampleRate,
-                getMediaSourceNumChannels, getPeaks);
+            // MONITOR analyses source files on its worker, without ARA source
+            // matching. Do not read PCM peaks on the message thread here:
+            // frozen/rendered sources can make these host reads block the UI.
+            const auto audioContentFingerprint = followSelectedTrack
+                ? std::optional<uint64_t> {}
+                : getReaperAudioContentFingerprint(
+                    getMediaItemTakeSource(take), getMediaSourceLength, getMediaSourceSampleRate,
+                    getMediaSourceNumChannels, getPeaks);
             if (activeSourceName.isEmpty())
                 activeSourceName = audioSourceName;
 
@@ -476,7 +575,8 @@ std::optional<std::vector<ana::offline::SourceChoice>> ReaperHostBridge::scanTak
                                 audioContentFingerprint.value_or(0),
                                 audioContentFingerprint.has_value(),
                                 getReaperSourcePath(getMediaSourceFileName,
-                                                   getMediaItemTakeSource(take)) });
+                                                   getMediaItemTakeSource(take)),
+                                selectionActive });
         }
     }
 #endif
@@ -493,6 +593,7 @@ void ReaperHostBridge::setEnabled(const bool shouldEnable)
     {
         const juce::ScopedLock scopedLock(choicesLock);
         cachedTakeChoices.clear();
+        cachedSelectedItems.clear();
         cachedTarget = {};
     }
     takeChoicesCacheValid.store(false, std::memory_order_release);
@@ -508,10 +609,12 @@ bool ReaperHostBridge::hasTakeCatalogue() const noexcept
     return takeChoicesCacheValid.load(std::memory_order_acquire);
 }
 
-bool ReaperHostBridge::isAvailable() const
+bool ReaperHostBridge::isAvailable() const noexcept
 {
-    const juce::ScopedLock scopedLock(hostLock);
-    return hostApplication != nullptr;
+    // Called by PluginProcessor::isOfflineMode() from processBlock().
+    // scanTakeChoices() can hold hostLock during REAPER peak/fingerprint reads;
+    // taking that same lock here produces periodic audio dropouts.
+    return hostInterfaceAvailable.load(std::memory_order_acquire);
 }
 
 int ReaperHostBridge::getTrackNumber() const

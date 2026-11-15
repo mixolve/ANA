@@ -69,7 +69,11 @@ void drawSpec(const PluginProcessor& processor, juce::Graphics& graphics,
     if (! hasData)
         return;
 
+    juce::Graphics::ScopedSaveState saveState(graphics);
+    graphics.reduceClipRegion(plotBounds.toNearestInt());
+
     juce::Path path;
+    juce::Path outlinePath;
     juce::Point<float> firstPoint;
     juce::Point<float> lastPoint;
     std::vector<juce::Point<int>> aliasedPoints;
@@ -92,12 +96,22 @@ void drawSpec(const PluginProcessor& processor, juce::Graphics& graphics,
         {
             firstPoint = point.withX(plotBounds.getX());
             path.startNewSubPath(firstPoint);
+            if (displayValue > lowRange)
+                outlinePath.startNewSubPath(firstPoint);
             aliasedPoints.emplace_back(juce::roundToInt(firstPoint.x), juce::roundToInt(firstPoint.y));
             hasPoint = true;
         }
         else
         {
             path.lineTo(point);
+            // Below-range columns close the fill but must not form a visible
+            // horizontal stroke across the bottom of the spectrum.
+            if (displayValue > lowRange || lastPoint.y < plotBounds.getBottom())
+            {
+                if (lastPoint.y >= plotBounds.getBottom())
+                    outlinePath.startNewSubPath(lastPoint);
+                outlinePath.lineTo(point);
+            }
             aliasedPoints.emplace_back(juce::roundToInt(point.x), juce::roundToInt(point.y));
         }
         lastPoint = point;
@@ -131,14 +145,11 @@ void drawSpec(const PluginProcessor& processor, juce::Graphics& graphics,
         }
 
         graphics.setColour(lineColour);
-        graphics.strokePath(path, juce::PathStrokeType(1.0f));
+        graphics.strokePath(outlinePath, juce::PathStrokeType(1.0f));
         return;
     }
 
     // JUCE line primitives stay anti-aliased; draw 1px rectangles for a truly aliased OFF mode.
-    juce::Graphics::ScopedSaveState saveState(graphics);
-    graphics.reduceClipRegion(plotBounds.toNearestInt());
-
     const auto rasteriseLine = [&graphics] (juce::Point<int> from, juce::Point<int> to)
     {
         auto x0 = from.x;
@@ -180,7 +191,8 @@ void drawSpec(const PluginProcessor& processor, juce::Graphics& graphics,
         {
             const auto top = std::min(y, baselineY);
             const auto bottom = std::max(y, baselineY);
-            graphics.fillRect(x, top, 1, bottom - top + 1);
+            if (top < baselineY)
+                graphics.fillRect(x, top, 1, bottom - top);
         };
 
         fillColumn(aliasedPoints.front().x, aliasedPoints.front().y);
@@ -216,7 +228,10 @@ void drawSpec(const PluginProcessor& processor, juce::Graphics& graphics,
         return;
     }
 
+    const auto baselineY = juce::roundToInt(plotBounds.getBottom());
     for (size_t index = 1; index < aliasedPoints.size(); ++index)
-        rasteriseLine(aliasedPoints[index - 1], aliasedPoints[index]);
+        if (aliasedPoints[index - 1].y < baselineY
+            || aliasedPoints[index].y < baselineY)
+            rasteriseLine(aliasedPoints[index - 1], aliasedPoints[index]);
 }
 }

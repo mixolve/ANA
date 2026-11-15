@@ -1,32 +1,42 @@
+#include "shared/shell/ControlDock.h"
+#include "shared/shell/NumericValueBox.h"
+#include "shared/shell/SettingsViewport.h"
+#include "shared/shell/HostShortcutDocumentWindow.h"
+#include "shared/shell/InlineResetPrompt.h"
+#include "shared/shell/EdgeResizeHandle.h"
 #include "Editor.h"
 #include "Processor.h"
-#include "OscParameterSections.h"
 #include "shared/shell/Theme.h"
+#include "shared/shell/SvgExport.h"
 #include "shared/shell/EditorLayout.h"
 #include "shared/shell/AuxiliaryWindowFocus.h"
 #include "shared/shell/GraphColours.h"
 #include "shared/shell/EdgeResizeContent.h"
+#include "shared/shell/AuxiliaryWindowFooter.h"
+#include "shared/shell/EditorWindowResize.h"
+#include "shared/shell/WindowGeometry.h"
 #include "shared/scop/Layout.h"
-#include "OscController.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <iterator>
+#include <cstdio>
+#include <cstring>
+#include <set>
 #include <utility>
 
 namespace
 {
+// Other pages keep the original compact minimum. SCOP reserves control space
+// only for its currently displayed bands (see minimumHeightForCurrentPage).
 constexpr int minimumEditorHeight = ana::scop::minimumEditorHeightForBands(
     ana::scop::minimumRealtimeBandHeight);
 constexpr int maximumEditorSize = 32768;
 constexpr int defaultEditorHeight = minimumEditorHeight;
-constexpr int editorResizeHandleThickness = ana::ui::gap.pixels();
-constexpr int settingsWindowWidth = 300;
+constexpr int editorResizeHandleThickness = ana::ui::resizeHandleThickness;
+constexpr int settingsWindowWidth = ana::ui::square::windowWidth;
 constexpr int maximumSettingsWindowHeight = 1200;
-constexpr int minimumSnapshotsWindowWidth = 300;
-constexpr int oscWindowWidth = settingsWindowWidth;
-constexpr int maximumSnapshotsWindowHeight = 1200;
 constexpr int snapshotFileMagic = 0x414e4153; // "ANAS"
 constexpr int snapshotFileVersion = 3;
 constexpr int maximumSnapshotNameLength = 256;
@@ -40,7 +50,6 @@ int minimumEditorWidth() noexcept
 
 const auto& snapshotColourOptions = ana::ui::graphColourOptions;
 
-int snapshotGainFieldWidth() noexcept { return ana::ui::textControlWidth(6); }
 const juce::Colour snapshotFieldBorderColour { 0xffbbbbbb };
 
 juce::String formatSnapshotGain(const float gainDb)
@@ -50,20 +59,114 @@ juce::String formatSnapshotGain(const float gainDb)
     return juce::String(clamped >= 0.0f ? "+" : "-") + absolute;
 }
 
-class InvisibleResizableEdgeComponent final : public juce::ResizableEdgeComponent
+class InvisibleResizableEdgeComponent final : public EdgeResizeHandle
 {
 public:
-    using juce::ResizableEdgeComponent::ResizableEdgeComponent;
-    void paint(juce::Graphics&) override {}
+    InvisibleResizableEdgeComponent(juce::AudioProcessorEditor* editor,
+        juce::ResizableEdgeComponent::Edge edge)
+        : EdgeResizeHandle(*editor,
+            edge == juce::ResizableEdgeComponent::leftEdge || edge == juce::ResizableEdgeComponent::rightEdge
+                ? Axis::horizontal : Axis::vertical, 1, 100000,
+            edge == juce::ResizableEdgeComponent::leftEdge || edge == juce::ResizableEdgeComponent::topEdge),
+          target(*editor), side(edge) {}
+    void mouseDown(const juce::MouseEvent& event) override
+    { nativeResize.begin(target, side); EdgeResizeHandle::mouseDown(event); }
+    void mouseDrag(const juce::MouseEvent& event) override
+    { EdgeResizeHandle::mouseDrag(event); nativeResize.update(); }
+    void mouseUp(const juce::MouseEvent&) override { nativeResize.update(); nativeResize.end(); }
+private:
+    juce::AudioProcessorEditor& target;
+    juce::ResizableEdgeComponent::Edge side;
+    EditorWindowResize nativeResize;
+};
+
+class InvisibleResizableCornerComponent final : public EdgeResizeHandle
+{
+public:
+    explicit InvisibleResizableCornerComponent(juce::AudioProcessorEditor* editor)
+        : EdgeResizeHandle(*editor, Axis::both, 1, 100000),
+          target(*editor) {}
+    void mouseDown(const juce::MouseEvent& event) override
+    { nativeResize.beginCorner(target); EdgeResizeHandle::mouseDown(event); }
+    void mouseDrag(const juce::MouseEvent& event) override
+    { EdgeResizeHandle::mouseDrag(event); nativeResize.update(); }
+    void mouseUp(const juce::MouseEvent&) override { nativeResize.update(); nativeResize.end(); }
+private:
+    juce::AudioProcessorEditor& target;
+    EditorWindowResize nativeResize;
+};
+
+class EditorSizeConstrainer final : public juce::ComponentBoundsConstrainer
+{
+public:
+    void applyBoundsToComponent(juce::Component& component, juce::Rectangle<int> bounds) override
+    {
+        // The host owns the editor's origin. JUCE's left/top edge resizers
+        // otherwise shift the plugin inside its host instead of resizing it.
+        bounds.setPosition(component.getPosition());
+        juce::ComponentBoundsConstrainer::applyBoundsToComponent(component, bounds);
+    }
 };
 
 class SettingsWindowContent final : public juce::Component
 {
 public:
+    void paint(juce::Graphics& g) override { g.fillAll(ana::ui::square::panelBackground); }
+    void paintOverChildren(juce::Graphics& g) override
+    { NumericValueBox::paintRangeIndicators(g,*this); g.setColour(ana::ui::background); g.drawRect(getLocalBounds(),2); }
     explicit SettingsWindowContent(SettingsPanel& panelIn)
-        : panel(panelIn)
+        : dock(panelIn.getProcessor(),panelIn), panel(panelIn)
     {
+        getProperties().set("emptyEditorBackground",true);
+        panel.getProperties().set("externalSettingsFrame",true);
         addAndMakeVisible(panel);
+        addAndMakeVisible(dock);
+    }
+
+    void showPopup(const juce::Rectangle<int> anchorBounds,
+                   const juce::StringArray& choices,
+                   const std::vector<bool>& enabledChoices,
+                   const int selectedIndex,
+                   std::function<void(int)> onSelect,
+                   std::unique_ptr<ChoicePopup>* slot = nullptr)
+    {
+        dismissChoicePrompt();
+        dismissResetPrompt();
+
+        juce::Component::SafePointer<SettingsWindowContent> safeContent(this);
+        auto popup = std::make_unique<ChoicePopup>(
+            anchorBounds, choices, enabledChoices, selectedIndex,
+            [safeContent, select = std::move(onSelect)] (const int index) mutable
+            {
+                if (safeContent != nullptr && select != nullptr)
+                    select(index);
+            },
+            [safeContent, slot]
+            {
+                if (safeContent == nullptr)
+                    return;
+                if (slot == nullptr || slot == &safeContent->choicePrompt)
+                    safeContent->dismissChoicePrompt();
+                else
+                    safeContent->dismissResetPrompt();
+            });
+        addAndMakeVisible(*popup);
+        popup->setBounds(getLocalBounds());
+        popup->toFront(true);
+        if (slot == nullptr)
+            choicePrompt = std::move(popup);
+        else
+            *slot = std::move(popup);
+    }
+
+    void showAboutPopup(AboutPopup& popup)
+    {
+        dismissChoicePrompt(); dismissResetPrompt();
+        about = &popup;
+        addAndMakeVisible(popup);
+        popup.setBounds(getLocalBounds());
+        popup.toFront(true);
+        popup.grabKeyboardFocus();
     }
 
     void showChoicePrompt(ParameterControl& control)
@@ -72,25 +175,13 @@ public:
         if (choices.isEmpty())
             return;
 
-        dismissChoicePrompt();
-        dismissResetPrompt();
-        const auto anchorBounds = getLocalArea(&control, control.getValueBounds());
         juce::Component::SafePointer<ParameterControl> safeControl(&control);
-        choicePrompt = std::make_unique<ChoicePopup>(
-            anchorBounds, choices, std::vector<bool> {}, control.getSelectedChoiceIndex(),
-            [safeControl] (const int selectedIndex)
-            {
-                if (safeControl != nullptr)
-                    safeControl->setSelectedChoiceIndex(selectedIndex);
-            },
-            [safeContent = juce::Component::SafePointer<SettingsWindowContent>(this)]
-            {
-                if (safeContent != nullptr)
-                    safeContent->dismissChoicePrompt();
-            });
-        addAndMakeVisible(*choicePrompt);
-        choicePrompt->setBounds(getLocalBounds());
-        choicePrompt->toFront(true);
+        showPopup(getLocalArea(&control, control.getValueBounds()), choices, {}, control.getSelectedChoiceIndex(),
+                  [safeControl] (const int selectedIndex)
+                  {
+                      if (safeControl != nullptr)
+                          safeControl->setSelectedChoiceIndex(selectedIndex);
+                  });
     }
 
     void dismissChoicePrompt()
@@ -100,29 +191,19 @@ public:
 
     void showResetPrompt(ParameterControl& control)
     {
-        dismissChoicePrompt();
-        dismissResetPrompt();
-
         const auto anchorBounds = getLocalArea(&control, control.getTitleBounds());
         if (anchorBounds.isEmpty())
             return;
 
         juce::Component::SafePointer<ParameterControl> safeControl(&control);
-        resetPrompt = std::make_unique<ChoicePopup>(
-            anchorBounds, juce::StringArray { "R?" }, std::vector<bool> { true }, -1,
-            [safeControl] (const int selectedIndex)
-            {
-                if (safeControl != nullptr && selectedIndex == 0)
-                    safeControl->resetToDefault();
-            },
-            [safeContent = juce::Component::SafePointer<SettingsWindowContent>(this)]
-            {
-                if (safeContent != nullptr)
-                    safeContent->dismissResetPrompt();
-            });
+        dismissChoicePrompt();
+        resetPrompt = std::make_unique<InlineResetPrompt>(anchorBounds, false,
+            [safeControl] { if (safeControl != nullptr) safeControl->resetToDefault(); },
+            [safeThis = juce::Component::SafePointer<SettingsWindowContent>(this)]
+            { if (safeThis != nullptr) safeThis->dismissResetPrompt(); });
         addAndMakeVisible(*resetPrompt);
         resetPrompt->setBounds(getLocalBounds());
-        resetPrompt->toFront(true);
+        resetPrompt->toFront(false);
     }
 
     void dismissResetPrompt()
@@ -132,7 +213,11 @@ public:
 
     void resized() override
     {
-        panel.setBounds(getLocalBounds());
+        auto area=getLocalBounds();
+        panel.setVisible(!dock.dockOnly());
+        if(dock.dockOnly()) { panel.setBounds({}); dock.setBounds(area); }
+        else { dock.setBounds(area.removeFromBottom(96)); area.removeFromBottom(8); panel.setBounds(area); }
+        if (about != nullptr) { about->setBounds(getLocalBounds()); about->toFront(true); }
         if (choicePrompt != nullptr)
         {
             choicePrompt->setBounds(getLocalBounds());
@@ -145,720 +230,581 @@ public:
         }
     }
 
-    void paintOverChildren(juce::Graphics& graphics) override
-    {
-        graphics.setColour(ana::ui::white);
-        graphics.drawRect(getLocalBounds(), 1);
-    }
-
+public:
+    ControlDock dock;
 private:
     SettingsPanel& panel;
+    juce::Component::SafePointer<AboutPopup> about;
     std::unique_ptr<ChoicePopup> choicePrompt;
-    std::unique_ptr<ChoicePopup> resetPrompt;
+    std::unique_ptr<InlineResetPrompt> resetPrompt;
 };
 
 class SnapshotRow final : public juce::Component
 {
 public:
     SnapshotRow(SpecView& specViewIn, const size_t snapshotIndexIn,
-                    const int initialColourIndex)
+                const int initialColourIndex)
         : specView(specViewIn), snapshotIndex(snapshotIndexIn)
     {
-        visibilityPress.onArmed = [this]
-        {
-            if (onClearPromptRequested)
-                onClearPromptRequested(*this);
+        getProperties().set("emptyEditorBackground", true);
 
-            visibilityPress.cancel();
+        gainSlider.setRange(SpecView::snapshotGainMinimumDb,
+                            SpecView::snapshotGainMaximumDb, 0.01);
+        gainSlider.setValue(0.0, juce::dontSendNotification);
+        gainSlider.textFromValueFunction = [] (double value)
+        { return formatSnapshotGain(static_cast<float>(value)); };
+        gainSlider.valueFromTextFunction = [] (const juce::String& value)
+        { return value.trim().getDoubleValue(); };
+        gainSlider.onValueChange = [this]
+        {
+            if (!updatingGainValue && isAvailable())
+                setGainDb(static_cast<float>(gainSlider.getValue()));
         };
-
-        gainPress.onArmed = [this]
+        gainControl.setSquareStyle([] { return juce::String("GAIN"); });
+        gainControl.setSlotIndicatorVisible(false);
+        gainControl.setNumericControlEnabled(true);
+        gainControl.onResetRequested = [this]
         {
-            if (onGainResetPromptRequested)
+            if (isAvailable() && onGainResetPromptRequested)
                 onGainResetPromptRequested(*this);
-
-            gainPress.cancel();
         };
+        addAndMakeVisible(gainControl);
+        gainControl.onEditorVisibilityChanged = [this] (bool editing)
+        { if (onTextEditingChanged) onTextEditingChanged(editing); };
 
-        numberLabel.setText("SNAPSHOT " + juce::String(static_cast<int>(snapshotIndex + 1)),
-                            juce::dontSendNotification);
-        numberLabel.setFont(ana::ui::makeFont());
-        numberLabel.setJustificationType(juce::Justification::centredLeft);
-        numberLabel.setColour(juce::Label::textColourId, ana::ui::white);
-        numberLabel.setColour(juce::Label::textWhenEditingColourId, ana::ui::white);
-        numberLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
-        numberLabel.setColour(juce::Label::outlineColourId, snapshotFieldBorderColour);
-        numberLabel.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
-        numberLabel.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
-        numberLabel.setBorderSize(juce::BorderSize<int>(0, ana::ui::gap.pixels(), 0, ana::ui::gap.pixels()));
-        numberLabel.setDrawBackground(false);
-        numberLabel.setEditable(false, true, false);
-        numberLabel.setTooltip("RENAME SNAPSHOT");
-        addAndMakeVisible(numberLabel);
-
-        gainLabel.setText(formatSnapshotGain(0.0f), juce::dontSendNotification);
-        gainLabel.setFont(ana::ui::makeFont());
-        gainLabel.setJustificationType(juce::Justification::centred);
-        gainLabel.setColour(juce::Label::textColourId, ana::ui::white);
-        gainLabel.setColour(juce::Label::textWhenEditingColourId, ana::ui::white);
-        gainLabel.setColour(juce::Label::backgroundColourId, ana::ui::dark);
-        gainLabel.setColour(juce::Label::outlineColourId, snapshotFieldBorderColour);
-        gainLabel.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
-        gainLabel.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
-        gainLabel.setBorderSize(juce::BorderSize<int>(0));
-        gainLabel.setDrawBackground(true);
-        gainLabel.setEditable(false, true, false);
-        gainLabel.setTooltip("SNAPSHOT GAIN");
-        gainLabel.onTextChange = [this]
+        for (auto* control : std::array<NumericValueBox*, 5> {
+                 &cameraControl, &colourControl, &exportControl, &importControl, &visibilityControl })
         {
-            if (updatingGainLabel)
-                return;
-
-            setGainDb(static_cast<float>(gainLabel.getText().trim().getDoubleValue()), true);
-        };
-        gainLabel.addMouseListener(this, false);
-        addAndMakeVisible(gainLabel);
-
-        const auto textEditingChanged = [this] (const bool isEditing)
+            control->setNumericControlEnabled(false);
+            control->setSlotIndicatorVisible(false);
+            addAndMakeVisible(*control);
+        }
+        const auto configureCommand = [] (NumericValueBox& control, juce::Slider& slider,
+                                          const juce::String& title, std::function<void()> action)
         {
-            if (onTextEditingChanged)
-                onTextEditingChanged(isEditing);
-        };
-        numberLabel.onEditorVisibilityChanged = textEditingChanged;
-        gainLabel.onEditorVisibilityChanged = textEditingChanged;
-
-        cameraButton.setTooltip("CAPTURE SNAPSHOT");
-        cameraButton.onClick = [this]
-        {
-            const auto captured = specView.captureSnapshot(snapshotIndex);
-            cameraButton.setToggleState(false, juce::dontSendNotification);
-            if (captured)
+            slider.setRange(0.0, 1.0, 1.0);
+            control.setSquareStyle([title] { return title; });
+            control.setDiscreteChoiceCount(2);
+            control.displayTextProvider = [title] { return title; };
+            control.onChoiceClicked = [&slider, action] (int)
             {
-                visibilityButton.setToggleState(false, juce::dontSendNotification);
-                updateVisibilityTooltip();
+                action();
+                slider.setValue(0.0, juce::dontSendNotification);
+            };
+            control.onDiscreteEdited = [&slider, action]
+            {
+                if (slider.getValue() >= 0.5) action();
+                slider.setValue(0.0, juce::dontSendNotification);
+            };
+        };
+        configureCommand(cameraControl, cameraSlider, "SNAP\nSHOT", [this]
+        {
+            if (isAvailable() && specView.captureSnapshot(snapshotIndex))
+            {
+                setHidden(false);
+                exportControl.setInteractionEnabled(true);
             }
-        };
-        addAndMakeVisible(cameraButton);
+        });
+        configureCommand(exportControl, exportSlider, "EXP", [this]
+        { if (isAvailable() && onExportRequested) onExportRequested(*this); });
+        configureCommand(importControl, importSlider, "IMP\nONE", [this]
+        { if (isAvailable() && onImportRequested) onImportRequested(*this); });
 
-        colourButton.setTooltip("SNAPSHOT COLOUR");
-        colourButton.onClick = [this]
+        colourSlider.setRange(0.0, double(snapshotColourOptions.size() - 1), 1.0);
+        colourControl.setSquareStyle([] { return juce::String("COLOUR"); });
+        colourControl.setDiscreteChoiceCount(static_cast<int>(snapshotColourOptions.size()));
+        colourControl.displayTextProvider = [this]
+        { return juce::String(snapshotColourOptions[static_cast<size_t>(colourIndex)].name); };
+        // Colour is a normal discrete control: click to advance, Shift+click
+        // to go back; drag uses the standard square-control discrete gesture.
+        colourControl.onChoiceClicked = [this](int direction)
         {
-            if (onColourRequested)
-                onColourRequested(*this);
+            if (!isAvailable()) return;
+            const auto count = static_cast<int>(snapshotColourOptions.size());
+            setColourIndex((colourIndex + (direction < 0 ? count - 1 : 1)) % count);
         };
-        addAndMakeVisible(colourButton);
+        colourControl.onDiscreteEdited = [this]
+        { if (isAvailable()) setColourIndex(juce::roundToInt(colourSlider.getValue())); };
 
-        transferButton.setTooltip("IMPORT / EXPORT SNAPSHOT");
-        transferButton.onClick = [this]
-        {
-            if (onTransferRequested)
-                onTransferRequested(*this);
-        };
-        addAndMakeVisible(transferButton);
+        visibilityControl.setSquareStyle([] { return juce::String("SNAP\nHIDE"); });
+        visibilitySlider.setRange(0.0, 1.0, 1.0);
+        visibilityControl.setDiscreteChoiceCount(2);
+        visibilityControl.onChoiceClicked = [this](int)
+        { if (isAvailable()) setHidden(specView.isSnapshotVisible(snapshotIndex)); };
+        visibilityControl.onDiscreteEdited = [this]
+        { if (isAvailable()) setHidden(visibilitySlider.getValue() >= 0.5); };
+        visibilityControl.displayTextProvider = [this]
+        { return specView.isSnapshotVisible(snapshotIndex) ? juce::String("HIDE") : juce::String("SHOW"); };
 
-        visibilityButton.setClickingTogglesState(false);
-        // Keep row actions in the mouse listener so release cannot consume a long-press action.
-        visibilityButton.onClick = [] {};
-        visibilityButton.addMouseListener(this, false);
-        updateVisibilityTooltip();
-        addAndMakeVisible(visibilityButton);
+        // Stable action IDs are used when the user pins controls in the dock.
+        cameraControl.setName("snapshots.shot");
+        visibilityControl.setName("snapshots.hide");
 
-        setColourIndex(initialColourIndex);
-        syncGainFromSnapshot();
-    }
-
-    ~SnapshotRow() override
-    {
-        visibilityPress.cancel();
-        gainPress.cancel();
-        gainLabel.removeMouseListener(this);
-        visibilityButton.removeMouseListener(this);
+        colourIndex = initialColourIndex;
+        bindGainAttachment();
+        syncFromSnapshot();
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(1);
-        gainLabel.setBounds(area.removeFromRight(snapshotGainFieldWidth()));
-        ana::ui::gap.removeFromRight(area);
-        visibilityButton.setBounds(area.removeFromRight(ana::ui::iconControlSize));
-        ana::ui::gap.removeFromRight(area);
-        transferButton.setBounds(area.removeFromRight(ana::ui::iconControlSize));
-        ana::ui::gap.removeFromRight(area);
-        colourButton.setBounds(area.removeFromRight(ana::ui::iconControlSize));
-        ana::ui::gap.removeFromRight(area);
-        cameraButton.setBounds(area.removeFromRight(ana::ui::iconControlSize));
-        ana::ui::gap.removeFromRight(area);
-        numberLabel.setBounds(area);
+        using namespace ana::ui::square;
+        std::array<juce::Component*, 6> controls {
+            &cameraControl, &colourControl, &exportControl,
+            &importControl, &visibilityControl, &gainControl
+        };
+        for (size_t index = 0; index < controls.size(); ++index)
+            controls[index]->setBounds(static_cast<int>(index) * (size + spacing),
+                                        0, size, size);
     }
 
-    void mouseDown(const juce::MouseEvent& event) override
-    {
-        if (event.originalComponent == &gainLabel)
-        {
-            if (! event.mods.isLeftButtonDown() || event.getNumberOfClicks() > 1)
-                return;
-
-            gainPress.begin(true);
-            return;
-        }
-
-        if (event.originalComponent != &visibilityButton || ! event.mods.isLeftButtonDown())
-            return;
-
-        visibilityPress.begin(true);
-    }
-
-    void mouseDrag(const juce::MouseEvent& event) override
-    {
-        if (event.originalComponent == &gainLabel && gainPress.isActive()
-            && event.mouseWasDraggedSinceMouseDown())
-        {
-            gainPress.markDragged();
-            return;
-        }
-
-        if (event.originalComponent == &visibilityButton && visibilityPress.isActive()
-            && event.mouseWasDraggedSinceMouseDown())
-            visibilityPress.markDragged();
-    }
-
-    void mouseUp(const juce::MouseEvent& event) override
-    {
-        if (event.originalComponent == &gainLabel && gainPress.isActive())
-        {
-            const auto releaseResult = gainPress.release();
-            if (releaseResult == LongPressGesture::ReleaseResult::shortPress
-                && onGainFocusRequested)
-                onGainFocusRequested(*this);
-            return;
-        }
-
-        if (event.originalComponent != &visibilityButton || ! visibilityPress.isActive())
-            return;
-
-        const auto releaseResult = visibilityPress.release();
-        if (releaseResult != LongPressGesture::ReleaseResult::shortPress)
-            return;
-
-        const auto shouldHide = ! visibilityButton.getToggleState();
-        visibilityButton.setToggleState(shouldHide, juce::dontSendNotification);
-        specView.setSnapshotVisible(snapshotIndex, ! shouldHide);
-        updateVisibilityTooltip();
-    }
-
-    void mouseExit(const juce::MouseEvent& event) override
-    {
-        if (event.originalComponent == &gainLabel && gainPress.isActive())
-        {
-            gainPress.cancelArming();
-            return;
-        }
-
-        if (event.originalComponent == &visibilityButton && visibilityPress.isActive())
-            visibilityPress.cancelArming();
-    }
+    juce::Array<juce::Component*> dockableControls()
+    { return { &cameraControl, &visibilityControl }; }
 
     size_t getSnapshotIndex() const noexcept { return snapshotIndex; }
-    void setSnapshotIndex(const size_t newSnapshotIndex) noexcept { snapshotIndex = newSnapshotIndex; }
-    int getColourIndex() const noexcept { return colourIndex; }
-    float getGainDb() const noexcept { return specView.getSnapshotGain(snapshotIndex); }
-    juce::String getSnapshotName() const { return numberLabel.getText().trim().substring(0, maximumSnapshotNameLength); }
-    juce::Rectangle<int> getColourButtonBounds() const noexcept { return colourButton.getBounds(); }
-    juce::Rectangle<int> getTransferButtonBounds() const noexcept { return transferButton.getBounds(); }
-    juce::Rectangle<int> getVisibilityButtonBounds() const noexcept { return visibilityButton.getBounds(); }
-    juce::Rectangle<int> getGainLabelBounds() const noexcept { return gainLabel.getBounds(); }
-
-    void setSnapshotName(juce::String name)
+    void setSnapshotIndex(const size_t newSnapshotIndex)
     {
-        name = name.trim().substring(0, maximumSnapshotNameLength);
-        if (name.isEmpty())
-            name = "SNAPSHOT " + juce::String(static_cast<int>(snapshotIndex + 1));
-        numberLabel.setText(std::move(name), juce::dontSendNotification);
+        if (snapshotIndex != newSnapshotIndex)
+        {
+            snapshotIndex = newSnapshotIndex;
+            bindGainAttachment();
+        }
+        syncFromSnapshot();
     }
+    bool isAvailable() const noexcept { return snapshotIndex < specView.getSnapshotCount(); }
+    void syncAvailability()
+    {
+        const auto available = isAvailable();
+        cameraControl.setInteractionEnabled(available);
+        colourControl.setInteractionEnabled(available);
+        exportControl.setInteractionEnabled(available && specView.hasSnapshotData(snapshotIndex));
+        importControl.setInteractionEnabled(available);
+        visibilityControl.setInteractionEnabled(available);
+        gainControl.setInteractionEnabled(available);
+    }
+    int getColourIndex() const noexcept { return colourIndex; }
+    juce::String getSnapshotName() const { return specView.getSnapshotName(snapshotIndex); }
+    juce::Rectangle<int> getGainControlBounds() const noexcept { return gainControl.getBounds(); }
 
     void setColourIndex(const int newIndex)
     {
+        if (!isAvailable()) return;
         colourIndex = juce::jlimit(0, static_cast<int>(snapshotColourOptions.size()) - 1, newIndex);
+        colourSlider.setValue(double(colourIndex), juce::dontSendNotification);
         specView.setSnapshotColour(snapshotIndex, ana::ui::graphColour(colourIndex));
+        colourControl.repaint();
     }
 
-    void setGainDb(const float gainDb, const bool notifyFocusOwner = false)
+    void setGainDb(const float gainDb)
     {
-        const auto clamped = juce::jlimit(SpecView::snapshotGainMinimumDb, SpecView::snapshotGainMaximumDb, gainDb);
+        if (!isAvailable()) return;
+        const auto clamped = juce::jlimit(SpecView::snapshotGainMinimumDb,
+                                         SpecView::snapshotGainMaximumDb, gainDb);
         const auto quantised = std::round(clamped * 100.0f) * 0.01f;
         specView.setSnapshotGain(snapshotIndex, quantised);
-        updateGainLabel(quantised);
-
-        if (notifyFocusOwner && onGainChanged)
-            onGainChanged(*this);
-    }
-
-    void setGainSelected(const bool shouldBeSelected)
-    {
-        if (gainSelected == shouldBeSelected)
-            return;
-
-        gainSelected = shouldBeSelected;
-        gainLabel.setColour(juce::Label::outlineColourId,
-                            gainSelected ? juce::Colours::transparentBlack
-                                         : snapshotFieldBorderColour);
-        repaint(gainLabel.getBounds().expanded(2));
-    }
-
-    void paintOverChildren(juce::Graphics& graphics) override
-    {
-        if (! gainSelected)
-            return;
-
-        graphics.setColour(ana::ui::white);
-        graphics.drawRect(gainLabel.getBounds(), 2);
+        const juce::ScopedValueSetter<bool> guard(updatingGainValue, true);
+        gainSlider.setValue(quantised, juce::sendNotificationSync);
+        gainControl.repaint();
     }
 
     void syncFromSnapshot()
     {
-        cameraButton.setToggleState(false, juce::dontSendNotification);
-        visibilityButton.setToggleState(! specView.isSnapshotVisible(snapshotIndex),
-                                        juce::dontSendNotification);
-        updateVisibilityTooltip();
+        const auto hidden = !specView.isSnapshotVisible(snapshotIndex);
+        visibilitySlider.setValue(hidden ? 1.0 : 0.0, juce::dontSendNotification);
+        visibilityControl.repaint();
         syncGainFromSnapshot();
-
         const auto snapshotColour = specView.getSnapshotColour(snapshotIndex);
         for (size_t index = 0; index < snapshotColourOptions.size(); ++index)
-        {
             if (ana::ui::graphColour(static_cast<int>(index)) == snapshotColour)
             {
                 colourIndex = static_cast<int>(index);
+                colourSlider.setValue(double(colourIndex), juce::dontSendNotification);
                 break;
             }
-        }
+        colourControl.repaint();
+        syncAvailability();
     }
 
-    std::function<void(SnapshotRow&)> onColourRequested;
-    std::function<void(SnapshotRow&)> onTransferRequested;
-    std::function<void(SnapshotRow&)> onClearPromptRequested;
+    std::function<void(SnapshotRow&)> onImportRequested;
+    std::function<void(SnapshotRow&)> onExportRequested;
     std::function<void(SnapshotRow&)> onGainResetPromptRequested;
-    std::function<void(SnapshotRow&)> onGainFocusRequested;
-    std::function<void(SnapshotRow&)> onGainChanged;
     std::function<void(bool)> onTextEditingChanged;
 
 private:
-    void updateVisibilityTooltip()
+    static juce::String snapshotGainId(size_t i)
+    { return "snapshot_gain_" + juce::String(static_cast<int>(i) + 1); }
+    void setHidden(bool hidden)
     {
-        visibilityButton.setTooltip(visibilityButton.getToggleState() ? "SHOW" : "HIDE");
+        specView.setSnapshotVisible(snapshotIndex, !hidden);
+        visibilitySlider.setValue(hidden ? 1.0 : 0.0, juce::dontSendNotification);
+        visibilityControl.repaint();
     }
-
+    void bindGainAttachment()
+    {
+        const auto savedGain = specView.getSnapshotGain(snapshotIndex);
+        gainAttachment.reset();
+        {
+            const juce::ScopedValueSetter<bool> guard(updatingGainValue, true);
+            if (snapshotIndex < 64)
+                gainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+                    specView.getProcessor().getParameters(), snapshotGainId(snapshotIndex), gainSlider);
+            gainSlider.setValue(savedGain, juce::sendNotificationSync);
+        }
+        if (isAvailable())
+            specView.setSnapshotGain(snapshotIndex, savedGain);
+        gainControl.repaint();
+    }
     void syncGainFromSnapshot()
     {
-        updateGainLabel(specView.getSnapshotGain(snapshotIndex));
-    }
-
-    void updateGainLabel(const float gainDb)
-    {
-        const juce::ScopedValueSetter<bool> guard(updatingGainLabel, true);
-        gainLabel.setText(formatSnapshotGain(gainDb), juce::dontSendNotification);
+        const juce::ScopedValueSetter<bool> guard(updatingGainValue, true);
+        gainSlider.setValue(specView.getSnapshotGain(snapshotIndex), juce::sendNotificationSync);
+        gainControl.repaint();
     }
 
     SpecView& specView;
     size_t snapshotIndex = 0;
     int colourIndex = 0;
-    bool updatingGainLabel = false;
-    bool gainSelected = false;
-    LongPressGesture visibilityPress;
-    LongPressGesture gainPress;
-    EllipsisLabel numberLabel;
-    EllipsisLabel gainLabel;
-    ControlButton cameraButton { "camera" };
-    ControlButton colourButton { "palette" };
-    ControlButton transferButton { "arrows-up-down" };
-    ControlButton visibilityButton { "eye-off" };
+    bool updatingGainValue = false;
+    juce::Slider gainSlider, cameraSlider, colourSlider, exportSlider, importSlider, visibilitySlider;
+    NumericValueBox gainControl { gainSlider };
+    NumericValueBox cameraControl { cameraSlider };
+    NumericValueBox colourControl { colourSlider };
+    NumericValueBox exportControl { exportSlider };
+    NumericValueBox importControl { importSlider };
+    NumericValueBox visibilityControl { visibilitySlider };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment;
 };
+} // namespace
+
+// Name tiles are the only per-snapshot UI objects. All six actions above
+// are shared and rebound to the selected tile.
+class SnapshotNameTile final : public juce::Component
+{
+public:
+    SnapshotNameTile(SpecView& view, size_t indexIn)
+        : specView(view), index(indexIn)
+    {
+        getProperties().set("emptyEditorBackground", true);
+        label.setFont(ana::ui::makeFont());
+        label.setJustificationType(juce::Justification::centredLeft);
+        label.setColour(juce::Label::textWhenEditingColourId, ana::ui::white);
+        label.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
+        label.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
+        label.setBorderSize(juce::BorderSize<int>(0, ana::ui::gap.pixels(), 0, ana::ui::gap.pixels()));
+        label.setDrawBackground(true);
+        label.setHoverEnabled(false); // Selected and idle tiles have stable colours; no hover flash.
+        label.setEditable(false, false, false); // Editing is started only by RENAME.
+        label.setInterceptsMouseClicks(false, true); // Route clicks and wheel to the tile.
+        label.setTooltip("CLICK TO SELECT");
+        label.onTextChange = [this]
+        {
+            auto name = label.getText().trim().substring(0, maximumSnapshotNameLength);
+            if (name.isEmpty())
+                name = "SNAPSHOT " + juce::String(static_cast<int>(index + 1));
+            specView.setSnapshotName(index, name);
+            if (name != label.getText()) label.setText(name, juce::dontSendNotification);
+        };
+        label.onEditorVisibilityChanged = [this] (bool editing)
+        { if (onTextEditingChanged) onTextEditingChanged(editing); };
+        addAndMakeVisible(label);
+        refresh();
+    }
+    void resized() override { label.setBounds(getLocalBounds()); }
+    void setSnapshotIndex(size_t newIndex) { index = newIndex; refresh(); }
+    size_t getSnapshotIndex() const noexcept { return index; }
+    void refresh()
+    {
+        auto name = specView.getSnapshotName(index);
+        if (name.isEmpty()) name = "SNAPSHOT " + juce::String(static_cast<int>(index + 1));
+        label.setText(name, juce::dontSendNotification);
+    }
+    void beginRename() { label.showEditor(); }
+    void setSelected(bool selected)
+    {
+        label.setColour(juce::Label::backgroundColourId, selected ? juce::Colour(0xffffffff) : ana::ui::dark);
+        label.setColour(juce::Label::textColourId, selected ? juce::Colour(0xff222222) : ana::ui::white);
+        label.setColour(juce::Label::outlineColourId,
+                        selected ? ana::ui::white : snapshotFieldBorderColour);
+        label.repaint();
+    }
+    std::function<void(size_t)> onSelected;
+    std::function<void(bool)> onTextEditingChanged;
+    std::function<void(const juce::MouseEvent&, const juce::MouseWheelDetails&)> onWheel;
+private:
+    void mouseDown(const juce::MouseEvent& event) override
+    {
+        if (!event.mods.isLeftButtonDown()) return;
+        if (onSelected) onSelected(index);
+    }
+    void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
+    {
+        if (onWheel) onWheel(event, wheel);
+    }
+    SpecView& specView;
+    size_t index;
+    EllipsisLabel label;
+};
+
 class SnapshotsWindowContent final : public juce::Component
 {
 public:
     explicit SnapshotsWindowContent(SpecView& specViewIn)
-        : specView(specViewIn)
+        : specView(specViewIn), actionsRow(specViewIn, 0, ana::ui::defaultGraphColourIndex)
     {
-        setOpaque(true);
-
-        addButton.setTooltip("ADD SNAPSHOT");
-        addButton.onClick = [this] { addSnapshotRow(); };
-        addAndMakeVisible(addButton);
-
-        bulkImportButton.setTooltip("IMPORT SNAPSHOTS");
-        bulkImportButton.onClick = [this] { beginBulkSnapshotImport(); };
-        addAndMakeVisible(bulkImportButton);
-
-        closeButton.setTooltip("CLOSE");
-        closeButton.onClick = [this]
+        setName("unit.snapshots");
+        getProperties().set("emptyEditorBackground", true);
+        setOpaque(false);
+        const auto commandControl = [] (NumericValueBox& control, juce::Slider& slider,
+                                        const juce::String& title, std::function<void()> action)
         {
-            if (onCloseRequested)
-                onCloseRequested();
+            slider.setRange(0.0, 1.0, 1.0);
+            control.setSquareStyle([title] { return title; });
+            control.displayTextProvider = [title] { return title; };
+            control.setNumericControlEnabled(false);
+            control.setDiscreteChoiceCount(2);
+            control.setSlotIndicatorVisible(false);
+            control.onChoiceClicked = [action, &slider] (int)
+            { action(); slider.setValue(0.0, juce::dontSendNotification); };
+            control.onDiscreteEdited = [action, &slider]
+            {
+                if (slider.getValue() >= 0.5) action();
+                slider.setValue(0.0, juce::dontSendNotification);
+            };
         };
-        addAndMakeVisible(closeButton);
-
-        gainPotentiometer.onValueChange = [this]
+        commandControl(addControl, addSlider, "ADD", [this] { addSnapshotRow(); });
+        addAndMakeVisible(addControl);
+        commandControl(bulkImportControl, bulkImportSlider, "IMP\nALL", [this] { beginBulkSnapshotImport(); });
+        addAndMakeVisible(bulkImportControl);
+        commandControl(deleteControl, deleteSlider, "DELETE", [this]
+        { if (hasSelection()) deleteSnapshotRow(selectedSnapshot); });
+        addAndMakeVisible(deleteControl);
+        commandControl(renameControl, renameSlider, "RENAME", [this]
         {
-            if (updatingGainPotentiometer || focusedGainRow == nullptr)
-                return;
+            if (hasSelection() && selectedSnapshot < snapshotRows.size())
+                snapshotRows[selectedSnapshot]->beginRename();
+        });
+        addAndMakeVisible(renameControl);
 
-            const auto normalised = static_cast<float>(gainPotentiometer.getValue());
-            const auto gainDb = SpecView::snapshotGainMinimumDb
-                + normalised * (SpecView::snapshotGainMaximumDb - SpecView::snapshotGainMinimumDb);
-            focusedGainRow->setGainDb(gainDb);
-        };
-        addAndMakeVisible(gainPotentiometer);
+        actionsRow.onImportRequested = [this](SnapshotRow&)
+        { clearInteractionSelection(); beginSnapshotImport(); };
+        actionsRow.onExportRequested = [this](SnapshotRow&)
+        { clearInteractionSelection(); beginSnapshotExport(); };
+        actionsRow.onGainResetPromptRequested = [this](SnapshotRow& row)
+        { showGainResetPrompt(row); };
+        actionsRow.onTextEditingChanged = [this](bool editing)
+        { if (onTextEditingChanged) onTextEditingChanged(editing); };
+        addAndMakeVisible(actionsRow);
 
+        rowsContent.getProperties().set("emptyEditorBackground", true);
+        rowsViewport.getProperties().set("emptyEditorBackground", true);
         rowsViewport.setViewedComponent(&rowsContent, false);
         rowsViewport.setScrollBarsShown(false, false, true, false);
         rowsViewport.setWantsKeyboardFocus(false);
         rowsViewport.setMouseClickGrabsKeyboardFocus(false);
         addAndMakeVisible(rowsViewport);
 
-        rowsContent.addMouseListener(this, false);
+        specView.onSnapshotStateRestored = [this] { restoreSnapshotRows(); };
+        restoreSnapshotRows();
     }
 
     ~SnapshotsWindowContent() override
     {
-        rowsContent.removeMouseListener(this);
+        specView.onSnapshotStateRestored = nullptr;
         rowsViewport.setViewedComponent(nullptr, false);
     }
 
-    void paint(juce::Graphics& graphics) override
-    {
-        graphics.fillAll(ana::ui::background);
-    }
+    juce::Array<juce::Component*> dockableControls()
+    { return actionsRow.dockableControls(); }
 
-    void paintOverChildren(juce::Graphics& graphics) override
-    {
-        graphics.setColour(ana::ui::white);
-        graphics.drawRect(getLocalBounds(), 1);
-    }
+    void paint(juce::Graphics& graphics) override
+    { graphics.fillAll(ana::ui::square::panelBackground); }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(ana::ui::gap.pixels());
-
-        auto footer = area.removeFromBottom(ana::ui::controlHeight);
-        addButton.setBounds(footer.removeFromLeft(ana::ui::iconControlSize));
-        ana::ui::gap.removeFromLeft(footer);
-        bulkImportButton.setBounds(footer.removeFromLeft(ana::ui::iconControlSize));
-        ana::ui::gap.removeFromLeft(footer);
-        closeButton.setBounds(footer.removeFromRight(ana::ui::iconControlSize));
-        ana::ui::gap.removeFromRight(footer);
-        gainPotentiometer.setBounds(footer);
-        ana::ui::gap.removeFromBottom(area);
+        using namespace ana::ui::square;
+        auto area = getLocalBounds();
+        auto row = area.removeFromTop(size);
+        addControl.setBounds(row.removeFromLeft(size));
+        row.removeFromLeft(spacing);
+        bulkImportControl.setBounds(row.removeFromLeft(size));
+        area.removeFromTop(spacing);
+        actionsRow.setBounds(area.removeFromTop(size));
+        area.removeFromTop(spacing);
+        row = area.removeFromTop(size);
+        deleteControl.setBounds(row.removeFromLeft(size));
+        row.removeFromLeft(spacing);
+        renameControl.setBounds(row.removeFromLeft(size));
+        area.removeFromTop(spacing);
         rowsViewport.setBounds(area);
 
-        const auto rowStride = ana::ui::controlHeight + ana::ui::gap.pixels();
+        const auto stride = ana::ui::controlHeight + spacing;
         const auto rowsHeight = snapshotRows.empty()
-            ? 0
-            : static_cast<int>(snapshotRows.size()) * rowStride - ana::ui::gap.pixels();
+            ? 0 : static_cast<int>(snapshotRows.size()) * stride - spacing;
         rowsContent.setSize(std::max(1, area.getWidth()), std::max(area.getHeight(), rowsHeight));
-
-        auto rowArea = rowsContent.getLocalBounds();
-        for (auto& row : snapshotRows)
+        auto listRow = rowsContent.getLocalBounds();
+        for (auto& snapshot : snapshotRows)
         {
-            row->setBounds(rowArea.removeFromTop(ana::ui::controlHeight));
-            ana::ui::gap.removeFromTop(rowArea);
+            snapshot->setBounds(listRow.removeFromTop(ana::ui::controlHeight));
+            listRow.removeFromTop(spacing);
         }
 
-        if (colourPrompt != nullptr)
-        {
-            colourPrompt->setBounds(getLocalBounds());
-            colourPrompt->toFront(true);
-        }
-        if (transferPrompt != nullptr)
-        {
-            transferPrompt->setBounds(getLocalBounds());
-            transferPrompt->toFront(true);
-        }
-        if (clearPrompt != nullptr)
-        {
-            clearPrompt->setBounds(getLocalBounds());
-            clearPrompt->toFront(true);
-        }
         if (gainResetPrompt != nullptr)
-        {
-            gainResetPrompt->setBounds(getLocalBounds());
-            gainResetPrompt->toFront(true);
-        }
+        { gainResetPrompt->setBounds(getLocalBounds()); gainResetPrompt->toFront(true); }
     }
 
-    void mouseDown(const juce::MouseEvent& event) override
-    {
-        if (event.originalComponent != &rowsContent && event.originalComponent != this)
-            return;
+    void dismissGainResetPrompt() { gainResetPrompt.reset(); }
 
-        clearInteractionSelection();
-
-        draggedWindow = getTopLevelComponent();
-        if (draggedWindow != nullptr && draggedWindow != this)
-        {
-            draggingWindow = true;
-            windowDragger.startDraggingComponent(draggedWindow, event);
-        }
-    }
-
-    void mouseDrag(const juce::MouseEvent& event) override
-    {
-        if (! draggingWindow || draggedWindow == nullptr)
-            return;
-
-        windowDragger.dragComponent(draggedWindow, event, nullptr);
-    }
-
-    void mouseUp(const juce::MouseEvent&) override
-    {
-        draggingWindow = false;
-        draggedWindow = nullptr;
-    }
-
-    void dismissColourPrompt()
-    {
-        colourPrompt.reset();
-    }
-
-    void dismissTransferPrompt()
-    {
-        transferPrompt.reset();
-    }
-
-    void dismissClearPrompt()
-    {
-        clearPrompt.reset();
-    }
-
-    void dismissGainResetPrompt()
-    {
-        gainResetPrompt.reset();
-    }
-
-    std::function<void()> onCloseRequested;
     std::function<void(bool)> onTextEditingChanged;
+    std::function<void(int)> onPreferredHeightChanged;
+
+    int preferredEmbeddedHeight() const noexcept
+    {
+        const int count = juce::jmax(1, static_cast<int>(snapshotRows.size()));
+        const int gap = ana::ui::square::spacing;
+        return 3 * ana::ui::square::size + 3 * gap
+            + count * ana::ui::controlHeight + (count - 1) * gap;
+    }
 
 private:
-    SnapshotRow* addSnapshotRow()
+    static constexpr size_t invalidIndex = static_cast<size_t>(-1);
+    bool hasSelection() const noexcept
+    { return selectedSnapshot < specView.getSnapshotCount(); }
+    void notifyPreferredHeightChanged()
+    { if (onPreferredHeightChanged) onPreferredHeightChanged(preferredEmbeddedHeight()); }
+
+    void selectSnapshot(size_t index)
     {
-        const auto snapshotIndex = specView.addSnapshotSlot();
-        const auto initialColourIndex = ana::ui::defaultGraphColourIndex;
-        auto row = std::make_unique<SnapshotRow>(specView, snapshotIndex, initialColourIndex);
-        row->onColourRequested = [this] (SnapshotRow& requestedRow)
+        if (index >= snapshotRows.size()) return;
+        selectedSnapshot = index;
+        for (size_t i = 0; i < snapshotRows.size(); ++i)
+            snapshotRows[i]->setSelected(i == index);
+        actionsRow.setSnapshotIndex(index);
+        deleteControl.setInteractionEnabled(true);
+        renameControl.setInteractionEnabled(true);
+    }
+
+    void restoreSnapshotRows()
+    {
+        dismissGainResetPrompt();
+        const auto previousSelection = selectedSnapshot;
+        snapshotRows.clear();
+        for (size_t index = 0; index < specView.getSnapshotCount(); ++index)
+            addNameTile(index);
+        if (!snapshotRows.empty())
+            selectSnapshot(previousSelection == invalidIndex ? 0
+                : std::min(previousSelection, snapshotRows.size() - 1));
+        else
         {
-            showColourPrompt(requestedRow);
-        };
-        row->onTransferRequested = [this] (SnapshotRow& requestedRow)
+            selectedSnapshot = invalidIndex;
+            actionsRow.syncAvailability();
+            deleteControl.setInteractionEnabled(false);
+            renameControl.setInteractionEnabled(false);
+        }
+        resized();
+        revealSelected();
+        notifyPreferredHeightChanged();
+    }
+
+    void revealSelected()
+    {
+        if (!hasSelection()) return;
+        const int bottom = static_cast<int>(selectedSnapshot) *
+            (ana::ui::controlHeight + ana::ui::square::spacing) + ana::ui::controlHeight;
+        if (bottom > rowsViewport.getViewPosition().y + rowsViewport.getHeight())
+            rowsViewport.setViewPosition(0, bottom - rowsViewport.getHeight());
+    }
+
+    void addNameTile(size_t index)
+    {
+        auto row = std::make_unique<SnapshotNameTile>(specView, index);
+        row->onSelected = [this](size_t selected) { selectSnapshot(selected); };
+        row->onWheel = [this](const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
         {
-            showTransferPrompt(requestedRow);
+            // Scroll snapshot names when possible; at either end pass the wheel to
+            // the enclosing Settings viewport instead of trapping it on a tile.
+            auto* viewed = rowsViewport.getViewedComponent();
+            const auto maximum = viewed != nullptr
+                ? juce::jmax(0, viewed->getHeight() - rowsViewport.getHeight()) : 0;
+            const auto delta = std::abs(wheel.deltaY) >= std::abs(wheel.deltaX)
+                ? wheel.deltaY : -wheel.deltaX;
+            const auto position = rowsViewport.getViewPosition().y;
+            const bool canScrollNames = maximum > 0 && delta != 0.0f
+                && !((delta > 0.0f && position == 0)
+                    || (delta < 0.0f && position >= maximum));
+            if (canScrollNames)
+            {
+                rowsViewport.mouseWheelMove(event, wheel);
+                return;
+            }
+            for (auto* parent = getParentComponent(); parent != nullptr;
+                 parent = parent->getParentComponent())
+                if (auto* settings = dynamic_cast<SettingsViewport*>(parent))
+                {
+                    settings->mouseWheelMove(event, wheel);
+                    break;
+                }
         };
-        row->onClearPromptRequested = [this] (SnapshotRow& requestedRow)
-        {
-            showClearPrompt(requestedRow);
-        };
-        row->onGainResetPromptRequested = [this] (SnapshotRow& requestedRow)
-        {
-            showGainResetPrompt(requestedRow);
-        };
-        row->onGainFocusRequested = [this] (SnapshotRow& requestedRow)
-        {
-            focusGainRow(requestedRow);
-        };
-        row->onGainChanged = [this] (SnapshotRow& changedRow)
-        {
-            if (focusedGainRow == &changedRow)
-                syncGainPotentiometer();
-        };
-        row->onTextEditingChanged = [this] (const bool isEditing)
-        {
-            if (onTextEditingChanged)
-                onTextEditingChanged(isEditing);
-        };
-        auto* rowPtr = row.get();
+        row->onTextEditingChanged = [this](bool editing)
+        { if (onTextEditingChanged) onTextEditingChanged(editing); };
         rowsContent.addAndMakeVisible(*row);
         snapshotRows.push_back(std::move(row));
+    }
+
+    size_t addSnapshotRow()
+    {
+        const auto index = specView.addSnapshotSlot();
+        specView.setSnapshotName(index, "SNAPSHOT " + juce::String(static_cast<int>(index + 1)));
+        specView.setSnapshotColour(index, ana::ui::graphColour(ana::ui::defaultGraphColourIndex));
+        addNameTile(index);
+        selectSnapshot(index);
         resized();
-        return rowPtr;
-    }
-
-    void showColourPrompt(SnapshotRow& row)
-    {
-        dismissColourPrompt();
-        dismissTransferPrompt();
-        dismissClearPrompt();
-        dismissGainResetPrompt();
-
-        juce::StringArray names;
-        for (const auto& option : snapshotColourOptions)
-            names.add(option.name);
-
-        const auto anchorBounds = getLocalArea(&row, row.getColourButtonBounds());
-        juce::Component::SafePointer<SnapshotRow> safeRow(&row);
-        colourPrompt = std::make_unique<ChoicePopup>(
-            anchorBounds, std::move(names), std::vector<bool> {}, row.getColourIndex(),
-            [safeRow] (const int selectedIndex)
-            {
-                if (safeRow != nullptr)
-                    safeRow->setColourIndex(selectedIndex);
-            },
-            [safeContent = juce::Component::SafePointer<SnapshotsWindowContent>(this)]
-            {
-                if (safeContent != nullptr)
-                    safeContent->dismissColourPrompt();
-            });
-        addAndMakeVisible(*colourPrompt);
-        colourPrompt->setBounds(getLocalBounds());
-        colourPrompt->toFront(true);
-    }
-
-    void showTransferPrompt(SnapshotRow& row)
-    {
-        dismissColourPrompt();
-        dismissTransferPrompt();
-        dismissClearPrompt();
-        dismissGainResetPrompt();
-
-        const auto anchorBounds = getLocalArea(&row, row.getTransferButtonBounds());
-        juce::Component::SafePointer<SnapshotRow> safeRow(&row);
-        transferPrompt = std::make_unique<ChoicePopup>(
-            anchorBounds, juce::StringArray { "IMPORT", "EXPORT" },
-            std::vector<bool> { true, specView.hasSnapshotData(row.getSnapshotIndex()) }, -1,
-            [safeContent = juce::Component::SafePointer<SnapshotsWindowContent>(this), safeRow]
-            (const int selectedIndex)
-            {
-                if (safeContent == nullptr || safeRow == nullptr)
-                    return;
-
-                if (selectedIndex == 0)
-                    safeContent->beginSnapshotImport(*safeRow);
-                else if (selectedIndex == 1)
-                    safeContent->beginSnapshotExport(*safeRow);
-            },
-            [safeContent = juce::Component::SafePointer<SnapshotsWindowContent>(this)]
-            {
-                if (safeContent != nullptr)
-                    safeContent->dismissTransferPrompt();
-            });
-        addAndMakeVisible(*transferPrompt);
-        transferPrompt->setBounds(getLocalBounds());
-        transferPrompt->toFront(true);
-    }
-
-    void showClearPrompt(SnapshotRow& row)
-    {
-        dismissColourPrompt();
-        dismissTransferPrompt();
-        dismissClearPrompt();
-        dismissGainResetPrompt();
-
-        const auto anchorBounds = getLocalArea(&row, row.getVisibilityButtonBounds());
-        juce::Component::SafePointer<SnapshotRow> safeRow(&row);
-        clearPrompt = std::make_unique<ChoicePopup>(
-            anchorBounds, juce::StringArray { "D" }, std::vector<bool> { true }, -1,
-            [safeContent = juce::Component::SafePointer<SnapshotsWindowContent>(this), safeRow]
-            (const int selectedIndex)
-            {
-                if (safeContent != nullptr && safeRow != nullptr && selectedIndex == 0)
-                    safeContent->deleteSnapshotRow(*safeRow);
-            },
-            [safeContent = juce::Component::SafePointer<SnapshotsWindowContent>(this)]
-            {
-                if (safeContent != nullptr)
-                    safeContent->dismissClearPrompt();
-            });
-        addAndMakeVisible(*clearPrompt);
-        clearPrompt->setBounds(getLocalBounds());
-        clearPrompt->toFront(true);
+        revealSelected();
+        notifyPreferredHeightChanged();
+        return index;
     }
 
     void showGainResetPrompt(SnapshotRow& row)
     {
-        dismissColourPrompt();
-        dismissTransferPrompt();
-        dismissClearPrompt();
+        if (!hasSelection()) return;
         dismissGainResetPrompt();
-
-        const auto anchorBounds = getLocalArea(&row, row.getGainLabelBounds());
-        juce::Component::SafePointer<SnapshotRow> safeRow(&row);
-        gainResetPrompt = std::make_unique<ChoicePopup>(
-            anchorBounds, juce::StringArray { "R?" }, std::vector<bool> { true }, -1,
-            [safeRow] (const int selectedIndex)
+        const auto anchorBounds = getLocalArea(&row, row.getGainControlBounds());
+        const auto targetIndex = selectedSnapshot;
+        gainResetPrompt = std::make_unique<InlineResetPrompt>(anchorBounds, false,
+            [safeContent = juce::Component::SafePointer<SnapshotsWindowContent>(this), targetIndex]
             {
-                if (safeRow != nullptr && selectedIndex == 0)
-                    safeRow->setGainDb(0.0f, true);
+                if (safeContent != nullptr && targetIndex < safeContent->specView.getSnapshotCount())
+                {
+                    safeContent->specView.setSnapshotGain(targetIndex, 0.0f);
+                    if (safeContent->selectedSnapshot == targetIndex)
+                        safeContent->actionsRow.syncFromSnapshot();
+                }
             },
             [safeContent = juce::Component::SafePointer<SnapshotsWindowContent>(this)]
-            {
-                if (safeContent != nullptr)
-                    safeContent->dismissGainResetPrompt();
-            });
+            { if (safeContent != nullptr) safeContent->dismissGainResetPrompt(); });
         addAndMakeVisible(*gainResetPrompt);
-        gainResetPrompt->setBounds(getLocalBounds());
-        gainResetPrompt->toFront(true);
+        gainResetPrompt->setBounds(getLocalBounds()); gainResetPrompt->toFront(true);
     }
 
-    void deleteSnapshotRow(SnapshotRow& row)
+    void deleteSnapshotRow(size_t index)
     {
-        const auto it = std::find_if(snapshotRows.begin(), snapshotRows.end(),
-                                     [&row] (const auto& candidate) { return candidate.get() == &row; });
-        if (it == snapshotRows.end())
-            return;
-
-        const auto snapshotIndex = row.getSnapshotIndex();
-        if (! specView.removeSnapshotSlot(snapshotIndex))
-            return;
-
-        if (focusedGainRow == &row)
+        if (index >= snapshotRows.size() || !specView.removeSnapshotSlot(index)) return;
+        snapshotRows.erase(snapshotRows.begin() + static_cast<std::ptrdiff_t>(index));
+        for (size_t i = index; i < snapshotRows.size(); ++i)
+            snapshotRows[i]->setSnapshotIndex(i);
+        if (snapshotRows.empty())
         {
-            focusedGainRow = nullptr;
-            gainPotentiometer.setEnabled(false);
+            selectedSnapshot = invalidIndex;
+            actionsRow.syncAvailability();
+            deleteControl.setInteractionEnabled(false);
+            renameControl.setInteractionEnabled(false);
         }
-
-        const auto erasedPosition = static_cast<size_t>(std::distance(snapshotRows.begin(), it));
-        snapshotRows.erase(it);
-        for (size_t index = erasedPosition; index < snapshotRows.size(); ++index)
-            snapshotRows[index]->setSnapshotIndex(index);
-
-        resized();
+        else selectSnapshot(std::min(index, snapshotRows.size() - 1));
+        resized(); notifyPreferredHeightChanged();
     }
 
     void clearInteractionSelection()
     {
-        dismissColourPrompt();
-        dismissTransferPrompt();
-        dismissClearPrompt();
         dismissGainResetPrompt();
-
-        if (focusedGainRow != nullptr)
-            focusedGainRow->setGainSelected(false);
-
-        focusedGainRow = nullptr;
-        gainPotentiometer.setEnabled(false);
         juce::Component::unfocusAllComponents();
-    }
-
-    void focusGainRow(SnapshotRow& row)
-    {
-        if (focusedGainRow != nullptr && focusedGainRow != &row)
-            focusedGainRow->setGainSelected(false);
-
-        focusedGainRow = &row;
-        focusedGainRow->setGainSelected(true);
-        syncGainPotentiometer();
-        gainPotentiometer.setEnabled(true);
-    }
-
-    void syncGainPotentiometer()
-    {
-        if (focusedGainRow == nullptr)
-        {
-            gainPotentiometer.setEnabled(false);
-            return;
-        }
-
-        const auto gainDb = focusedGainRow->getGainDb();
-        const auto normalised = juce::jlimit(0.0f, 1.0f,
-            (gainDb - SpecView::snapshotGainMinimumDb) / (SpecView::snapshotGainMaximumDb - SpecView::snapshotGainMinimumDb));
-        const juce::ScopedValueSetter<bool> guard(updatingGainPotentiometer, true);
-        gainPotentiometer.setValue(normalised, juce::dontSendNotification);
     }
 
     void beginBulkSnapshotImport()
@@ -866,7 +812,6 @@ private:
         const auto startDirectory = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
         snapshotFileChooser = std::make_unique<juce::FileChooser>(
             "IMPORT SNAPSHOTS", startDirectory, snapshotFileWildcard);
-
         juce::Component::SafePointer<SnapshotsWindowContent> safeContent(this);
         snapshotFileChooser->launchAsync(
             juce::FileBrowserComponent::openMode
@@ -874,271 +819,110 @@ private:
                 | juce::FileBrowserComponent::canSelectMultipleItems,
             [safeContent] (const juce::FileChooser& chooser)
             {
-                if (safeContent == nullptr)
-                    return;
-
-                const auto files = chooser.getResults();
-                for (const auto& file : files)
+                if (safeContent == nullptr) return;
+                for (const auto& file : chooser.getResults())
                 {
-                    if (file.getFullPathName().isEmpty())
-                        continue;
-
-                    auto* row = safeContent->addSnapshotRow();
-                    if (row != nullptr && ! safeContent->importSnapshotFromFile(*row, file))
-                        safeContent->deleteSnapshotRow(*row);
+                    if (file.getFullPathName().isEmpty()) continue;
+                    const auto index = safeContent->addSnapshotRow();
+                    if (!safeContent->importSnapshotFromFile(index, file))
+                        safeContent->deleteSnapshotRow(index);
                 }
             });
     }
 
-    void beginSnapshotExport(SnapshotRow& row)
+    void beginSnapshotExport()
     {
-        if (! specView.hasSnapshotData(row.getSnapshotIndex()))
-            return;
-
-        auto stem = juce::File::createLegalFileName(row.getSnapshotName().trim());
-        if (stem.isEmpty())
-            stem = "snapshot";
-
+        if (!hasSelection() || !specView.hasSnapshotData(selectedSnapshot)) return;
+        const auto index = selectedSnapshot;
+        auto stem = juce::File::createLegalFileName(specView.getSnapshotName(index).trim());
+        if (stem.isEmpty()) stem = "snapshot";
         const auto defaultFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
             .getChildFile(stem + snapshotFileExtension);
         snapshotFileChooser = std::make_unique<juce::FileChooser>(
             "EXPORT SNAPSHOT", defaultFile, snapshotFileWildcard);
-
         juce::Component::SafePointer<SnapshotsWindowContent> safeContent(this);
-        juce::Component::SafePointer<SnapshotRow> safeRow(&row);
         snapshotFileChooser->launchAsync(
             juce::FileBrowserComponent::saveMode
                 | juce::FileBrowserComponent::canSelectFiles
                 | juce::FileBrowserComponent::warnAboutOverwriting,
-            [safeContent, safeRow] (const juce::FileChooser& chooser)
+            [safeContent, index] (const juce::FileChooser& chooser)
             {
-                if (safeContent == nullptr || safeRow == nullptr)
-                    return;
-
+                if (safeContent == nullptr) return;
                 const auto file = chooser.getResult();
                 if (file.getFullPathName().isNotEmpty())
-                    safeContent->exportSnapshotToFile(*safeRow, file);
+                    safeContent->exportSnapshotToFile(index, file);
             });
     }
 
-    void beginSnapshotImport(SnapshotRow& row)
+    void beginSnapshotImport()
     {
+        if (!hasSelection()) return;
+        const auto index = selectedSnapshot;
         const auto startDirectory = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
         snapshotFileChooser = std::make_unique<juce::FileChooser>(
             "IMPORT SNAPSHOT", startDirectory, snapshotFileWildcard);
-
         juce::Component::SafePointer<SnapshotsWindowContent> safeContent(this);
-        juce::Component::SafePointer<SnapshotRow> safeRow(&row);
         snapshotFileChooser->launchAsync(
             juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-            [safeContent, safeRow] (const juce::FileChooser& chooser)
+            [safeContent, index] (const juce::FileChooser& chooser)
             {
-                if (safeContent == nullptr || safeRow == nullptr)
-                    return;
-
+                if (safeContent == nullptr) return;
                 const auto file = chooser.getResult();
                 if (file.getFullPathName().isNotEmpty())
-                    safeContent->importSnapshotFromFile(*safeRow, file);
+                    safeContent->importSnapshotFromFile(index, file);
             });
     }
 
-    bool exportSnapshotToFile(SnapshotRow& row, const juce::File& requestedFile)
+    bool exportSnapshotToFile(size_t index, const juce::File& requestedFile)
     {
-        if (! specView.hasSnapshotData(row.getSnapshotIndex()))
-            return false;
-
+        if (index >= specView.getSnapshotCount() || !specView.hasSnapshotData(index)) return false;
         const auto file = requestedFile.hasFileExtension("anasnapshot")
-            ? requestedFile
-            : requestedFile.withFileExtension(snapshotFileExtension);
-
+            ? requestedFile : requestedFile.withFileExtension(snapshotFileExtension);
         juce::MemoryOutputStream output;
-        if (! output.writeInt(snapshotFileMagic)
-            || ! output.writeInt(snapshotFileVersion)
-            || ! output.writeString(row.getSnapshotName())
-            || ! specView.writeSnapshot(row.getSnapshotIndex(), output))
-            return false;
-
+        if (!output.writeInt(snapshotFileMagic)
+            || !output.writeInt(snapshotFileVersion)
+            || !output.writeString(specView.getSnapshotName(index))
+            || !specView.writeSnapshot(index, output)) return false;
         return file.replaceWithData(output.getData(), output.getDataSize());
     }
 
-    bool importSnapshotFromFile(SnapshotRow& row, const juce::File& file)
+    bool importSnapshotFromFile(size_t index, const juce::File& file)
     {
+        if (index >= specView.getSnapshotCount()) return false;
         juce::FileInputStream input(file);
-        if (input.failedToOpen())
-            return false;
-
-        if (input.readInt() != snapshotFileMagic)
-            return false;
-
-        const auto fileVersion = input.readInt();
-        if (fileVersion != snapshotFileVersion)
-            return false;
-
+        if (input.failedToOpen() || input.readInt() != snapshotFileMagic) return false;
+        if (input.readInt() != snapshotFileVersion) return false;
         auto importedName = input.readString().trim();
-        if (importedName.length() > maximumSnapshotNameLength)
-            return false;
-
-        if (! specView.readSnapshot(row.getSnapshotIndex(), input))
-            return false;
-
-        row.setSnapshotName(std::move(importedName));
-        row.syncFromSnapshot();
-        if (focusedGainRow == &row)
-            syncGainPotentiometer();
+        if (importedName.length() > maximumSnapshotNameLength) return false;
+        if (!specView.readSnapshot(index, input)) return false;
+        if (importedName.isEmpty())
+            importedName = "SNAPSHOT " + juce::String(static_cast<int>(index + 1));
+        specView.setSnapshotName(index, importedName);
+        if (index < snapshotRows.size()) snapshotRows[index]->refresh();
+        if (index == selectedSnapshot) actionsRow.syncFromSnapshot();
         return true;
     }
 
     SpecView& specView;
-    ControlButton addButton { "plus" };
-    ControlButton bulkImportButton { "arrows-down" };
-    ControlButton closeButton { "x" };
-    FocusedPotentiometer gainPotentiometer;
+    juce::Slider addSlider, bulkImportSlider, deleteSlider, renameSlider;
+    NumericValueBox addControl { addSlider };
+    NumericValueBox bulkImportControl { bulkImportSlider };
+    SnapshotRow actionsRow;
+    NumericValueBox deleteControl { deleteSlider };
+    NumericValueBox renameControl { renameSlider };
     juce::Component rowsContent;
-    juce::Viewport rowsViewport;
-    std::vector<std::unique_ptr<SnapshotRow>> snapshotRows;
-    std::unique_ptr<ChoicePopup> colourPrompt;
-    std::unique_ptr<ChoicePopup> transferPrompt;
-    std::unique_ptr<ChoicePopup> clearPrompt;
-    std::unique_ptr<ChoicePopup> gainResetPrompt;
+    SettingsViewport rowsViewport;
+    std::vector<std::unique_ptr<SnapshotNameTile>> snapshotRows;
+    size_t selectedSnapshot = invalidIndex;
+    std::unique_ptr<InlineResetPrompt> gainResetPrompt;
     std::unique_ptr<juce::FileChooser> snapshotFileChooser;
-    SnapshotRow* focusedGainRow = nullptr;
-    bool updatingGainPotentiometer = false;
-    juce::Component* draggedWindow = nullptr;
-    juce::ComponentDragger windowDragger;
-    bool draggingWindow = false;
-};
-}
-
-class HostShortcutDocumentWindow : public juce::DocumentWindow
-{
-public:
-    enum class Side
-    {
-        left,
-        right
-    };
-
-    HostShortcutDocumentWindow(const juce::Colour backgroundColour, const Side sideIn)
-        : juce::DocumentWindow(juce::String(), backgroundColour, 0, false),
-          side(sideIn)
-    {
-    }
-
-    ~HostShortcutDocumentWindow() override
-    {
-       #if JUCE_MAC
-        if (previousKeyWindow != nullptr)
-            setAuxiliaryTextInputActive(*this, false, previousKeyWindow);
-       #endif
-    }
-
-    juce::BorderSize<int> getBorderThickness() const override
-    {
-        return {};
-    }
-
-protected:
-    void initialiseDesktopPeer()
-    {
-        addToDesktop();
-    }
-
-    void showBeside(juce::Component& owner)
-    {
-        if (! hasBeenShown)
-        {
-            positionBeside(owner);
-            hasBeenShown = true;
-        }
-
-        showAt(owner, getBounds());
-    }
-
-    void showAt(juce::Component& owner, const juce::Rectangle<int> bounds)
-    {
-        setBounds(bounds);
-        setVisible(true);
-       #if JUCE_MAC
-        enableAuxiliaryMouseMoveEvents(*this);
-        matchAuxiliaryWindowLevel(*this, owner);
-       #else
-        juce::ignoreUnused(owner);
-       #endif
-        toFront(false);
-    }
-
-    void hideAuxiliaryWindow()
-    {
-        setVisible(false);
-    }
-
-    void setTextInputActive(const bool isActive)
-    {
-        if (isActive)
-            ++activeTextInputs;
-        else if (activeTextInputs > 0)
-            --activeTextInputs;
-
-        const auto shouldPassShortcuts = activeTextInputs == 0;
-        if (passShortcutsToHost == shouldPassShortcuts)
-            return;
-
-        passShortcutsToHost = shouldPassShortcuts;
-       #if JUCE_MAC
-        setAuxiliaryTextInputActive(*this, ! shouldPassShortcuts, previousKeyWindow);
-       #else
-        if (isOnDesktop())
-            recreateDesktopWindow();
-       #endif
-    }
-
-    juce::BorderSize<int> getContentComponentBorder() const override
-    {
-        return {};
-    }
-
-    int getDesktopWindowStyleFlags() const override
-    {
-        auto flags = juce::DocumentWindow::getDesktopWindowStyleFlags();
-       #if JUCE_MAC
-        flags |= juce::ComponentPeer::windowIgnoresKeyPresses;
-       #else
-        if (passShortcutsToHost)
-            flags |= juce::ComponentPeer::windowIgnoresKeyPresses;
-       #endif
-        return flags;
-    }
-
-private:
-    void positionBeside(juce::Component& owner)
-    {
-        const auto ownerBounds = owner.getScreenBounds();
-        auto targetBounds = getBounds();
-        const auto x = side == Side::right
-            ? ownerBounds.getRight() + ana::ui::gap.pixels()
-            : ownerBounds.getX() - targetBounds.getWidth() - ana::ui::gap.pixels();
-        targetBounds.setPosition(x, ownerBounds.getY());
-
-        if (const auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(ownerBounds))
-            targetBounds = targetBounds.constrainedWithin(display->userArea);
-
-        setBounds(targetBounds);
-    }
-
-    Side side;
-    int activeTextInputs = 0;
-    bool passShortcutsToHost = true;
-   #if JUCE_MAC
-    void* previousKeyWindow = nullptr;
-   #endif
-    bool hasBeenShown = false;
 };
 
 class SettingsWindow final : public HostShortcutDocumentWindow
 {
 public:
     SettingsWindow(SettingsPanel& panel, std::function<void()> closeCallbackIn)
-        : HostShortcutDocumentWindow(ana::ui::background, Side::right),
+        : HostShortcutDocumentWindow(ana::ui::square::panelBackground, Side::right),
           panelRef(panel),
           content(panel),
           closeCallback(std::move(closeCallbackIn))
@@ -1147,31 +931,107 @@ public:
         setTitleBarHeight(0);
         setDropShadowEnabled(false);
         setResizable(false, false);
-        setResizeLimits(settingsWindowWidth, minimumEditorHeight,
+        // Minimum Settings window is square; only its height may grow.
+        setResizeLimits(settingsWindowWidth, settingsWindowWidth,
                         settingsWindowWidth, maximumSettingsWindowHeight);
 
         resizeContent = std::make_unique<ana::ui::EdgeResizeContent>(
-            *this, *getConstrainer(), content, false);
-        resizeContent->setSize(settingsWindowWidth, minimumEditorHeight);
+            *this, *getConstrainer(), content, false, false);
+        resizeContent->setSize(settingsWindowWidth, settingsWindowWidth);
         setContentNonOwned(resizeContent.get(), false);
-        setSize(settingsWindowWidth, minimumEditorHeight);
+        resizeContent->getProperties().set("topGapDragOnly",true);
+        enableBackgroundDragging(*resizeContent);
+        setSize(settingsWindowWidth, settingsWindowWidth);
         panelRef.onTextEditingChanged = [this] (const bool isEditing)
         {
             setTextInputActive(isEditing);
         };
+        content.dock.onModeChanged=[this] { applyDockMode(); };
+        applyDockMode(true);
         initialiseDesktopPeer();
+    }
+
+    void applyDockMode(bool initial = false)
+    {
+        panelRef.dismissParameterEditors(); content.dismissChoicePrompt(); content.dismissResetPrompt();
+        auto& state=panelRef.getProcessor().getParameters().state;
+        setBackgroundDragSnappingEnabled(content.dock.dockOnly());
+        if(content.dock.dockOnly())
+        {
+            if(!initial && getWidth()>104 && getHeight()>104) state.setProperty("ana.settings.dock.expandedHeight",getHeight(),nullptr);
+            const auto size=content.dock.collapsedSize();
+            const int width=size.x,height=size.y;
+            setResizeLimits(width,height,width,height); setSize(width,height);
+        }
+        else
+        {
+            const int height=juce::jlimit(settingsWindowWidth,maximumSettingsWindowHeight,int(state.getProperty("ana.settings.dock.expandedHeight",settingsWindowWidth)));
+            setResizeLimits(settingsWindowWidth,settingsWindowWidth,settingsWindowWidth,maximumSettingsWindowHeight); setSize(settingsWindowWidth,height);
+        }
+        content.resized();
     }
 
     ~SettingsWindow() override
     {
+        disableBackgroundDragging();
         panelRef.onTextEditingChanged = nullptr;
         clearContentComponent();
     }
 
     void showFor(juce::Component& owner)
     {
-        showBeside(owner);
+        if (!initialPositionRestored)
+        {
+            initialPositionRestored = true;
+            const auto& state = panelRef.getProcessor().getParameters().state;
+            if (content.dock.dockOnly() && state.hasProperty("ana.settings.dock.x")
+                && state.hasProperty("ana.settings.dock.y"))
+            {
+                auto bounds = getBounds();
+                bounds.setPosition(static_cast<int>(state.getProperty("ana.settings.dock.x")),
+                                   static_cast<int>(state.getProperty("ana.settings.dock.y")));
+                showAt(owner, bounds);
+            }
+            else
+                showBeside(owner);
+        }
+        else
+            showAt(owner, getBounds());
+        rememberDockGeometry();
+        scheduleDockMouseRegionSync();
     }
+
+    void showAtScreensetBounds(juce::Component& owner, juce::Rectangle<int> bounds)
+    {
+        initialPositionRestored = true;
+        showAt(owner, bounds);
+        rememberDockGeometry();
+        scheduleDockMouseRegionSync();
+    }
+
+    void moved() override { rememberDockGeometry(); }
+    void resized() override
+    {
+        HostShortcutDocumentWindow::resized();
+        rememberDockGeometry();
+    }
+
+    void rememberDockGeometry()
+    {
+        if (!initialPositionRestored || !isVisible() || !content.dock.dockOnly()) return;
+        const auto bounds = getBounds();
+        if (bounds.isEmpty()) return;
+        auto& state = panelRef.getProcessor().getParameters().state;
+        const auto put = [&state](const char* key, int value)
+        {
+            if (static_cast<int>(state.getProperty(key, -999999)) != value)
+                state.setProperty(key, value, nullptr);
+        };
+        put("ana.settings.dock.x", bounds.getX());
+        put("ana.settings.dock.y", bounds.getY());
+    }
+
+    void showAboutPopup(AboutPopup& popup) { content.showAboutPopup(popup); }
 
     void showChoicePrompt(ParameterControl& control)
     {
@@ -1200,6 +1060,7 @@ public:
 
     void hideWindow()
     {
+        panelRef.dismissParameterEditors();
         content.dismissChoicePrompt();
         content.dismissResetPrompt();
         hideAuxiliaryWindow();
@@ -1214,605 +1075,57 @@ public:
     }
 
 private:
+    // REAPER restores screenset windows using native positioning, while JUCE
+    // maintains its own peer / mouse hit-test geometry. After a project or a
+    // screenset restore the dock can be drawn at the right coordinates but the
+    // collapse/orientation buttons do not receive clicks until the user moves
+    // the window. Perform the same native position notification that a drag
+    // performs, then refresh the child hit-test rectangles. The delayed pass
+    // covers REAPER positioning the HWND after our screenset callback returns.
+    void syncDockMouseRegions()
+    {
+        if (!isVisible() || getPeer() == nullptr)
+            return;
+        // Works for the expanded dock too. Don't move the native window to
+        // the same point: on macOS this is not a hit-test repair and may cause
+        // extra window-server work during screenset restores.
+       #if JUCE_MAC
+        enableAuxiliaryMouseMoveEvents(*this);
+       #endif
+        if (resizeContent != nullptr)
+            resizeContent->resized();
+        content.resized();
+        content.dock.resized();
+        content.dock.repaint();
+        juce::Desktop::getInstance().getMainMouseSource().forceMouseCursorUpdate();
+    }
+
+    void scheduleDockMouseRegionSync()
+    {
+        const auto generation = ++dockMouseSyncGeneration;
+        juce::Component::SafePointer<SettingsWindow> safe(this);
+        const auto sync = [safe, generation]
+        {
+            if (safe != nullptr && safe->dockMouseSyncGeneration == generation)
+                safe->syncDockMouseRegions();
+        };
+        juce::MessageManager::callAsync(sync);
+        juce::Timer::callAfterDelay(120, sync);
+    }
+
     SettingsPanel& panelRef;
     SettingsWindowContent content;
     std::unique_ptr<ana::ui::EdgeResizeContent> resizeContent;
     std::function<void()> closeCallback;
+    bool initialPositionRestored = false;
+    unsigned int dockMouseSyncGeneration = 0;
 };
 
-class SnapshotsWindow final : public HostShortcutDocumentWindow
+namespace
 {
-public:
-    SnapshotsWindow(SpecView& specView, std::function<void()> closeCallbackIn)
-        : HostShortcutDocumentWindow(ana::ui::background, Side::right),
-          content(specView),
-          closeCallback(std::move(closeCallbackIn))
-    {
-        setUsingNativeTitleBar(false);
-        setTitleBarHeight(0);
-        setDropShadowEnabled(false);
-        setResizable(false, false);
-        setResizeLimits(minimumSnapshotsWindowWidth, minimumEditorHeight,
-                        maximumEditorSize, maximumSnapshotsWindowHeight);
-
-        content.onCloseRequested = [this]
-        {
-            if (closeCallback)
-                closeCallback();
-            else
-                hideWindow();
-        };
-        resizeContent = std::make_unique<ana::ui::EdgeResizeContent>(
-            *this, *getConstrainer(), content);
-        resizeContent->setSize(minimumSnapshotsWindowWidth, minimumEditorHeight);
-        setContentNonOwned(resizeContent.get(), false);
-        setSize(minimumSnapshotsWindowWidth, minimumEditorHeight);
-        content.onTextEditingChanged = [this] (const bool isEditing)
-        {
-            setTextInputActive(isEditing);
-        };
-        initialiseDesktopPeer();
-    }
-
-    ~SnapshotsWindow() override
-    {
-        content.onCloseRequested = nullptr;
-        content.onTextEditingChanged = nullptr;
-        clearContentComponent();
-    }
-
-    void showFor(juce::Component& owner)
-    {
-        showBeside(owner);
-    }
-
-    void hideWindow()
-    {
-        content.dismissColourPrompt();
-        content.dismissTransferPrompt();
-        content.dismissClearPrompt();
-        content.dismissGainResetPrompt();
-        hideAuxiliaryWindow();
-    }
-
-    void closeButtonPressed() override
-    {
-        if (closeCallback)
-            closeCallback();
-        else
-            hideWindow();
-    }
-
-private:
-    SnapshotsWindowContent content;
-    std::unique_ptr<ana::ui::EdgeResizeContent> resizeContent;
-    std::function<void()> closeCallback;
-};
-
-class OscWindow final : public HostShortcutDocumentWindow
-{
-public:
-    OscWindow(PluginProcessor& processor, std::function<void()> closeCallbackIn,
-              std::function<void()> listCallbackIn)
-        : HostShortcutDocumentWindow(ana::ui::background, Side::right),
-          content(processor), closeCallback(std::move(closeCallbackIn)),
-          listCallback(std::move(listCallbackIn))
-    {
-        setUsingNativeTitleBar(false);
-        setTitleBarHeight(0);
-        setDropShadowEnabled(false);
-        setResizable(false, false);
-        setResizeLimits(oscWindowWidth, minimumEditorHeight,
-                        oscWindowWidth, maximumSettingsWindowHeight);
-        content.onCloseRequested = [this] { closeButtonPressed(); };
-        content.onListRequested = [this]
-        {
-            if (listCallback)
-                listCallback();
-        };
-        content.onTextEditingChanged = [this] (const bool editing)
-        {
-            setTextInputActive(editing);
-        };
-        resizeContent = std::make_unique<ana::ui::EdgeResizeContent>(
-            *this, *getConstrainer(), content, false);
-        resizeContent->setSize(oscWindowWidth, minimumEditorHeight);
-        setContentNonOwned(resizeContent.get(), false);
-        setSize(oscWindowWidth, minimumEditorHeight);
-        initialiseDesktopPeer();
-    }
-
-    ~OscWindow() override
-    {
-        content.onCloseRequested = nullptr;
-        content.onListRequested = nullptr;
-        content.onTextEditingChanged = nullptr;
-        clearContentComponent();
-    }
-
-    void showFor(juce::Component& owner) { showBeside(owner); }
-    void setListVisible(const bool visible) { content.setListVisible(visible); }
-    void hideWindow()
-    {
-        content.dismissEditor();
-        hideAuxiliaryWindow();
-    }
-
-    void closeButtonPressed() override
-    {
-        if (closeCallback)
-            closeCallback();
-        else
-            hideWindow();
-    }
-
-private:
-    OscPanel content;
-    std::unique_ptr<ana::ui::EdgeResizeContent> resizeContent;
-    std::function<void()> closeCallback;
-    std::function<void()> listCallback;
-};
-
-class OscListContent final : public juce::Component,
-                             private juce::TableListBoxModel,
-                             private juce::Timer
-{
-    class CentredHeaderLookAndFeel final : public juce::LookAndFeel_V4
-    {
-    public:
-        void drawTableHeaderBackground(juce::Graphics& graphics,
-                                       juce::TableHeaderComponent& header) override
-        {
-            graphics.fillAll(header.findColour(juce::TableHeaderComponent::backgroundColourId));
-        }
-
-        void drawTableHeaderColumn(juce::Graphics& graphics,
-                                   juce::TableHeaderComponent& header,
-                                   const juce::String& columnName,
-                                   int columnId, int width, int height,
-                                   bool, bool, int) override
-        {
-            graphics.setColour(header.findColour(juce::TableHeaderComponent::textColourId));
-            graphics.setFont(ana::ui::makeFont());
-            graphics.drawFittedText(columnName,
-                                    { 4, 0, juce::jmax(0, width - 8), height },
-                                    juce::Justification::centred, 1);
-            graphics.setColour(ana::ui::light);
-            if (columnId == nameColumn)
-                graphics.fillRect(width - 1, 0, 1, height);
-            graphics.fillRect(0, height - 1, width, 1);
-        }
-    };
-
-    struct ParameterEntry
-    {
-        juce::String name;
-        juce::String values;
-        juce::String address;
-
-        bool operator==(const ParameterEntry&) const = default;
-    };
-
-    class InputListener final : public juce::MouseListener
-    {
-    public:
-        explicit InputListener(OscListContent& ownerIn) : owner(ownerIn) {}
-
-        void mouseDown(const juce::MouseEvent& event) override { owner.handleMouseDown(event); }
-        void mouseDrag(const juce::MouseEvent& event) override { owner.handleMouseDrag(event); }
-        void mouseUp(const juce::MouseEvent& event) override { owner.handleMouseUp(event); }
-
-    private:
-        OscListContent& owner;
-    };
-
-public:
-    explicit OscListContent(PluginProcessor& processorIn)
-        : processor(processorIn), inputListener(*this)
-    {
-        setOpaque(true);
-        addMouseListener(&inputListener, true);
-
-        table.setModel(this);
-        table.setRowHeight(ana::ui::controlHeight);
-        table.setOutlineThickness(1);
-        table.setMultipleSelectionEnabled(false);
-        table.setColour(juce::ListBox::backgroundColourId, ana::ui::background);
-        table.setColour(juce::ListBox::outlineColourId, ana::ui::light);
-        table.getViewport()->setScrollBarsShown(false, false, true, false);
-
-        auto& header = table.getHeader();
-        header.setColour(juce::TableHeaderComponent::backgroundColourId, ana::ui::background);
-        header.setColour(juce::TableHeaderComponent::textColourId, ana::ui::white);
-        header.setColour(juce::TableHeaderComponent::outlineColourId, ana::ui::light);
-        header.setColour(juce::TableHeaderComponent::highlightColourId, ana::ui::background);
-        header.setLookAndFeel(&headerLookAndFeel);
-        constexpr int columnFlags = juce::TableHeaderComponent::visible;
-        header.addColumn("NAME", nameColumn, 1, 1, 10000, columnFlags);
-        header.addColumn("VALUES", valuesColumn, 1, 1, 10000, columnFlags);
-        addAndMakeVisible(table);
-
-        refreshParameters();
-        startTimerHz(4);
-    }
-
-    ~OscListContent() override
-    {
-        stopTimer();
-        removeMouseListener(&inputListener);
-        table.getHeader().setLookAndFeel(nullptr);
-        table.setModel(nullptr);
-    }
-
-    void refreshParameters()
-    {
-        std::vector<ParameterEntry> refreshed;
-        struct Group
-        {
-            const char* title;
-            const char* prefix;
-            std::vector<ParameterEntry> mainEntries;
-            std::vector<ParameterEntry> settingsEntries;
-        };
-        std::array groups {
-            Group { "GLOBAL", "module", {}, {} },
-            Group { "SPEC", "spec/view", {}, {} },
-            Group { "SPEC - FREQ", "spec/freq/", {}, {} },
-            Group { "SPEC - MAP", "spec/map/", {}, {} },
-            Group { "CORR", "corr/mode", {}, {} },
-            Group { "CORR - SIGNED", "corr/signed/", {}, {} },
-            Group { "CORR - PHASE", "corr/phase/", {}, {} },
-            Group { "CORR - FREQ", "corr/freq/", {}, {} },
-            Group { "LVLS - PEAK/RMS", "lvls/peak-rms/", {}, {} },
-            Group { "LVLS - LOUDNESS", "lvls/loudness/", {}, {} },
-            Group { "LVLS - HISTORY", "lvls/history/", {}, {} },
-            Group { "SCOP - CROSSOVER", "scop/cross-", {}, {} },
-            Group { "SCOP - BAND 1", "scop/band-1/", {}, {} },
-            Group { "SCOP - BAND 2", "scop/band-2/", {}, {} },
-            Group { "SCOP - BAND 3", "scop/band-3/", {}, {} },
-            Group { "SCOP - BAND 4", "scop/band-4/", {}, {} },
-            Group { "SCOP - BAND 5", "scop/band-5/", {}, {} },
-            Group { "SCOP - BAND 6", "scop/band-6/", {}, {} },
-            Group { "SCOP", "scop/", {}, {} }
-        };
-        std::vector<ParameterEntry> otherParameters;
-        auto& state = processor.getParameters();
-        for (const auto& child : state.state)
-        {
-            const auto id = child.getProperty("id").toString();
-            auto* parameter = state.getParameter(id);
-            if (id.isEmpty() || parameter == nullptr)
-                continue;
-            ParameterEntry entry { id.fromLastOccurrenceOf("/", false, false),
-                                   acceptedValues(*parameter), "/ana/" + id };
-            auto grouped = false;
-            for (auto& group : groups)
-                if (id.startsWith(group.prefix)
-                    || ((id == PluginProcessor::cleanViewParameterId
-                         || id == PluginProcessor::analysisModeParameterId)
-                        && juce::String(group.title) == "GLOBAL"))
-                {
-                    auto& entries = ana::osc::parameterSection(id) == ana::osc::ParameterSection::main
-                        ? group.mainEntries : group.settingsEntries;
-                    entries.push_back(std::move(entry));
-                    grouped = true;
-                    break;
-                }
-            if (! grouped)
-                otherParameters.push_back(std::move(entry));
-        }
-        const auto appendSection = [&refreshed] (const juce::String& title,
-                                                 const std::vector<ParameterEntry>& entries)
-        {
-            if (entries.empty())
-                return;
-            refreshed.push_back({ title, {}, {} });
-            refreshed.insert(refreshed.end(), entries.begin(), entries.end());
-        };
-        for (const auto& group : groups)
-        {
-            appendSection(ana::osc::sectionTitle(group.title, ana::osc::ParameterSection::main),
-                          group.mainEntries);
-            appendSection(ana::osc::sectionTitle(group.title, ana::osc::ParameterSection::settings),
-                          group.settingsEntries);
-        }
-        appendSection("OTHER", otherParameters);
-
-        if (refreshed == parameters)
-            return;
-
-        parameters = std::move(refreshed);
-        pressedRow = -1;
-        copiedRow = -1;
-        ++longPressGeneration;
-        ++copiedGeneration;
-        updateColumnWidths();
-        table.updateContent();
-        table.repaint();
-    }
-
-    int getPreferredWindowWidth() const noexcept { return preferredWindowWidth; }
-
-    void paint(juce::Graphics& graphics) override
-    {
-        graphics.fillAll(ana::ui::background);
-    }
-
-    void resized() override
-    {
-        auto bounds = getLocalBounds().reduced(contentInset);
-        table.setBounds(bounds);
-    }
-
-    void paintOverChildren(juce::Graphics& graphics) override
-    {
-        graphics.setColour(ana::ui::light);
-        graphics.drawRect(getLocalBounds(), 1);
-    }
-
-private:
-    static juce::String formatValue(const float value)
-    {
-        const auto rounded = std::round(value);
-        if (std::abs(value - rounded) <= 1.0e-6f)
-            return juce::String(static_cast<int>(rounded));
-
-        return juce::String(value, 6).trimCharactersAtEnd("0").trimCharactersAtEnd(".");
-    }
-
-    static juce::String acceptedValues(const juce::RangedAudioParameter& parameter)
-    {
-        const auto& range = parameter.getNormalisableRange();
-        if (dynamic_cast<const juce::AudioParameterBool*>(&parameter) != nullptr)
-            return "0, 1";
-
-        const auto choice = dynamic_cast<const juce::AudioParameterChoice*>(&parameter) != nullptr;
-        const auto discrete = choice
-            || dynamic_cast<const juce::AudioParameterInt*>(&parameter) != nullptr;
-        auto text = formatValue(range.start + (choice ? 1.0f : 0.0f))
-            + " " + juce::String::charToString(0x2014) + " "
-            + formatValue(range.end + (choice ? 1.0f : 0.0f));
-        if (discrete)
-            text += ", d";
-        return text;
-    }
-
-    void timerCallback() override { refreshParameters(); }
-
-    void updateColumnWidths()
-    {
-        const auto font = ana::ui::makeFont();
-        const auto measure = [&font] (const juce::String& text)
-        {
-            return juce::GlyphArrangement::getStringWidthInt(font, text)
-                + ana::ui::gap.pixels() * 2;
-        };
-
-        auto nameWidth = measure("NAME");
-        auto valuesWidth = measure("VALUES");
-        for (const auto& parameter : parameters)
-        {
-            nameWidth = juce::jmax(nameWidth, measure(parameter.name));
-            valuesWidth = juce::jmax(valuesWidth, measure(parameter.values));
-        }
-
-        auto& header = table.getHeader();
-        header.setColumnWidth(nameColumn, nameWidth);
-        header.setColumnWidth(valuesColumn, valuesWidth);
-        preferredWindowWidth = nameWidth + valuesWidth + contentInset * 2 + 2;
-    }
-
-    int getNumRows() override { return static_cast<int>(parameters.size()); }
-
-    void paintRowBackground(juce::Graphics& graphics, int rowNumber,
-                            int width, int height, bool) override
-    {
-        const auto isHeading = juce::isPositiveAndBelow(rowNumber, static_cast<int>(parameters.size()))
-            && parameters[static_cast<size_t>(rowNumber)].address.isEmpty();
-        graphics.fillAll(isHeading ? ana::ui::dark : ana::ui::background);
-        graphics.setColour(ana::ui::light);
-        graphics.fillRect(0, height - 1, width, 1);
-    }
-
-    void paintCell(juce::Graphics& graphics, int rowNumber, int columnId,
-                   int width, int height, bool) override
-    {
-        if (! juce::isPositiveAndBelow(rowNumber, static_cast<int>(parameters.size())))
-            return;
-
-        const auto& parameter = parameters[static_cast<size_t>(rowNumber)];
-        if (parameter.address.isEmpty() && columnId == valuesColumn)
-            return;
-        const auto text = rowNumber == copiedRow && columnId == nameColumn
-            ? juce::String("copied")
-            : columnId == nameColumn ? parameter.name : parameter.values;
-        graphics.setColour(ana::ui::white);
-        graphics.setFont(ana::ui::makeFont());
-        const auto leftInset = ana::ui::gap.pixels();
-        graphics.drawFittedText(text,
-                                { leftInset, 0,
-                                  juce::jmax(0, width - leftInset - ana::ui::gap.pixels()), height },
-                                juce::Justification::centredLeft, 1, 1.0f);
-        if (columnId == nameColumn)
-        {
-            graphics.setColour(ana::ui::light);
-            graphics.fillRect(width - 1, 0, 1, height);
-        }
-    }
-
-    int getRowAt(const juce::MouseEvent& event)
-    {
-        const auto relative = event.getEventRelativeTo(&table);
-        if (! table.getLocalBounds().contains(relative.getPosition())
-            || table.getHeader().getBounds().contains(relative.getPosition()))
-            return -1;
-
-        const auto row = table.getRowContainingPosition(relative.x, relative.y);
-        return juce::isPositiveAndBelow(row, static_cast<int>(parameters.size()))
-            && parameters[static_cast<size_t>(row)].address.isNotEmpty() ? row : -1;
-    }
-
-    void handleMouseDown(const juce::MouseEvent& event)
-    {
-        if (! event.mods.isLeftButtonDown())
-            return;
-
-        if (auto* topLevel = getTopLevelComponent())
-            topLevel->toFront(false);
-
-        pressedRow = getRowAt(event);
-        ++longPressGeneration;
-        if (pressedRow >= 0)
-        {
-            const auto generation = longPressGeneration;
-            juce::Timer::callAfterDelay(longPressDelayMs,
-                                        [safeThis = juce::Component::SafePointer<OscListContent>(this), generation]
-                                        {
-                                            if (safeThis != nullptr)
-                                                safeThis->performLongPress(generation);
-                                        });
-        }
-    }
-
-    void handleMouseDrag(const juce::MouseEvent& event)
-    {
-        if (pressedRow >= 0 && event.getDistanceFromDragStart() >= longPressDragTolerance)
-        {
-            pressedRow = -1;
-            ++longPressGeneration;
-        }
-    }
-
-    void handleMouseUp(const juce::MouseEvent&)
-    {
-        pressedRow = -1;
-        ++longPressGeneration;
-    }
-
-    void performLongPress(const uint32_t generation)
-    {
-        if (generation != longPressGeneration
-            || ! juce::isPositiveAndBelow(pressedRow, static_cast<int>(parameters.size())))
-            return;
-
-        const auto row = pressedRow;
-        const auto& parameter = parameters[static_cast<size_t>(row)];
-        if (parameter.address.isEmpty())
-            return;
-
-        juce::SystemClipboard::copyTextToClipboard(parameter.address);
-        copiedRow = row;
-        table.repaintRow(row);
-        const auto copiedToken = ++copiedGeneration;
-        juce::Timer::callAfterDelay(copiedDisplayMs,
-                                    [safeThis = juce::Component::SafePointer<OscListContent>(this), copiedToken, row]
-                                    {
-                                        if (safeThis == nullptr || copiedToken != safeThis->copiedGeneration)
-                                            return;
-                                        if (safeThis->copiedRow == row)
-                                        {
-                                            safeThis->copiedRow = -1;
-                                            safeThis->table.repaintRow(row);
-                                        }
-                                    });
-    }
-
-    static constexpr int contentInset = ana::ui::gap.pixels() + 1;
-    static constexpr int nameColumn = 1;
-    static constexpr int valuesColumn = 2;
-    static constexpr int longPressDelayMs = 500;
-    static constexpr int copiedDisplayMs = 500;
-    static constexpr int longPressDragTolerance = 4;
-
-    PluginProcessor& processor;
-    CentredHeaderLookAndFeel headerLookAndFeel;
-    juce::TableListBox table;
-    InputListener inputListener;
-    std::vector<ParameterEntry> parameters;
-    int pressedRow = -1;
-    int copiedRow = -1;
-    uint32_t longPressGeneration = 0;
-    uint32_t copiedGeneration = 0;
-    int preferredWindowWidth = 500;
-};
-
-class OscListWindow final : public HostShortcutDocumentWindow, private juce::Timer
-{
-public:
-    OscListWindow(PluginProcessor& processorIn, std::function<void()> closeCallbackIn)
-        : HostShortcutDocumentWindow(ana::ui::background, Side::right),
-          content(processorIn), closeCallback(std::move(closeCallbackIn))
-    {
-        setUsingNativeTitleBar(false);
-        setTitleBarHeight(0);
-        setDropShadowEnabled(false);
-        setResizable(false, false);
-        setContentNonOwned(&content, false);
-        setSize(content.getPreferredWindowWidth(), minimumEditorHeight);
-        initialiseDesktopPeer();
-    }
-
-    ~OscListWindow() override
-    {
-        stopTimer();
-       #if JUCE_MAC
-        detachAuxiliaryWindowFromOwner(*this);
-       #endif
-        clearContentComponent();
-    }
-
-    void showFor(juce::Component& owner)
-    {
-        content.refreshParameters();
-        ownerComponent = &owner;
-        const auto ownerBounds = owner.getScreenBounds();
-        auto targetBounds = getBounds().withSize(content.getPreferredWindowWidth(),
-                                                 ownerBounds.getHeight());
-        targetBounds.setPosition(ownerBounds.getRight() + ana::ui::gap.pixels(), ownerBounds.getY());
-        showAt(owner, targetBounds);
-       #if JUCE_MAC
-        attachAuxiliaryWindowToOwner(*this, owner);
-       #endif
-        startTimerHz(60);
-    }
-
-    void hideWindow()
-    {
-        stopTimer();
-       #if JUCE_MAC
-        detachAuxiliaryWindowFromOwner(*this);
-       #endif
-        ownerComponent = nullptr;
-        hideAuxiliaryWindow();
-    }
-
-    void closeButtonPressed() override
-    {
-        if (closeCallback)
-            closeCallback();
-        else
-            hideWindow();
-    }
-
-private:
-    void timerCallback() override
-    {
-        if (ownerComponent == nullptr)
-            return;
-
-        auto targetBounds = getBounds().withSize(content.getPreferredWindowWidth(),
-                                                 ownerComponent->getHeight());
-        const auto ownerBounds = ownerComponent->getScreenBounds();
-        targetBounds.setPosition(ownerBounds.getRight() + ana::ui::gap.pixels(),
-                                 ownerBounds.getY());
-        if (targetBounds != getBounds())
-            setBounds(targetBounds);
-    }
-
-    OscListContent content;
-    juce::Component::SafePointer<juce::Component> ownerComponent;
-    std::function<void()> closeCallback;
-};
+// Prevent duplicated FX instances from registering the same screenset identifier.
+std::set<std::string> registeredAnaDockIds;
+}
 
 PluginEditor::PluginEditor(PluginProcessor& processorRef)
     : AudioProcessorEditor(&processorRef)
@@ -1824,58 +1137,52 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
       corrDisplay(processorRef),
       lvlsDisplay(processorRef)
 {
-    for (auto* component : std::array<juce::Component*, 15> {
+    // Opening a new editor must never strand the user in CLEAN VIEW.
+    if (auto* clean = audioProcessor.getParameters().getParameter(PluginProcessor::cleanViewParameterId))
+        if (clean->getValue() >= 0.5f)
+            clean->setValueNotifyingHost(0.0f);
+    displayedStateRevision = audioProcessor.getStateRevision();
+    squareResizeMode = static_cast<bool>(audioProcessor.getParameters().state.getProperty("ui.square-resize", false));
+    getProperties().set("emptyEditorBackground",true);
+    setName("editor");
+#if JUCE_MAC
+    svgExportKeyboardMonitor = ana::svg_export::installKeyboardShortcut(*this, [this] { toggleSquareResizeMode(); });
+#endif
+    for (auto* component : std::array<juce::Component*, 8> {
              &scopDisplay, &specDisplay, &corrDisplay, &lvlsDisplay,
-             &specPageButton, &corrPageButton, &lvlsPageButton, &scopPageButton,
-             &snapshotsWindowButton, &settingsButton, &fullSourceButton,
-             &clearButton, &freezeButton, &oscWindowButton, &aboutButton })
+             &fullSourceButton,
+             &clearButton, &freezeButton, &aboutButton })
         addAndMakeVisible(*component);
 
-    specPageButton.onClick = [this] { showAnalyzerPage(ana::AnalyzerPage::spec, showingAnalyzerSettings); };
-    corrPageButton.onClick = [this] { showAnalyzerPage(ana::AnalyzerPage::corr, showingAnalyzerSettings); };
-    lvlsPageButton.onClick = [this] { showAnalyzerPage(ana::AnalyzerPage::lvls, showingAnalyzerSettings); };
-    scopPageButton.onClick = [this] { showAnalyzerPage(ana::AnalyzerPage::scop, showingAnalyzerSettings); };
-    snapshotsWindowButton.onClick = [this] { showSnapshotsWindow(! showingSnapshotsWindow); };
-    oscWindowButton.onClick = [this] { showOscWindow(! showingOscWindow); };
-    settingsButton.onClick = [this] { showAnalyzerSettings(! showingAnalyzerSettings); };
+    updateButton.onClick = [this] { if(!udDragMoved) showAnalyzerSettings(!showingAnalyzerSettings); };
+    updateButton.addMouseListener(this,false);
+    aboutButton.setSquareRailVisible(true);
     aboutButton.setTooltip("ABOUT");
-    snapshotsWindowButton.setTooltip("SNAPSHOTS");
-    settingsButton.setTooltip("SETTINGS");
+    updateButton.setTooltip("SETTINGS / UPDATE STATUS");
+    updateButton.setSlotIndicatorVisible(false);
+    updateButton.setTextHorizontalInset(2);
+    updateButton.setComponentID("update-settings");
     freezeButton.setTooltip("FREEZE");
-    oscWindowButton.setTooltip("OSC");
     fullSourceButton.setTooltip("FULL");
     clearButton.setTooltip("CLEAR");
-    aboutButton.onClick = [this] { showAboutPopup(); };
-    for (auto* component : std::array<juce::Component*, 9> {
-             &modeButton, &sourceButton, &takeButton, &keepSecondTakeButton, &refreshButton,
-             &locationButton, &offlineTrackNumberLabel, &offlineLocationLabel, &offlineUpdateLabel })
+    aboutButton.addMouseListener(this, false);
+    aboutButton.onClick = [this]
+    {
+        if (animationOverlay == nullptr || !animationOverlay->isVisible())
+        {
+            if (aboutPopup != nullptr) dismissAboutPopup();
+            else showAboutPopup();
+        }
+    };
+    for (auto* component : std::array<juce::Component*, 5> {
+             &takeButton, &keepSecondTakeButton, &refreshButton,
+             &locationButton, &updateButton })
         addChildComponent(*component);
-    modeButton.onClick = [this] { showModePrompt(); };
-    modeButton.setTooltip("MODE: REALTIME / OFFLINE");
-    offlineUpdateLabel.setFont(ana::ui::makeFont());
-    offlineUpdateLabel.setJustificationType(juce::Justification::centred);
-    offlineUpdateLabel.setMinimumHorizontalScale(1.0f);
-    offlineUpdateLabel.setColour(juce::Label::textColourId, ana::ui::white);
-    offlineUpdateLabel.setColour(juce::Label::backgroundColourId, ana::ui::dark);
-    offlineUpdateLabel.setColour(juce::Label::outlineColourId, ana::ui::light);
-    offlineUpdateLabel.setDrawBackground(false);
-    offlineUpdateLabel.setBorderSize(
-        juce::BorderSize<int>(1, ana::ui::gap.pixels(), 1, ana::ui::gap.pixels()));
-    offlineUpdateLabel.setInterceptsMouseClicks(false, false);
-    offlineUpdateLabel.setVisible(true);
-    offlineTrackNumberLabel.setFont(ana::ui::makeFont());
-    offlineTrackNumberLabel.setJustificationType(juce::Justification::centred);
-    offlineTrackNumberLabel.setMinimumHorizontalScale(1.0f);
-    offlineTrackNumberLabel.setColour(juce::Label::textColourId, ana::ui::white);
-    offlineTrackNumberLabel.setColour(juce::Label::outlineColourId, ana::ui::light);
-    offlineTrackNumberLabel.setDrawBackground(false);
-    offlineTrackNumberLabel.setBorderSize(
-        juce::BorderSize<int>(1, ana::ui::textPadding, 1, ana::ui::textPadding));
-    offlineTrackNumberLabel.setInterceptsMouseClicks(false, false);
-
+    updateButton.setVisible(true);
     refreshButton.addMouseListener(this, false);
     refreshPress.onArmed = [this]
     {
+        if (!audioProcessor.isOfflineMode()) return;
         audioProcessor.setOfflineAutomaticRefresh(! audioProcessor.isOfflineAutomaticRefresh());
         refreshButton.setToggleState(audioProcessor.isOfflineAutomaticRefresh(),
                                      juce::dontSendNotification);
@@ -1887,18 +1194,63 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
         if (release == LongPressGesture::ReleaseResult::longPress
             || release == LongPressGesture::ReleaseResult::cancelled)
             return;
-        audioProcessor.forceOfflineRefresh();
+        audioProcessor.requestOfflineRefresh();
         refreshOfflineSelectionButtons();
-        offlineUpdateLabel.setText("00", juce::dontSendNotification);
+        updateButton.setButtonText("00");
     };
 
-    sourceButton.onClick = [this] { showOfflineSourcePrompt(); };
-    locationButton.onClick = [this] { showOfflineLocationPrompt(); };
+    locationButton.onClick = [this]
+    {
+        if (!audioProcessor.isOfflineMode()) return;
+        dismissChoicePrompt();
+        auto* parameter=audioProcessor.getParameters().getParameter(PluginProcessor::offlineMonitorParameterId);
+        parameter->beginChangeGesture();
+        audioProcessor.setOfflineMonitorLocation(! audioProcessor.isOfflineMonitorLocation());
+        parameter->endChangeGesture();
+        refreshOfflineSelectionButtons();
+        resized(); // mode-specific TAKE/KST slot changes immediately
+        scopDisplay.refreshWaveform();
+    };
+    locationButton.setClickingTogglesState(true);
+    keepSecondTakeButton.setClickingTogglesState(true);
+    locationButton.getProperties().set("oscParameterId",PluginProcessor::offlineMonitorParameterId);
+    keepSecondTakeButton.getProperties().set("oscParameterId",PluginProcessor::offlineKeepTakeParameterId);
+    refreshButton.setSquareRailVisible(true);
+    refreshButton.getProperties().set("oscParameterId",PluginProcessor::offlineRefreshParameterId);
+    locationButton.setInteractionEnabled(false);
+    keepSecondTakeButton.setInteractionEnabled(false);
+    refreshButton.setInteractionEnabled(false);
+    settingsComponent.attachMainControl(locationButton, 0);
+    settingsComponent.attachMainControl(keepSecondTakeButton, 1);
+    settingsComponent.attachMainControl(refreshButton, 2);
+    settingsComponent.attachMainControl(aboutButton, 3, false);
+    snapshotsContent = std::make_unique<SnapshotsWindowContent>(specDisplay);
+    // The Settings panel owns placement, the editor owns the component lifetime.
+    settingsComponent.attachSnapshotsContent(*snapshotsContent,
+        snapshotsContent->preferredEmbeddedHeight(), snapshotsContent->dockableControls());
+    snapshotsContent->onPreferredHeightChanged = [this](int height)
+    {
+        settingsComponent.setSnapshotsPreferredHeight(height);
+    };
+    snapshotsContent->onTextEditingChanged = [this](bool editing)
+    {
+        if (settingsComponent.onTextEditingChanged)
+            settingsComponent.onTextEditingChanged(editing);
+    };
+    animationSettingsPanel=std::make_unique<AnimationSettingsPanel>(audioProcessor.getParameters(),animationSettings);
+    animationSettingsPanel->setName("unit.animation");
+    animationSettingsPanel->onTextEditingChanged=[this](bool editing) { if (settingsComponent.onTextEditingChanged) settingsComponent.onTextEditingChanged(editing); };
+    animationSettingsPanel->onPreferredHeightChanged=[this] { settingsComponent.resized(); };
+    settingsComponent.attachAnimationContent(*animationSettingsPanel);
     takeButton.onClick = [this] { showOfflineTakePrompt(); };
     keepSecondTakeButton.setTooltip("KEEP SECOND TAKE");
     keepSecondTakeButton.onClick = [this]
     {
+        if (!audioProcessor.isOfflineMode()) return;
+        auto* parameter=audioProcessor.getParameters().getParameter(PluginProcessor::offlineKeepTakeParameterId);
+        parameter->beginChangeGesture();
         audioProcessor.setOfflineKeepSecondTake(! audioProcessor.isOfflineKeepSecondTake());
+        parameter->endChangeGesture();
         refreshOfflineSelectionButtons();
     };
 
@@ -1907,15 +1259,61 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
     settingsComponent.onDisplaySettingsChanged = [this]
     {
         scopDisplay.refreshDisplaySettings();
+        // Horizontal controls change how much height each SCOP band needs.
+        // Recalculate the host resize constraint as soon as a setting changes.
+        if (activePage == ana::AnalyzerPage::scop)
+        {
+            updateResizeLimits();
+            const auto minimum = minimumHeightForCurrentPage();
+            if (getHeight() < minimum)
+                setSize(getWidth(), minimum);
+        }
         specDisplay.resized();
         specDisplay.repaint();
         corrDisplay.resized();
         corrDisplay.repaint();
         lvlsDisplay.resized();
     };
-    settingsComponent.onEqualBandHeights = [this] { scopDisplay.equalizeBandHeights(); };
-    settingsComponent.onCenterLvlsSections = [this] { lvlsDisplay.centerParts(); };
-    settingsComponent.onCloseRequested = [this] { showAnalyzerSettings(false); };
+    settingsComponent.onScopBandLayoutChanged = [this]
+    {
+        scopDisplay.refreshBandLayout();
+        updateResizeLimits();
+        const auto minHeight = minimumHeightForCurrentPage();
+        if (getHeight() < minHeight)
+            setSize(getWidth(), minHeight);
+    };
+    settingsComponent.onScopLinkedNormalizeChanged = [this](bool enabled)
+    { scopDisplay.setLinkedNormalization(enabled); };
+    settingsComponent.onScopSlopeChanged = [this]
+    {
+        if (audioProcessor.isOfflineMode())
+            scopDisplay.refreshWaveform();
+    };
+    settingsComponent.onLvlsPartsLayoutChanged = [this] { lvlsDisplay.refreshPartLayout(); };
+    settingsComponent.onAnalysisModeChanged = [this] { timerCallback(); };
+    settingsComponent.onDisplaySelected = [safeEditor = juce::Component::SafePointer<PluginEditor>(this)] (int index)
+    {
+        if (safeEditor == nullptr) return;
+        auto& editor = *safeEditor;
+        if (index == 0 || index == 1)
+        {
+            editor.audioProcessor.setSpecMapView(index == 1);
+            editor.showAnalyzerPage(ana::AnalyzerPage::spec, editor.showingAnalyzerSettings);
+            editor.specDisplay.refreshMode();
+        }
+        else if (index >= 2 && index <= 4)
+        {
+            editor.audioProcessor.setCorrMode(index == 2 ? 2 : index == 3 ? 0 : 1);
+            editor.showAnalyzerPage(ana::AnalyzerPage::corr, editor.showingAnalyzerSettings);
+            editor.corrDisplay.refreshMode();
+        }
+        else if (index == 5)
+            editor.showAnalyzerPage(ana::AnalyzerPage::lvls, editor.showingAnalyzerSettings);
+        else if (index == 6)
+            editor.showAnalyzerPage(ana::AnalyzerPage::scop, editor.showingAnalyzerSettings);
+        editor.settingsComponent.refreshExternalState();
+        editor.repaint();
+    };
     settingsComponent.onChoiceRequested = [this] (ParameterControl& control)
     {
         if (settingsWindow != nullptr)
@@ -1926,6 +1324,14 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
         if (settingsWindow != nullptr)
             settingsWindow->showResetPrompt(control);
     };
+
+    settingsComponent.onFreezeChanged = [this] (bool frozen)
+    {
+        freezeButton.setToggleState(frozen, juce::dontSendNotification);
+        if (freezeButton.onClick) freezeButton.onClick();
+    };
+    settingsComponent.onOverallFull = [this] { if (fullSourceButton.onClick) fullSourceButton.onClick(); };
+    settingsComponent.onScopClear = [this] { scopDisplay.clearHistory(); };
 
     freezeButton.setClickingTogglesState(true);
     freezeButton.onClick = [this]
@@ -1964,33 +1370,212 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
 
     timerCallback();
     startTimerHz(15);
+    editorSizeConstrainer = std::make_unique<EditorSizeConstrainer>();
+    setConstrainer(editorSizeConstrainer.get());
     setResizable(true, false);
+    leftEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
+        this, juce::ResizableEdgeComponent::leftEdge);
+    topEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
+        this, juce::ResizableEdgeComponent::topEdge);
     rightEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
-        this, getConstrainer(), juce::ResizableEdgeComponent::rightEdge);
+        this, juce::ResizableEdgeComponent::rightEdge);
     bottomEdgeResizer = std::make_unique<InvisibleResizableEdgeComponent>(
-        this, getConstrainer(), juce::ResizableEdgeComponent::bottomEdge);
+        this, juce::ResizableEdgeComponent::bottomEdge);
+    leftEdgeResizer->setAlwaysOnTop(true);
+    topEdgeResizer->setAlwaysOnTop(true);
     rightEdgeResizer->setAlwaysOnTop(true);
     bottomEdgeResizer->setAlwaysOnTop(true);
+    cornerResizer = std::make_unique<InvisibleResizableCornerComponent>(this);
+    cornerResizer->setAlwaysOnTop(true);
+    addAndMakeVisible(*cornerResizer);
+    addAndMakeVisible(*leftEdgeResizer);
+    addAndMakeVisible(*topEdgeResizer);
     addAndMakeVisible(*rightEdgeResizer);
     addAndMakeVisible(*bottomEdgeResizer);
     const auto minimumWidth = minimumEditorWidth();
-    setResizeLimits(minimumWidth, minimumEditorHeight, maximumEditorSize, maximumEditorSize);
+    updateResizeLimits();
     const auto savedSize = audioProcessor.getLastEditorSize();
-    setSize(juce::jlimit(minimumWidth, maximumEditorSize,
+    setSize(juce::jlimit(minimumWidth, getConstrainer()->getMaximumWidth(),
                          savedSize.x > 0 ? savedSize.x : minimumWidth),
-            juce::jlimit(minimumEditorHeight, maximumEditorSize,
+            juce::jlimit(minimumHeightForCurrentPage(), getConstrainer()->getMaximumHeight(),
                          savedSize.y > 0 ? savedSize.y : defaultEditorHeight));
+    dockScreensetInitializationComplete = true;
+    registerDockScreenset();
+    // Fallback for hosts without REAPER's screenset API: restore the dock when
+    // this editor is opened again, retaining its last position.
+    if (bool(audioProcessor.getParameters().state.getProperty("ana.dock.only", false))
+        && bool(audioProcessor.getParameters().state.getProperty("ana.settings.dock.visible", false)))
+        showAnalyzerSettings(true);
 }
 
 PluginEditor::~PluginEditor()
 {
+    unregisterDockScreenset();
+#if JUCE_MAC
+    ana::svg_export::removeKeyboardShortcut(svgExportKeyboardMonitor);
+#endif
+    dismissAboutPopup();
+    snapshotsContent->onTextEditingChanged = nullptr;
+    snapshotsContent->onPreferredHeightChanged = nullptr;
+    settingsWindow.reset();
+    settingsComponent.detachSnapshotsContent();
+    snapshotsContent.reset();
+    animationSettingsPanel->onPreferredHeightChanged=nullptr;
+    animationSettingsPanel->onTextEditingChanged=nullptr;
+    settingsComponent.detachAnimationContent();
+    animationSettingsPanel.reset();
+    animationOverlay.reset();
+    animationBackdrop.reset();
+    updateButton.removeMouseListener(this);
+    aboutButton.removeMouseListener(this);
+    setConstrainer(nullptr);
     refreshButton.removeMouseListener(this);
-    if (getWidth() > 0 && getHeight() > 0)
+    if (displayedStateRevision == audioProcessor.getStateRevision() && getWidth() > 0 && getHeight() > 0)
         audioProcessor.setLastEditorSize(getWidth(), getHeight());
+}
+
+void PluginEditor::registerDockScreenset()
+{
+    auto& state = audioProcessor.getParameters().state;
+    auto id = state.getProperty("ana.settings.dock.screensetId").toString();
+    std::string key = "ANA_DOCK_" + id.toStdString();
+    if (dockScreensetRegistered)
+    {
+        if (dockScreensetId == key)
+            return;
+        // The host has restored a different project/FX instance state.
+        unregisterDockScreenset();
+    }
+    if (id.isEmpty() || registeredAnaDockIds.contains(key))
+    {
+        id = juce::Uuid().toString().removeCharacters("-{}");
+        key = "ANA_DOCK_" + id.toStdString();
+        state.setProperty("ana.settings.dock.screensetId", id, nullptr);
+    }
+
+    dockScreensetId = std::move(key);
+    dockScreensetRegistered = audioProcessor.registerDockScreenset(
+        dockScreensetId.c_str(), &PluginEditor::dockScreensetCallback, this);
+    if (dockScreensetRegistered)
+        registeredAnaDockIds.insert(dockScreensetId);
+}
+
+void PluginEditor::unregisterDockScreenset()
+{
+    if (!dockScreensetRegistered)
+        return;
+    audioProcessor.unregisterDockScreenset(this);
+    registeredAnaDockIds.erase(dockScreensetId);
+    dockScreensetRegistered = false;
+}
+
+std::intptr_t PluginEditor::dockScreensetCallback(int action, const char*,
+                                                  void* context, void* data, int size)
+{
+    if (context == nullptr)
+        return 0;
+    return static_cast<PluginEditor*>(context)->handleDockScreenset(action, data, size);
+}
+
+std::intptr_t PluginEditor::handleDockScreenset(int action, void* data, int size)
+{
+    // Actions defined by REAPER's reaper_plugin.h (screensetNewCallbackFunc).
+    constexpr int getWindow = 0;
+    constexpr int isDocked = 1;
+    constexpr int saveState = 0x101;
+    constexpr int loadState = 0x100;
+    constexpr int wantSize = 0x102;
+    if (action == wantSize)
+        return 256;
+    if (action == isDocked)
+        return 0; // Floating JUCE window, not a REAPER docker tab.
+    if (action == getWindow)
+        return settingsWindow != nullptr && settingsWindow->isVisible()
+            && settingsWindow->getPeer() != nullptr
+            ? reinterpret_cast<std::intptr_t>(settingsWindow->getPeer()->getNativeHandle()) : 0;
+
+    if (action == saveState)
+    {
+        const auto& state = audioProcessor.getParameters().state;
+        const bool visible = showingAnalyzerSettings && settingsWindow != nullptr
+            && settingsWindow->isVisible();
+        const bool dockOnly = bool(state.getProperty("ana.dock.only", false));
+        const bool vertical = bool(state.getProperty("ana.dock.vertical", false));
+        const auto bounds = settingsWindow != nullptr ? settingsWindow->getBounds()
+            : juce::Rectangle<int>(int(state.getProperty("ana.settings.dock.x", 0)),
+                                   int(state.getProperty("ana.settings.dock.y", 0)), 0, 0);
+        char output[160] {};
+        const auto count = std::snprintf(output, sizeof(output), "1|%d|%d|%d|%d|%d|%d|%d",
+            int(visible), int(dockOnly), int(vertical),
+            bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight());
+        if (data == nullptr || size < 1 || count < 0 || count >= size)
+            return 0;
+        std::memcpy(data, output, static_cast<size_t>(count) + 1);
+        return count + 1;
+    }
+    if (action == loadState)
+    {
+        // REAPER may request this during a screenset change. Do not mutate
+        // the editor hierarchy from inside the host callback.
+        juce::String serialized;
+        if (data != nullptr && size > 0)
+        {
+            const auto* bytes = static_cast<const char*>(data);
+            int len = 0;
+            while (len < size && bytes[len] != '\0') ++len;
+            serialized = juce::String::fromUTF8(bytes, len);
+        }
+        juce::Component::SafePointer<PluginEditor> safeEditor(this);
+        juce::MessageManager::callAsync([safeEditor, serialized]
+        {
+            if (safeEditor != nullptr)
+                safeEditor->loadDockScreensetState(serialized);
+        });
+    }
+    return 0;
+}
+
+void PluginEditor::loadDockScreensetState(juce::String serialized)
+{
+    if (serialized.isEmpty())
+    {
+        showAnalyzerSettings(false);
+        return;
+    }
+    const auto fields = juce::StringArray::fromTokens(serialized, "|", "");
+    if (fields.size() != 8 || fields[0] != "1")
+        return;
+    const bool visible = fields[1].getIntValue() != 0;
+    if (!visible)
+    {
+        showAnalyzerSettings(false);
+        return;
+    }
+
+    auto& state = audioProcessor.getParameters().state;
+    state.setProperty("ana.dock.only", fields[2].getIntValue() != 0, nullptr);
+    state.setProperty("ana.dock.vertical", fields[3].getIntValue() != 0, nullptr);
+    showAnalyzerSettings(true);
+    if (settingsWindow == nullptr)
+        return;
+    settingsWindow->applyDockMode();
+    const auto savedBounds = juce::Rectangle<int>(fields[4].getIntValue(), fields[5].getIntValue(),
+                                                  fields[6].getIntValue(), fields[7].getIntValue());
+    // The current dock layout determines its size. The screenset restores its
+    // position, but does not stretch or distort the dock's standard controls.
+    auto bounds = settingsWindow->getBounds();
+    bounds.setPosition(savedBounds.getPosition());
+    settingsWindow->showAtScreensetBounds(*this, bounds);
 }
 
 void PluginEditor::showAnalyzerSettings(const bool shouldShowSettings)
 {
+    if (!shouldShowSettings) dismissAboutPopup();
+    auto& state = audioProcessor.getParameters().state;
+    const bool dockOnly = bool(state.getProperty("ana.dock.only", false));
+    const bool rememberDockVisible = shouldShowSettings && dockOnly;
+    if (bool(state.getProperty("ana.settings.dock.visible", false)) != rememberDockVisible)
+        state.setProperty("ana.settings.dock.visible", rememberDockVisible, nullptr);
     if (shouldShowSettings && settingsWindow == nullptr)
     {
         settingsWindow = std::make_unique<SettingsWindow>(
@@ -2000,84 +1585,27 @@ void PluginEditor::showAnalyzerSettings(const bool shouldShowSettings)
     showAnalyzerPage(activePage, shouldShowSettings);
 }
 
-void PluginEditor::showSnapshotsWindow(const bool shouldShowWindow)
-{
-    if (shouldShowWindow && snapshotsWindow == nullptr)
-    {
-        snapshotsWindow = std::make_unique<SnapshotsWindow>(
-            specDisplay, [this] { showSnapshotsWindow(false); });
-    }
-
-    showingSnapshotsWindow = shouldShowWindow;
-    snapshotsWindowButton.setToggleState(showingSnapshotsWindow, juce::dontSendNotification);
-    if (snapshotsWindow != nullptr)
-    {
-        if (showingSnapshotsWindow)
-            snapshotsWindow->showFor(*this);
-        else
-            snapshotsWindow->hideWindow();
-    }
-}
-
-void PluginEditor::showOscWindow(const bool shouldShowWindow)
-{
-    if (! shouldShowWindow)
-        showOscListWindow(false);
-    if (shouldShowWindow && oscWindow == nullptr)
-        oscWindow = std::make_unique<OscWindow>(
-            audioProcessor, [this] { showOscWindow(false); },
-            [this] { showOscListWindow(! showingOscListWindow); });
-
-    showingOscWindow = shouldShowWindow;
-    oscWindowButton.setToggleState(showingOscWindow, juce::dontSendNotification);
-    if (oscWindow != nullptr)
-    {
-        if (showingOscWindow)
-            oscWindow->showFor(*this);
-        else
-            oscWindow->hideWindow();
-    }
-}
-
-void PluginEditor::showOscListWindow(const bool shouldShowWindow)
-{
-    if (shouldShowWindow && oscWindow == nullptr)
-        return;
-    if (shouldShowWindow && oscListWindow == nullptr)
-        oscListWindow = std::make_unique<OscListWindow>(
-            audioProcessor, [this] { showOscListWindow(false); });
-
-    showingOscListWindow = shouldShowWindow;
-    if (oscWindow != nullptr)
-        oscWindow->setListVisible(shouldShowWindow);
-    if (oscListWindow != nullptr)
-    {
-        if (shouldShowWindow)
-            oscListWindow->showFor(*oscWindow);
-        else
-            oscListWindow->hideWindow();
-    }
-}
-
 void PluginEditor::showAnalyzerPage(const ana::AnalyzerPage page,
                                                const bool shouldShowSettings)
 {
     if (! shouldShowSettings || page != activePage)
         dismissChoicePrompt();
 
+    const auto previousPage = activePage;
     activePage = page;
     audioProcessor.setAnalyzerPageState(page);
-    specPageButton.setToggleState(page == ana::AnalyzerPage::spec, juce::dontSendNotification);
-    corrPageButton.setToggleState(page == ana::AnalyzerPage::corr, juce::dontSendNotification);
-    lvlsPageButton.setToggleState(page == ana::AnalyzerPage::lvls, juce::dontSendNotification);
-    scopPageButton.setToggleState(page == ana::AnalyzerPage::scop, juce::dontSendNotification);
+    // Switching DISPLAY must never force the host window taller. Keep the
+    // compact constraint until the user starts resizing vertically.
+    if (previousPage != page)
+    {
+        deferOfflineScopMinimum = page == ana::AnalyzerPage::scop
+            && audioProcessor.isOfflineMode() && getConstrainer() != nullptr
+            && getHeight() > 0 && getHeight() < requiredHeightForCurrentPage();
+        heightAtScopSwitch = getHeight();
+    }
     showingAnalyzerSettings = shouldShowSettings;
-    settingsButton.setEnabled(true);
-    settingsButton.setToggleState(showingAnalyzerSettings, juce::dontSendNotification);
-    snapshotsWindowButton.setEnabled(true);
-    oscWindowButton.setEnabled(true);
-    snapshotsWindowButton.setToggleState(showingSnapshotsWindow, juce::dontSendNotification);
-    oscWindowButton.setToggleState(showingOscWindow, juce::dontSendNotification);
+    updateButton.setEnabled(true);
+    updateButton.setToggleState(showingAnalyzerSettings, juce::dontSendNotification);
     scopDisplay.setVisible(page == ana::AnalyzerPage::scop);
     specDisplay.setVisible(page == ana::AnalyzerPage::spec);
     corrDisplay.setVisible(page == ana::AnalyzerPage::corr);
@@ -2107,6 +1635,13 @@ void PluginEditor::showAnalyzerPage(const ana::AnalyzerPage page,
             settingsWindow->hideWindow();
     }
 
+    if (getConstrainer() != nullptr)
+    {
+        updateResizeLimits();
+        const auto minHeight = minimumHeightForCurrentPage();
+        if (getHeight() < minHeight)
+            setSize(getWidth(), minHeight);
+    }
     resized();
     repaint();
 }
@@ -2160,20 +1695,169 @@ void PluginEditor::showAboutPopup()
             if (safeEditor != nullptr)
                 safeEditor->dismissAboutPopup();
         });
-    addAndMakeVisible(*aboutPopup);
-    aboutPopup->setBounds(getLocalBounds());
-    aboutPopup->toFront(true);
+    if (settingsWindow != nullptr) settingsWindow->showAboutPopup(*aboutPopup);
+    aboutButton.setToggleState(true, juce::dontSendNotification);
     aboutPopup->grabKeyboardFocus();
+}
+
+void PluginEditor::showAnimation(const bool active)
+{
+    if (! active && (automaticPauseAnimation || animationPausedSince >= 0.0))
+    {
+        pauseAnimationDismissed = true;
+        automaticPauseAnimation = false;
+    }
+    if (active) ensureAnimationComponents();
+    if (audioProcessor.isScreensaverEnabled() != active)
+        if (auto* parameter = audioProcessor.getParameters().getParameter(PluginProcessor::screensaverParameterId))
+        {
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost(active ? 1.0f : 0.0f);
+            parameter->endChangeGesture();
+        }
+    if (animationOverlay != nullptr)
+    {
+        if (active)
+        {
+            animationBackdrop->setBounds(getLocalBounds().reduced(2));
+            animationBackdrop->setVisible(true);
+            animationBackdrop->toFront(false);
+            // Paint the software backing before GL replaces the overlay's
+            // normal paint with an initially empty CachedComponentImage.
+            if (auto* peer = getPeer()) peer->performAnyPendingRepaintsNow();
+        }
+        animationOverlay->setBounds(getLocalBounds().reduced(2));
+        animationOverlay->setActive(active);
+        if (active)
+        {
+            dismissAboutPopup();
+            dismissChoicePrompt();
+            animationOverlay->toFront(false);
+            updateButton.toFront(false);
+        }
+        else
+        {
+            animationBackdrop->setVisible(false);
+            repaint();
+            if (auto* peer = getPeer()) peer->performAnyPendingRepaintsNow();
+        }
+    }
+}
+
+void PluginEditor::ensureAnimationComponents()
+{
+    if (animationOverlay == nullptr)
+    {
+        animationBackdrop = std::make_unique<AnimationBackdrop>();
+        addChildComponent(*animationBackdrop);
+        animationOverlay = std::make_unique<AnimationOverlay>(audioProcessor.getParameters().state, animationSettings);
+        animationOverlay->onSettingsRequested = [this] { showAnimationSettings(); };
+        animationOverlay->onClose = [this] { showAnimation(false); };
+        addChildComponent(*animationOverlay);
+    }
+}
+
+void PluginEditor::showAnimationSettings()
+{
+    showAnalyzerSettings(true);
+    audioProcessor.getParameters().state.setProperty("ana.dock.only",false,nullptr);
+    if (settingsWindow!=nullptr) settingsWindow->applyDockMode();
+    settingsComponent.openAnimationBlock();
 }
 
 void PluginEditor::dismissAboutPopup()
 {
     aboutPopup.reset();
+    aboutButton.setToggleState(false, juce::dontSendNotification);
     repaint();
 }
 
+void PluginEditor::syncDisplayedEditorSize()
+{
+    // A host can display the editor's native view fitted into an FX window of a
+    // different aspect (for example while the window is being resized), which
+    // stretches the drawn UI. A uniform host UI scale is deliberate and is
+    // preserved; only a stretched view is corrected by adopting the size the
+    // host is really showing.
+    auto* peer = getPeer();
+    if (peer == nullptr || ! isShowing() || svgLayoutActive
+        || juce::Desktop::getInstance().getMainMouseSource().isDragging())
+        return;
+
+    window_geometry::resetViewContentsScale(*this);
+
+    const auto peerBounds = peer->getBounds();
+    auto displayed = juce::Point<int>(peerBounds.getWidth(), peerBounds.getHeight());
+    if (displayed.getX() <= 0 || displayed.getY() <= 0)
+        return;
+
+    // The host window's content is the size the user really sees: when it is
+    // smaller than our view, the host is fitting the editor into it.
+    if (const auto content = window_geometry::getHostContentSize(*this);
+        content.getX() > 0 && content.getY() > 0
+        && content.getX() <= displayed.getX()
+        && content.getY() <= displayed.getY())
+        displayed = content;
+
+    const auto scaleX = static_cast<double>(displayed.getX()) / juce::jmax(1, getWidth());
+    const auto scaleY = static_cast<double>(displayed.getY()) / juce::jmax(1, getHeight());
+    if (scaleX >= 1.0 && scaleY >= 1.0)
+        return;
+
+    if (juce::jmax(scaleX, scaleY) / juce::jmin(scaleX, scaleY) < 1.1)
+        return;
+
+    // Wait until the host has stopped resizing before adopting its size.
+    if (displayed != lastDisplayedEditorSize)
+    {
+        lastDisplayedEditorSize = displayed;
+        return;
+    }
+
+    setSize(displayed.getX(), displayed.getY());
+    repaint();
+}
+
+
 void PluginEditor::timerCallback()
 {
+    if (dockScreensetInitializationComplete)
+        registerDockScreenset();
+    const auto stateChanged = displayedStateRevision != audioProcessor.getStateRevision();
+    if (stateChanged) restoreProcessorState();
+    else syncDisplayedEditorSize();
+    loadAnimationSettings(*animationSettings, audioProcessor.getParameters().state);
+    const auto animationActive = audioProcessor.isScreensaverEnabled();
+    if (automaticPauseAnimation && !animationActive)
+    {
+        automaticPauseAnimation = false;
+        pauseAnimationDismissed = true;
+    }
+    const auto pauseMode = animationSettings->playOnPause.load();
+    const auto transport = audioProcessor.getHostTransportState();
+    const auto paused = pauseMode && transport == 0;
+    if (paused)
+    {
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (animationPausedSince < 0.0) animationPausedSince = now;
+        if (!pauseAnimationDismissed && !animationActive
+            && now - animationPausedSince >= animationSettings->pauseDelayMs.load())
+        {
+            showAnimation(true);
+            automaticPauseAnimation = true;
+        }
+    }
+    else
+    {
+        animationPausedSince = -1.0;
+        if (automaticPauseAnimation || (pauseMode && transport == 1 && animationActive))
+            showAnimation(false);
+        automaticPauseAnimation = false;
+        pauseAnimationDismissed = false;
+    }
+    const auto shouldShowAnimation = audioProcessor.isScreensaverEnabled();
+    if (shouldShowAnimation != (animationOverlay != nullptr && animationOverlay->isVisible()))
+        showAnimation(shouldShowAnimation);
     const auto offline = audioProcessor.isOfflineMode();
     const auto modeAvailable = audioProcessor.isOfflineAvailable();
     if (displayedOffline != offline || displayedModeAvailable != modeAvailable)
@@ -2192,11 +1876,21 @@ void PluginEditor::timerCallback()
         resized();
         repaint();
     }
-    if (offline)
+    if (offline || showingAnalyzerSettings)
     {
         refreshOfflineSelectionButtons();
-        refreshOfflineUpdateStatus();
         refreshButton.setToggleState(audioProcessor.isOfflineAutomaticRefresh(), juce::dontSendNotification);
+    }
+    if (offline) refreshOfflineUpdateStatus();
+    else updateButton.setButtonText("UD");
+    // In realtime the offline action controls remain disabled. Polling their
+    // source/track state every 66 ms takes the offline-selection mutex on the
+    // GUI thread while the analysis worker may be updating it. Only refresh
+    // continuously when offline actually needs the live track information.
+    if (offline || stateChanged || !offlineActionControlsInitialized)
+    {
+        refreshOfflineActionControls();
+        offlineActionControlsInitialized = true;
     }
 
     const auto clean = audioProcessor.isCleanView();
@@ -2215,6 +1909,16 @@ void PluginEditor::timerCallback()
     const auto restoredPage = audioProcessor.getAnalyzerPageState();
     if (restoredPage != activePage)
         showAnalyzerPage(restoredPage, showingAnalyzerSettings);
+    if (auto* bounds = getConstrainer())
+    {
+        const auto minimum = minimumHeightForCurrentPage();
+        if (bounds->getMinimumHeight() != minimum)
+        {
+            updateResizeLimits();
+            if (getHeight() < minimum)
+                setSize(getWidth(), minimum);
+        }
+    }
 
     fullSourceButton.setToggleState(audioProcessor.isScopFullSourceView(),
                                     juce::dontSendNotification);
@@ -2222,9 +1926,7 @@ void PluginEditor::timerCallback()
     freezeButton.setEnabled(!audioProcessor.isOfflineMode());
     fullSourceButton.setEnabled(activePage == ana::AnalyzerPage::scop
         && audioProcessor.getScopSingleViewBand() < 0);
-    settingsButton.setEnabled(true);
-    snapshotsWindowButton.setEnabled(true);
-    oscWindowButton.setEnabled(true);
+    updateButton.setEnabled(true);
     if (settingsComponent.setAnalyzerContext(activePage, getActiveSettingsViewMode())
         && showingAnalyzerSettings && settingsWindow != nullptr)
         settingsWindow->refreshFor(*this);
@@ -2236,6 +1938,8 @@ void PluginEditor::timerCallback()
                                         ? audioProcessor.getLvlsProcessor().isFrozen()
                                     : scopFrozen,
                                 juce::dontSendNotification);
+    settingsComponent.setActionStates(freezeButton.getToggleState(), audioProcessor.isScopFullSourceView(),
+                                      !audioProcessor.isOfflineMode(), audioProcessor.getScopSingleViewBand() < 0);
 
     if (editorSizeSavePending
         && juce::Time::getMillisecondCounterHiRes() >= editorSizeSaveDeadlineMilliseconds)
@@ -2245,231 +1949,61 @@ void PluginEditor::timerCallback()
     }
 }
 
+void PluginEditor::paintOverChildren(juce::Graphics& g)
+{
+    NumericValueBox::paintRangeIndicators(g,*this);
+    g.setColour(ana::ui::background);
+    g.drawRect(getLocalBounds(),2);
+}
+
 void PluginEditor::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(ana::ui::background);
+    graphics.fillAll(ana::ui::windowBackground);
 }
 
 void PluginEditor::resized()
 {
-    if (getWidth() > 0 && getHeight() > 0)
+    if (deferOfflineScopMinimum && !svgLayoutActive && !restoringEditorState
+        && getHeight() != heightAtScopSwitch)
     {
+        // This is the first actual change of HEIGHT after selecting Offline
+        // SCOP (width-only changes leave the deferred minimum untouched).
+        deferOfflineScopMinimum = false;
+        updateResizeLimits();
+        const auto required = minimumHeightForCurrentPage();
+        if (getHeight() < required)
+        {
+            setSize(getWidth(), required);
+            return;
+        }
+    }
+    if (!svgLayoutActive && !restoringEditorState
+        && displayedStateRevision == audioProcessor.getStateRevision()
+        && getWidth() > 0 && getHeight() > 0)
+    {
+        audioProcessor.setLastEditorSize(getWidth(), getHeight());
         pendingEditorSize = { getWidth(), getHeight() };
         editorSizeSaveDeadlineMilliseconds = juce::Time::getMillisecondCounterHiRes() + 250.0;
         editorSizeSavePending = true;
     }
 
-    auto area = getLocalBounds().reduced(ana::ui::gap.pixels());
-    const auto modeVisible = audioProcessor.isOfflineAvailable() && ! audioProcessor.isCleanView();
-    modeButton.setVisible(modeVisible);
-    modeButton.setBounds({});
-    const auto navigationWidth = ana::ui::mainNavigationWidth()
-        + (modeVisible ? modeButton.getPreferredWidth() + ana::ui::gap.pixels() : 0);
-    for (auto* component : std::array<juce::Component*, 8> {
-             &sourceButton, &takeButton, &keepSecondTakeButton, &refreshButton,
-             &locationButton, &offlineTrackNumberLabel, &offlineLocationLabel, &offlineUpdateLabel })
-    { component->setVisible(false); component->setBounds({}); }
-    if (audioProcessor.isOfflineMode())
+    const auto layoutBounds = svgLayoutActive ? svgLayoutBounds : getLocalBounds();
+    auto area = layoutBounds.reduced(ana::ui::gap.pixels());
+    const bool showTake=audioProcessor.isOfflineMode() && !audioProcessor.isOfflineMonitorLocation();
+    const int updateWidth=ana::ui::controlHeight;
+    const int overlayWidth=showTake?takeButton.getPreferredWidth()+ana::ui::gap.pixels():0;
+    for(auto* view:std::array<juce::Component*,4>{ &scopDisplay,&specDisplay,&corrDisplay,&lvlsDisplay })
     {
-    if (! audioProcessor.isCleanView())
-    {
-        auto controlsRow = area.removeFromTop(ana::ui::controlHeight);
-        const auto scopActions = activePage == ana::AnalyzerPage::scop;
-        const auto essentialRightControlsWidth = aboutButton.getPreferredWidth()
-            + oscWindowButton.getPreferredWidth() + ana::ui::gap.pixels()
-            + settingsButton.getPreferredWidth() + snapshotsWindowButton.getPreferredWidth()
-            + ana::ui::textControlWidth(2) + refreshButton.getPreferredWidth()
-            + takeButton.getPreferredWidth() + keepSecondTakeButton.getPreferredWidth()
-            + sourceButton.getPreferredWidth()
-            + 7 * ana::ui::gap.pixels();
-        const auto inlineScopActions = scopActions
-            && navigationWidth + ana::ui::gap.pixels()
-                + essentialRightControlsWidth + fullSourceButton.getPreferredWidth()
-                + ana::ui::gap.pixels() <= controlsRow.getWidth();
-        const auto baseRightControlsWidth = essentialRightControlsWidth
-            + (inlineScopActions ? fullSourceButton.getPreferredWidth() + ana::ui::gap.pixels() : 0);
-        const auto locationWidth = locationButton.getPreferredWidth() + ana::ui::gap.pixels();
-        const auto numberWidth = ana::ui::textControlWidth(3);
-        constexpr int minimumTrackNameWidth = 40;
-        auto showTrackName = true;
-        auto showLocation = true;
-        auto showTrackNumber = true;
-        const auto requiredWidth = [&]
-        {
-            return navigationWidth
-                + (showTrackNumber ? ana::ui::gap.pixels() + numberWidth : 0)
-                + (showTrackName ? ana::ui::gap.pixels() + minimumTrackNameWidth : 0)
-                + ana::ui::gap.pixels() + baseRightControlsWidth
-                + (showLocation ? locationWidth : 0);
-        };
-        if (requiredWidth() >= controlsRow.getWidth())
-            showTrackName = false;
-        if (requiredWidth() > controlsRow.getWidth())
-            showLocation = false;
-        if (requiredWidth() > controlsRow.getWidth())
-            showTrackNumber = false;
-        const auto wrapRightControls = requiredWidth() > controlsRow.getWidth();
-        auto rightControlsRow = controlsRow;
-        if (wrapRightControls)
-        {
-            ana::ui::gap.removeFromTop(area);
-            rightControlsRow = area.removeFromTop(ana::ui::controlHeight);
-        }
-        const auto placeRight = [&] (juce::Component& component, const int width)
-        {
-            component.setVisible(true);
-            component.setBounds(rightControlsRow.removeFromRight(width));
-            ana::ui::gap.removeFromRight(rightControlsRow);
-        };
-
-        for (auto* component : std::array<juce::Component*, 11> {
-                 &clearButton, &freezeButton, &fullSourceButton,
-                 &sourceButton, &takeButton, &keepSecondTakeButton, &refreshButton, &offlineUpdateLabel,
-                 &locationButton, &offlineTrackNumberLabel, &offlineLocationLabel })
-        {
-            component->setVisible(false);
-            component->setBounds({});
-        }
-
-        placeRight(aboutButton, aboutButton.getPreferredWidth());
-        placeRight(settingsButton, settingsButton.getPreferredWidth());
-        placeRight(snapshotsWindowButton, snapshotsWindowButton.getPreferredWidth());
-        placeRight(oscWindowButton, oscWindowButton.getPreferredWidth());
-        placeRight(offlineUpdateLabel, ana::ui::textControlWidth(2));
-        placeRight(refreshButton, refreshButton.getPreferredWidth());
-        placeRight(keepSecondTakeButton, keepSecondTakeButton.getPreferredWidth());
-        placeRight(takeButton, takeButton.getPreferredWidth());
-        placeRight(sourceButton, sourceButton.getPreferredWidth());
-        if (inlineScopActions)
-            placeRight(fullSourceButton, fullSourceButton.getPreferredWidth());
-        if (showLocation)
-            placeRight(locationButton, locationButton.getPreferredWidth());
-
-        if (! wrapRightControls)
-            controlsRow = rightControlsRow;
-
-        ana::ui::FixedGapRow navigationRow(controlsRow);
-        if (modeVisible)
-            modeButton.setBounds(navigationRow.takeLeft(modeButton.getPreferredWidth()));
-        for (auto* button : std::array<ControlButton*, 4> {
-                 &specPageButton, &corrPageButton, &lvlsPageButton, &scopPageButton })
-        {
-            button->setBounds(navigationRow.takeLeft(button->getPreferredWidth()));
-            button->setVisible(true);
-        }
-        if (showTrackNumber)
-        {
-            offlineTrackNumberLabel.setBounds(scopPageButton.getRight() + ana::ui::gap.pixels(),
-                                          controlsRow.getY(), numberWidth, ana::ui::controlHeight);
-            offlineTrackNumberLabel.setVisible(true);
-        }
-        if (showTrackName)
-        {
-            const auto nameLeft = offlineTrackNumberLabel.getRight() + ana::ui::gap.pixels();
-            offlineLocationLabel.setBounds(nameLeft,
-                                       controlsRow.getY(), rightControlsRow.getRight() - nameLeft,
-                                       ana::ui::controlHeight);
-            offlineLocationLabel.setVisible(true);
-        }
-
-        ana::ui::gap.removeFromTop(area);
-        if (scopActions && ! inlineScopActions)
-        {
-            // Keep navigation and SOURCE joined at the common minimum width.
-            auto actionsRow = area.removeFromTop(ana::ui::controlHeight);
-            fullSourceButton.setBounds(actionsRow.removeFromRight(fullSourceButton.getPreferredWidth()));
-            fullSourceButton.setVisible(true);
-            ana::ui::gap.removeFromTop(area);
-        }
+        view->getProperties().set("topRightOverlayWidth",overlayWidth);
+        view->getProperties().set("topLeftOverlayWidth",updateWidth+2*ana::ui::gap.pixels());
+        view->getProperties().set("topLeftOverlayBottom",2*ana::ui::gap.pixels()+updateWidth-(view==&scopDisplay?0:ana::ui::gap.pixels()));
     }
-    else
-    {
-        for (auto* component : std::array<juce::Component*, 19> {
-                 &specPageButton, &corrPageButton, &lvlsPageButton, &scopPageButton,
-                 &snapshotsWindowButton, &settingsButton, &fullSourceButton,
-                 &clearButton, &freezeButton, &aboutButton,
-                 &sourceButton, &takeButton, &refreshButton, &offlineUpdateLabel,
-                 &locationButton, &offlineLocationLabel, &offlineTrackNumberLabel, &keepSecondTakeButton,
-                 &oscWindowButton })
-        {
-            component->setVisible(false);
-            component->setBounds({});
-        }
-    }
-
-    }
-    else
-    {
-    if (! audioProcessor.isCleanView())
-    {
-        auto controlsRow = area.removeFromTop(ana::ui::controlHeight);
-        const auto scopActions = activePage == ana::AnalyzerPage::scop;
-        const auto rightControlsWidth = aboutButton.getPreferredWidth()
-            + settingsButton.getPreferredWidth() + snapshotsWindowButton.getPreferredWidth()
-            + freezeButton.getPreferredWidth() + oscWindowButton.getPreferredWidth()
-            + (scopActions ? clearButton.getPreferredWidth() + fullSourceButton.getPreferredWidth() : 0)
-            + (scopActions ? 7 : 5) * ana::ui::gap.pixels();
-        const auto wrapRightControls = navigationWidth + rightControlsWidth > controlsRow.getWidth();
-        auto rightControlsRow = controlsRow;
-        if (wrapRightControls)
-        {
-            ana::ui::gap.removeFromTop(area);
-            rightControlsRow = area.removeFromTop(ana::ui::controlHeight);
-        }
-        const auto placeRight = [&] (juce::Component& component, const int width)
-        {
-            component.setVisible(true);
-            component.setBounds(rightControlsRow.removeFromRight(width));
-            ana::ui::gap.removeFromRight(rightControlsRow);
-        };
-
-        for (auto* component : std::array<juce::Component*, 3> {
-                 &clearButton, &freezeButton, &fullSourceButton })
-        {
-            component->setVisible(false);
-            component->setBounds({});
-        }
-
-        placeRight(aboutButton, aboutButton.getPreferredWidth());
-        placeRight(settingsButton, settingsButton.getPreferredWidth());
-        placeRight(snapshotsWindowButton, snapshotsWindowButton.getPreferredWidth());
-        placeRight(oscWindowButton, oscWindowButton.getPreferredWidth());
-        placeRight(freezeButton, freezeButton.getPreferredWidth());
-        if (scopActions)
-        {
-            placeRight(clearButton, clearButton.getPreferredWidth());
-            placeRight(fullSourceButton, fullSourceButton.getPreferredWidth());
-        }
-
-        if (! wrapRightControls)
-            controlsRow = rightControlsRow;
-
-        ana::ui::FixedGapRow navigationRow(controlsRow);
-        if (modeVisible)
-            modeButton.setBounds(navigationRow.takeLeft(modeButton.getPreferredWidth()));
-        for (auto* button : std::array<ControlButton*, 4> {
-                 &specPageButton, &corrPageButton, &lvlsPageButton, &scopPageButton })
-        {
-            button->setBounds(navigationRow.takeLeft(button->getPreferredWidth()));
-            button->setVisible(true);
-        }
-
-        ana::ui::gap.removeFromTop(area);
-    }
-    else
-    {
-        for (auto* component : std::array<juce::Component*, 11> {
-                 &specPageButton, &corrPageButton, &lvlsPageButton, &scopPageButton,
-                 &snapshotsWindowButton, &settingsButton, &fullSourceButton,
-                 &clearButton, &freezeButton, &aboutButton, &oscWindowButton })
-        {
-            component->setVisible(false);
-            component->setBounds({});
-        }
-    }
-
-    }
-
+    for(auto* control:std::array<juce::Component*,3>{ &clearButton,&freezeButton,&fullSourceButton })
+    { control->setVisible(false); control->setBounds({}); }
+    updateButton.setVisible(true);
+    updateButton.setBounds(layoutBounds.getX()+2*ana::ui::gap.pixels(),layoutBounds.getY()+2*ana::ui::gap.pixels(),updateWidth,updateWidth);
+    takeButton.setVisible(showTake);
+    takeButton.setBounds(showTake?juce::Rectangle<int>(area.getRight()-ana::scop::bandZoomSliderWidth-ana::ui::gap.pixels()-takeButton.getPreferredWidth(),updateButton.getY(),takeButton.getPreferredWidth(),ana::ui::controlHeight):juce::Rectangle<int>());
     auto scopBounds = area;
     scopBounds.setTop(scopBounds.getY() - ana::ui::gap.pixels());
     scopBounds.setBottom(getHeight());
@@ -2477,7 +2011,25 @@ void PluginEditor::resized()
     specDisplay.setBounds(area);
     corrDisplay.setBounds(area);
     lvlsDisplay.setBounds(area);
+    scopDisplay.resized(); specDisplay.resized(); corrDisplay.resized(); lvlsDisplay.resized();
+    updateButton.toFront(false); takeButton.toFront(false);
 
+    if (cornerResizer != nullptr)
+    {
+        cornerResizer->setBounds(getWidth() - editorResizeHandleThickness, getHeight() - editorResizeHandleThickness,
+                                editorResizeHandleThickness, editorResizeHandleThickness);
+        cornerResizer->toFront(false);
+    }
+    if (leftEdgeResizer != nullptr)
+    {
+        leftEdgeResizer->setBounds(0, 0, editorResizeHandleThickness, getHeight());
+        leftEdgeResizer->toFront(false);
+    }
+    if (topEdgeResizer != nullptr)
+    {
+        topEdgeResizer->setBounds(0, 0, getWidth(), editorResizeHandleThickness);
+        topEdgeResizer->toFront(false);
+    }
     if (rightEdgeResizer != nullptr)
     {
         rightEdgeResizer->setBounds(getWidth() - editorResizeHandleThickness, 0,
@@ -2489,71 +2041,33 @@ void PluginEditor::resized()
         bottomEdgeResizer->setBounds(0, getHeight() - editorResizeHandleThickness,
                                      getWidth(), editorResizeHandleThickness);
         bottomEdgeResizer->toFront(false);
+        if (cornerResizer != nullptr) cornerResizer->toFront(false);
     }
 
     if (choicePrompt != nullptr)
     {
-        choicePrompt->setBounds(getLocalBounds());
+        choicePrompt->setBounds(layoutBounds);
         choicePrompt->toFront(true);
     }
-    if (aboutPopup != nullptr)
+    if (animationOverlay != nullptr && !animationOverlay->isVisible()) animationOverlay->setBounds(layoutBounds.reduced(2));
+    if (animationOverlay != nullptr && animationOverlay->isVisible())
     {
-        aboutPopup->setBounds(getLocalBounds());
-        aboutPopup->toFront(true);
+        animationBackdrop->setBounds(layoutBounds.reduced(2));
+        animationBackdrop->toFront(false);
+        animationOverlay->setBounds(layoutBounds.reduced(2));
+        animationOverlay->toFront(false);
+        for (auto* edge : { leftEdgeResizer.get(), topEdgeResizer.get(),
+                            rightEdgeResizer.get(), bottomEdgeResizer.get(),
+                            cornerResizer.get() })
+            if (edge != nullptr) edge->toFront(false);
     }
-}
-
-void PluginEditor::showOfflineLocationPrompt()
-{
-    if (! audioProcessor.isOfflineLocationAvailable())
-        return;
-    showChoicePrompt(getLocalArea(&locationButton, locationButton.getLocalBounds()),
-                     { "TRACK", "MONITOR" }, audioProcessor.isOfflineMonitorLocation() ? 1 : 0,
-                     [this] (const int index)
-                     {
-                         audioProcessor.setOfflineMonitorLocation(index == 1);
-                         refreshOfflineSelectionButtons();
-                         scopDisplay.refreshWaveform();
-                     });
-}
-
-void PluginEditor::showOfflineSourcePrompt()
-{
-    refreshOfflineSelectionButtons();
-    juce::StringArray names { "ALL" };
-    std::vector<juce::String> choiceIds { juce::String() };
-    const auto selectedId = audioProcessor.getSelectedOfflineSourceId();
-    auto selectedIndex = 0;
-
-    for (const auto& choice : offlineSourceChoices)
-    {
-        if (std::find(choiceIds.begin(), choiceIds.end(), choice.sourceId) != choiceIds.end())
-            continue;
-
-        choiceIds.push_back(choice.sourceId);
-        names.add(choice.sourceName);
-
-        if (choice.sourceId == selectedId)
-            selectedIndex = names.size() - 1;
-    }
-
-    showChoicePrompt(getLocalArea(&sourceButton, sourceButton.getLocalBounds()),
-                     std::move(names), selectedIndex,
-                     [this, sourceIds = std::move(choiceIds)] (const int index)
-                     {
-                         if (! juce::isPositiveAndBelow(index, static_cast<int>(sourceIds.size())))
-                             return;
-
-                         audioProcessor.setSelectedOfflineSourceId(
-                             sourceIds[static_cast<size_t>(index)]);
-                         refreshOfflineSelectionButtons();
-                         scopDisplay.refreshWaveform();
-                     });
 }
 
 void PluginEditor::showOfflineTakePrompt()
 {
     refreshOfflineSelectionButtons();
+    if (audioProcessor.isOfflineMonitorLocation())
+        return; // MONITOR has KST, never the manual TAKE menu
     juce::StringArray names;
     std::vector<int> choiceNumbers;
     const auto selectedSourceId = audioProcessor.getSelectedOfflineSourceId();
@@ -2563,6 +2077,8 @@ void PluginEditor::showOfflineTakePrompt()
     for (const auto& choice : offlineSourceChoices)
     {
         if (selectedSourceId.isNotEmpty() && choice.sourceId != selectedSourceId)
+            continue;
+        if (choice.takeNumber < 1 || choice.takeNumber > 2)
             continue;
         if (std::find(choiceNumbers.begin(), choiceNumbers.end(), choice.takeNumber) != choiceNumbers.end())
             continue;
@@ -2599,7 +2115,7 @@ void PluginEditor::refreshOfflineSelectionButtons()
     offlineSourceChoices = std::move(latestChoices);
     if (choicesChanged && ! offlineSourceChoices.empty())
     {
-        offlineUpdateLabel.setText("00", juce::dontSendNotification);
+        updateButton.setButtonText("00");
     }
     const auto sourceId = audioProcessor.getSelectedOfflineSourceId();
     const auto selectedTakeNumber = audioProcessor.getSelectedOfflineTakeNumber();
@@ -2610,6 +2126,8 @@ void PluginEditor::refreshOfflineSelectionButtons()
         {
             if (sourceId.isNotEmpty() && choice.sourceId != sourceId)
                 continue;
+            if (choice.takeNumber < 1 || choice.takeNumber > 2)
+                continue;
 
             if (std::find(availableTakeNumbers.begin(), availableTakeNumbers.end(),
                           choice.takeNumber) == availableTakeNumbers.end())
@@ -2619,33 +2137,115 @@ void PluginEditor::refreshOfflineSelectionButtons()
         std::sort(availableTakeNumbers.begin(), availableTakeNumbers.end());
     }
 
-    const auto locationText = audioProcessor.getOfflineTrackName();
-    offlineLocationLabel.setText(locationText);
-    offlineLocationLabel.setTooltip(locationText);
-    offlineTrackNumberLabel.setText(juce::String(audioProcessor.getOfflineTrackNumber()).paddedLeft('0', 3),
-                                juce::dontSendNotification);
-    locationButton.setToggleState(false, juce::dontSendNotification);
-    locationButton.setEnabled(audioProcessor.isOfflineLocationAvailable());
-    locationButton.setTooltip(audioProcessor.isOfflineMonitorLocation() ? "LOCATION: MONITOR" : "LOCATION: TRACK");
-    sourceButton.setButtonText("SOURCE");
+    const auto monitorLocation = audioProcessor.isOfflineMonitorLocation();
     takeButton.setButtonText("TAKE");
-
     const auto offlineAvailable = audioProcessor.isOfflineSourceAvailable();
-    sourceButton.setEnabled(offlineAvailable && ! offlineSourceChoices.empty());
-    takeButton.setEnabled(offlineAvailable && ! availableTakeNumbers.empty());
-    sourceButton.setToggleState(sourceId.isNotEmpty(), juce::dontSendNotification);
+    takeButton.setEnabled(offlineAvailable && ! monitorLocation && ! availableTakeNumbers.empty());
     takeButton.setToggleState(false, juce::dontSendNotification);
-    keepSecondTakeButton.setToggleState(audioProcessor.isOfflineKeepSecondTake(), juce::dontSendNotification);
-    sourceButton.setTooltip(sourceId.isEmpty() ? "SOURCE: ALL" : "SOURCE: SELECTED");
-    takeButton.setTooltip("TAKE: " + juce::String(selectedTakeNumber));
+    takeButton.setTooltip("TRACK TAKE: " + juce::String(selectedTakeNumber));
+    refreshOfflineActionControls();
 }
 
 
 
+bool PluginEditor::isSvgExportGesture(const juce::ModifierKeys& modifiers)
+{
+    return modifiers.isCtrlDown() && modifiers.isAltDown() && modifiers.isShiftDown()
+#if JUCE_MAC
+        && !modifiers.isCommandDown()
+#endif
+        ;
+}
+
+int PluginEditor::requiredHeightForCurrentPage() const noexcept
+{
+    if (activePage != ana::AnalyzerPage::scop || audioProcessor.isCleanView())
+        return minimumEditorHeight;
+    const size_t bandCount = (audioProcessor.isScopFullSourceView()
+        || audioProcessor.getScopSingleViewBand() >= 0)
+        ? 1u : audioProcessor.getCrossoverCount() + 1u;
+    const auto bandHeight = audioProcessor.isOfflineMode()
+        ? ana::scop::minimumBandHeightForControls(true,true)
+        : ana::scop::minimumRealtimeBandHeight;
+    return juce::jmax(minimumEditorHeight,
+        ana::scop::minimumEditorHeightForBands(bandHeight, bandCount));
+}
+
+int PluginEditor::minimumHeightForCurrentPage() const noexcept
+{
+    return deferOfflineScopMinimum ? minimumEditorHeight : requiredHeightForCurrentPage();
+}
+
+void PluginEditor::updateResizeLimits()
+{
+    auto* constrainer = getConstrainer();
+    if (constrainer == nullptr) return;
+    const auto minHeight = minimumHeightForCurrentPage();
+    const auto maximumWidth = squareResizeMode ? juce::jmax(minimumEditorWidth(), 1000) : maximumEditorSize;
+    const auto maximumHeight = squareResizeMode ? juce::jmax(minHeight, 1000) : maximumEditorSize;
+    constrainer->setFixedAspectRatio(0.0);
+    constrainer->setSizeLimits(minimumEditorWidth(), minHeight, maximumWidth, maximumHeight);
+    constrainer->setFixedAspectRatio(squareResizeMode ? 1.0 : 0.0);
+}
+
+void PluginEditor::toggleSquareResizeMode()
+{
+    if (getConstrainer() == nullptr) return;
+    squareResizeMode = !squareResizeMode;
+    audioProcessor.getParameters().state.setProperty("ui.square-resize", squareResizeMode, nullptr);
+    updateResizeLimits();
+    setSize(juce::jlimit(minimumEditorWidth(), getConstrainer()->getMaximumWidth(), getWidth()),
+            juce::jlimit(minimumHeightForCurrentPage(), getConstrainer()->getMaximumHeight(), getHeight()));
+    resized();
+}
+
+void PluginEditor::restoreProcessorState()
+{
+    const juce::ScopedValueSetter<bool> restoreGuard(restoringEditorState, true);
+    displayedStateRevision = audioProcessor.getStateRevision();
+    editorSizeSavePending = false;
+    squareResizeMode = static_cast<bool>(audioProcessor.getParameters().state.getProperty("ui.square-resize", false));
+    updateResizeLimits();
+    const auto size = audioProcessor.getLastEditorSize();
+    if (size.x > 0 && size.y > 0)
+        setSize(juce::jlimit(minimumEditorWidth(), getConstrainer()->getMaximumWidth(), size.x),
+                juce::jlimit(minimumHeightForCurrentPage(), getConstrainer()->getMaximumHeight(), size.y));
+    specDisplay.refreshSnapshots(true);
+    specDisplay.refreshMode();
+    corrDisplay.refreshMode();
+    scopDisplay.refreshMode();
+    settingsComponent.refreshExternalState();
+    resized();
+    repaint();
+}
+
+bool PluginEditor::keyPressed(const juce::KeyPress& key)
+{
+    if (isSvgExportGesture(key.getModifiers()) && (key.isKeyCode('R') || key.isKeyCode('r')))
+    {
+        toggleSquareResizeMode();
+        return true;
+    }
+    if (isSvgExportGesture(key.getModifiers())
+        && (key.isKeyCode('E') || key.isKeyCode('e')))
+    {
+        ana::svg_export::chooseFile(*this);
+        return true;
+    }
+    return juce::AudioProcessorEditor::keyPressed(key);
+}
+
 void PluginEditor::mouseDown(const juce::MouseEvent& event)
 {
-    if (event.originalComponent == &refreshButton && event.mods.isLeftButtonDown())
+    if (event.originalComponent == &aboutButton && event.mods.isPopupMenu())
+        showAnimation(true);
+    else if (event.originalComponent == &refreshButton && refreshButton.isInteractionEnabled() && event.mods.isLeftButtonDown())
         refreshPress.begin();
+    else if(event.originalComponent==&updateButton && event.mods.isLeftButtonDown())
+    {
+        udDragPressed=true; udDragMoved=false;
+        udDragStart=event.source.getScreenPosition().roundToInt();
+    }
     else
         juce::AudioProcessorEditor::mouseDown(event);
 }
@@ -2657,25 +2257,55 @@ void PluginEditor::mouseDrag(const juce::MouseEvent& event)
         if (event.getDistanceFromDragStart() >= 5)
             refreshPress.markDragged();
     }
+    else if(event.originalComponent==&updateButton && udDragPressed)
+    {
+        if(!udDragMoved && event.getDistanceFromDragStart()>=4)
+        { udDragMoved=true; windowDragHandle.beginDragAt(udDragStart); }
+        if(windowDragHandle.isDragging()) windowDragHandle.dragTo(event.source.getScreenPosition().roundToInt());
+    }
+    else if (windowDragHandle.isDragging())
+    {
+        if (event.mods.isLeftButtonDown())
+            windowDragHandle.dragTo(event.source.getScreenPosition().roundToInt());
+        else
+            windowDragHandle.endDragAt(event.source.getScreenPosition().roundToInt());
+    }
     else
         juce::AudioProcessorEditor::mouseDrag(event);
 }
 
+void PluginEditor::mouseUp(const juce::MouseEvent& event)
+{
+    if (windowDragHandle.isDragging())
+        windowDragHandle.endDragAt(event.source.getScreenPosition().roundToInt());
+    else
+        juce::AudioProcessorEditor::mouseUp(event);
+    udDragPressed=false; udDragMoved=false;
+}
 
 void PluginEditor::refreshOfflineUpdateStatus()
 {
-    const auto progress = juce::jlimit(0, 100, audioProcessor.getOfflineAnalysisProgress());
-    offlineUpdateLabel.setText(progress >= 100 ? juce::String("UD")
-                                          : juce::String(progress).paddedLeft('0', 2),
-                           juce::dontSendNotification);
+    const auto progress = audioProcessor.getOfflineAnalysisProgress();
+    updateButton.setButtonText(progress < 0 ? juce::String("ERR")
+                                           : progress >= 100 ? juce::String("UD")
+                                          : juce::String(progress).paddedLeft('0', 2));
 }
 
 
-void PluginEditor::showModePrompt()
+
+void PluginEditor::refreshOfflineActionControls()
 {
-    if (! audioProcessor.isOfflineAvailable())
-        return;
-    showChoicePrompt(getLocalArea(&modeButton, modeButton.getLocalBounds()),
-                     {"REALTIME", "OFFLINE"}, audioProcessor.isOfflineMode() ? 1 : 0,
-                     [this](int index) { audioProcessor.setOfflineMode(index == 1); timerCallback(); });
+    settingsComponent.setTrackInfo(audioProcessor.getOfflineTrackNumber(), audioProcessor.getOfflineTrackName());
+    const auto monitorLocation = audioProcessor.isOfflineMonitorLocation();
+    const auto locationText = juce::String("MONITOR");
+    if (locationButton.getButtonText() != locationText)
+        locationButton.setButtonText(locationText);
+    locationButton.setToggleState(monitorLocation, juce::dontSendNotification);
+    locationButton.setInteractionEnabled(audioProcessor.isOfflineMode() && audioProcessor.isOfflineLocationAvailable());
+    locationButton.setTooltip(monitorLocation ? "LOCATION: MONITOR (SWITCH TO TRACK)" : "LOCATION: TRACK (SWITCH TO MONITOR)");
+    keepSecondTakeButton.setToggleState(audioProcessor.isOfflineKeepSecondTake(), juce::dontSendNotification);
+    keepSecondTakeButton.setInteractionEnabled(audioProcessor.isOfflineMode() && audioProcessor.isOfflineSourceAvailable() && monitorLocation);
+    refreshButton.setInteractionEnabled(audioProcessor.isOfflineMode());
+    keepSecondTakeButton.setTooltip("MONITOR: USE TAKE 2 WHERE PRESENT, OTHERWISE TAKE 1");
+    refreshButton.setToggleState(audioProcessor.isOfflineAutomaticRefresh(), juce::dontSendNotification);
 }

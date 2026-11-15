@@ -10,14 +10,14 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
                                    juce::String title,
                                    Formatter formatter)
     : parameterState(state), sourceParameterId(parameterId),
-      titleText(std::move(title)), valueFormatter(std::move(formatter)), compact(titleText.isEmpty())
+      titleText(std::move(title)), valueFormatter(std::move(formatter)), valueBox(slider), compact(titleText.isEmpty())
 {
     pressGesture.onArmed = [this]
     {
         if (onResetRequested)
             onResetRequested(*this);
 
-        // R? is the armed state; cancel the gesture so mouse-up cannot perform a second action.
+        // Cancel the armed gesture so mouse-up cannot perform a second action.
         pressGesture.cancel();
         repaint();
     };
@@ -28,29 +28,31 @@ ParameterControl::ParameterControl(juce::AudioProcessorValueTreeState& state,
         if (! updatingBinding && onValueChanged)
             onValueChanged();
     };
-    valueEditor.setFont(ana::ui::makeFont());
-    valueEditor.setJustification(juce::Justification::centred);
-    valueEditor.setBorder(juce::BorderSize<int>(0, ana::ui::gap.pixels() - 2,
-                                                  2, ana::ui::gap.pixels() - 2));
-    valueEditor.setIndents(2, 0);
-    valueEditor.setPopupMenuEnabled(false);
-    valueEditor.setSelectAllWhenFocused(true);
-    valueEditor.setColour(juce::TextEditor::textColourId, ana::ui::white);
-    valueEditor.setColour(juce::TextEditor::backgroundColourId, ana::ui::dark);
-    valueEditor.setColour(juce::TextEditor::outlineColourId, ana::ui::light);
-    valueEditor.setColour(juce::TextEditor::focusedOutlineColourId, ana::ui::light);
-    valueEditor.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
-    valueEditor.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
-    valueEditor.onReturnKey = [this] { hideValueEditor(false); };
-    valueEditor.onEscapeKey = [this] { hideValueEditor(true); };
-    valueEditor.onFocusLost = [this]
+    valueBox.displayTextProvider = [this]
+    { return interactionEnabled || displayValueWhenDisabled ? slider.getTextFromValue(slider.getValue()) : juce::String("OFF"); };
+    valueBox.onInteractionBegin = [this] { refreshBinding(); };
+    valueBox.onClick = [this] { activateValue(); };
+    valueBox.onResetRequested = [this] { resetToDefault(); };
+    valueBox.onChoiceClicked = [this] (int direction)
     {
-        if (valueEditorActive)
-            hideValueEditor(false);
+        refreshBinding();
+        const auto count=choiceParameter!=nullptr ? choiceParameter->choices.size() : boolParameter!=nullptr ? 2 : discreteSteps;
+        if(!interactionEnabled || count<2) return;
+        const auto next=(juce::roundToInt(slider.getValue()-slider.getMinimum())+direction+count)%count;
+        juce::Slider::ScopedDragNotification gesture(slider);
+        slider.setValue(slider.getMinimum()+next,juce::sendNotificationSync);
+        if (onUserChoiceChanged) onUserChoiceChanged();
     };
-    addChildComponent(valueEditor);
+    valueBox.onDiscreteEdited = [this]
+    { if (onUserChoiceChanged) onUserChoiceChanged(); };
+    addAndMakeVisible(valueBox);
+    valueBox.onEditorVisibilityChanged=[this](bool editing)
+    { if(onTextEditingChanged) onTextEditingChanged(editing); };
+    valueBox.bindHostSlots(&static_cast<PluginProcessor&>(parameterState.processor).getHostSlots(),[this] { refreshBinding(); return getParameterId(); });
     refreshBinding();
-    startTimerHz(30);
+    // Attachments propagate parameter values; this timer only resolves dynamic
+    // FREQ/MAP/CORR submodule parameter IDs. No 30 Hz polling is necessary.
+    startTimerHz(10);
 }
 
 ParameterControl::~ParameterControl()
@@ -64,16 +66,15 @@ void ParameterControl::refreshBinding()
     if (updatingBinding)
         return;
     auto& processor = static_cast<PluginProcessor&>(parameterState.processor);
-    const auto id = juce::String(processor.resolveParameterId(sourceParameterId.toRawUTF8()));
+    const auto id = fixedBinding ? sourceParameterId
+        : juce::String(processor.resolveParameterId(sourceParameterId.toRawUTF8()));
     if (boundParameterId == id)
         return;
-    const auto previousParser = slider.valueFromTextFunction;
-    const auto wasBound = boundParameterId.isNotEmpty();
     const juce::ScopedValueSetter<bool> blockNotifications(updatingBinding, true);
-    hideValueEditor(true);
+    valueBox.cancelGesture();
+    valueBox.hideEditor(true);
     pressGesture.cancel();
-    pressHighlighted = false;
-    pressRegion = PressRegion::none;
+    valueBox.setNumericControlEnabled(false);
     attachment.reset();
     boundParameterId = id;
     parameter = parameterState.getParameter(id);
@@ -81,15 +82,23 @@ void ParameterControl::refreshBinding()
     boolParameter = dynamic_cast<juce::AudioParameterBool*>(parameter);
     attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         parameterState, id, slider);
-    if (wasBound && previousParser)
-        slider.valueFromTextFunction = previousParser;
+    if (valueParser)
+        slider.valueFromTextFunction = valueParser;
     slider.textFromValueFunction = [this] (const double value)
     {
         return valueFormatter != nullptr ? valueFormatter(value) : juce::String(value);
     };
-    wheelArmed = false;
-    wheelStepRemainder = 0.0f;
+    valueBox.setNumericControlEnabled(rangeAdjustmentEnabled && supportsRangeAdjustment());
+    valueBox.setDiscreteChoiceCount(choiceParameter!=nullptr ? choiceParameter->choices.size() : boolParameter!=nullptr ? 2 : discreteSteps);
     repaint();
+}
+
+void ParameterControl::setValueParser(Parser parser)
+{
+    valueParser = std::move(parser);
+    // Rebuild the binding so clearing an override restores the active parameter's parser.
+    boundParameterId.clear();
+    refreshBinding();
 }
 
 void ParameterControl::setInteractionEnabled(const bool shouldEnable,
@@ -100,14 +109,13 @@ void ParameterControl::setInteractionEnabled(const bool shouldEnable,
         return;
 
     interactionEnabled = shouldEnable;
-    displayValueWhenDisabled = showValueWhenDisabled;
-
     if (! interactionEnabled)
     {
-        selected = false;
-        wheelArmed = false;
-        hideValueEditor(true);
+        titleHovered = false;
+        titleHover.setHovered(false);
     }
+    valueBox.setInteractionEnabled(shouldEnable);
+    displayValueWhenDisabled = showValueWhenDisabled;
 
     repaint();
 }
@@ -129,17 +137,13 @@ void ParameterControl::setSelectedChoiceIndex(const int choiceIndex)
         return;
 
     slider.setValue(choiceIndex, juce::sendNotificationSync);
+    if (onUserChoiceChanged) onUserChoiceChanged();
 }
 
-void ParameterControl::setSelected(const bool shouldSelect)
+void ParameterControl::setRangeAdjustmentEnabled(bool enabled)
 {
-    const auto nextSelected = shouldSelect && interactionEnabled;
-
-    if (selected == nextSelected)
-        return;
-
-    selected = nextSelected;
-    repaint();
+    rangeAdjustmentEnabled = enabled;
+    valueBox.setNumericControlEnabled(enabled && supportsRangeAdjustment());
 }
 
 void ParameterControl::setCompact(const bool shouldUseCompactLayout)
@@ -152,40 +156,40 @@ void ParameterControl::setCompact(const bool shouldUseCompactLayout)
     repaint();
 }
 
+void ParameterControl::setSquareStyle(bool enabled)
+{
+    squareStyle=enabled;
+    valueBox.setSquareStyle(enabled ? std::function<juce::String()>([this] { return titleText; }) : nullptr);
+    resized(); repaint();
+}
+
 void ParameterControl::paint(juce::Graphics& graphics)
 {
-    const auto titleHovered = interactionEnabled && hoverRegion == PressRegion::title;
-    const auto valueHovered = interactionEnabled && hoverRegion == PressRegion::value;
-    graphics.setColour(titleHovered ? ana::ui::light : ana::ui::dark);
-    graphics.fillRect(titleBounds);
-    graphics.setColour(valueHovered ? ana::ui::light : ana::ui::dark);
-    graphics.fillRect(valueBounds);
-    graphics.setColour(selected ? ana::ui::white : ana::ui::light);
-    graphics.drawRect(titleBounds, selected ? ana::ui::activeBorderWidth : 1);
-    graphics.setColour(ana::ui::light);
-    graphics.drawRect(valueBounds, 1);
+    if(squareStyle) return;
+    const auto hoverAmount = titleHover.amount(interactionEnabled && titleHovered);
+    ControlAppearance style(false, hoverAmount);
+    style.paint(graphics,titleBounds);
     graphics.setFont(ana::ui::makeFont());
-    graphics.setColour(! interactionEnabled ? ana::ui::light
-                       : titleHovered ? juce::Colours::black : ana::ui::white);
-    graphics.drawText(titleText,
-                      titleBounds.reduced(ana::ui::textPadding, 1),
-                      juce::Justification::centredLeft, true);
-    graphics.setColour(! interactionEnabled ? ana::ui::light
-                       : valueHovered ? juce::Colours::black : ana::ui::white);
-    graphics.drawText(interactionEnabled || displayValueWhenDisabled
-                          ? slider.getTextFromValue(slider.getValue()) : "OFF",
-                      ana::ui::readoutTextBounds(valueBounds.reduced(ana::ui::gap.pixels(), 1)),
-                      juce::Justification::centred, true);
+    graphics.setColour(interactionEnabled?style.contentColour():ana::ui::light);
+    const auto nameScrolling = ana::ui::drawLoopingText(graphics, uppercaseText(titleText),
+        titleBounds.reduced(ana::ui::textPadding, 1), ana::ui::makeFont(), juce::Justification::centredLeft);
+    if (nameScrolling) ana::ui::scheduleMarqueeRepaint(*this, marqueePending);
 }
 
 void ParameterControl::resized()
 {
     auto row = getLocalBounds();
 
-    if (! compact)
+    if(squareStyle)
+    {
+        titleBounds={};
+        valueBounds=row;
+    }
+    else if (! compact)
     {
         const auto availableWidth = std::max(0, row.getWidth() - ana::ui::gap.pixels());
         titleBounds = row.removeFromLeft(availableWidth / 2);
+        titleBounds.setWidth(std::max(0, titleBounds.getWidth() - titleTrailingInset));
         ana::ui::gap.removeFromLeft(row);
         valueBounds = row;
     }
@@ -194,7 +198,7 @@ void ParameterControl::resized()
         titleBounds = {};
         valueBounds = row;
     }
-    valueEditor.setBounds(valueBounds);
+    valueBox.setBounds(valueBounds);
 }
 
 void ParameterControl::mouseDown(const juce::MouseEvent& event)
@@ -203,28 +207,23 @@ void ParameterControl::mouseDown(const juce::MouseEvent& event)
     if (! interactionEnabled || ! event.mods.isLeftButtonDown())
         return;
 
-    wheelArmed = supportsFocusedPotentiometer()
-        && valueBounds.contains(event.getPosition());
-    wheelStepRemainder = 0.0f;
-
-    pressHighlighted = true;
-    pressRegion = titleBounds.contains(event.getPosition()) ? PressRegion::title
-                  : valueBounds.contains(event.getPosition()) ? PressRegion::value
-                                                               : PressRegion::none;
-    pressGesture.begin(pressRegion == PressRegion::title && parameter != nullptr);
+    if (titleBounds.contains(event.getPosition())) pressGesture.begin(parameter!=nullptr);
 
     repaint();
 }
 
+void ParameterControl::mouseEnter(const juce::MouseEvent& event)
+{
+    mouseMove(event);
+}
+
 void ParameterControl::mouseMove(const juce::MouseEvent& event)
 {
-    const auto nextHoverRegion = ! interactionEnabled ? PressRegion::none
-        : titleBounds.contains(event.getPosition()) ? PressRegion::title
-        : valueBounds.contains(event.getPosition()) ? PressRegion::value
-                                                    : PressRegion::none;
-    if (hoverRegion != nextHoverRegion)
+    const auto hovered = interactionEnabled && titleBounds.contains(event.getPosition());
+    if (titleHovered != hovered)
     {
-        hoverRegion = nextHoverRegion;
+        titleHovered = hovered;
+        titleHover.setHovered(hovered);
         repaint();
     }
 }
@@ -237,36 +236,23 @@ void ParameterControl::mouseDrag(const juce::MouseEvent& event)
     if (event.mouseWasDraggedSinceMouseDown())
     {
         pressGesture.markDragged();
-        pressHighlighted = false;
         repaint();
     }
 }
 
-void ParameterControl::mouseUp(const juce::MouseEvent& event)
+void ParameterControl::mouseUp(const juce::MouseEvent&)
 {
     if (! pressGesture.isActive())
         return;
 
-    const auto releasedRegion = pressRegion;
-    const auto releaseResult = pressGesture.release();
-    const auto shouldActivate = releaseResult == LongPressGesture::ReleaseResult::shortPress
-        && ((releasedRegion == PressRegion::title && titleBounds.contains(event.getPosition()))
-            || (releasedRegion == PressRegion::value && valueBounds.contains(event.getPosition())));
-    pressHighlighted = false;
-    pressRegion = PressRegion::none;
+    pressGesture.release();
     repaint();
+}
 
-    if (! shouldActivate)
-        return;
-
-    if (releasedRegion == PressRegion::title)
-    {
-        if (onFocusRequested)
-            onFocusRequested(*this);
-
-        return;
-    }
-
+void ParameterControl::activateValue()
+{
+    refreshBinding();
+    if (!interactionEnabled) return;
     if (choiceParameter != nullptr)
     {
         if (onChoiceRequested)
@@ -278,38 +264,20 @@ void ParameterControl::mouseUp(const juce::MouseEvent& event)
     }
     else
     {
-        // Single-click values stay inert; labels focus the shared knob, double-click edits text.
+        valueBox.showEditor();
     }
 }
 
-void ParameterControl::mouseDoubleClick(const juce::MouseEvent& event)
+void ParameterControl::cancelPendingEditor()
 {
-    refreshBinding();
-    if (! interactionEnabled || ! event.mods.isLeftButtonDown()
-        || ! valueBounds.contains(event.getPosition())
-        || parameter == nullptr || choiceParameter != nullptr || boolParameter != nullptr)
-        return;
-
-    // Cancel pending gesture handling before opening the inline editor.
-    pressGesture.cancel();
-    pressHighlighted = false;
-    pressRegion = PressRegion::none;
-
-    showValueEditor();
-    repaint();
-}
-
-void ParameterControl::commitPendingEditor()
-{
-    refreshBinding();
-    hideValueEditor(false);
+    valueBox.cancelGesture();
+    valueBox.hideEditor(true);
 }
 
 void ParameterControl::mouseExit(const juce::MouseEvent&)
 {
-    hoverRegion = PressRegion::none;
-    wheelArmed = false;
-    wheelStepRemainder = 0.0f;
+    titleHovered = false;
+    titleHover.setHovered(false);
 
     if (! pressGesture.isActive())
     {
@@ -317,77 +285,7 @@ void ParameterControl::mouseExit(const juce::MouseEvent&)
         return;
     }
 
-    pressHighlighted = false;
     pressGesture.cancelArming();
-    repaint();
-}
-
-void ParameterControl::mouseWheelMove(const juce::MouseEvent& event,
-                                      const juce::MouseWheelDetails& wheel)
-{
-    if (! wheelArmed || ! interactionEnabled || valueEditorActive
-        || ! supportsFocusedPotentiometer()
-        || ! valueBounds.contains(event.getPosition()) || wheel.deltaY == 0.0f)
-    {
-        juce::Component::mouseWheelMove(event, wheel);
-        return;
-    }
-
-    const auto interval = slider.getInterval();
-    if (interval > 0.0)
-    {
-        wheelStepRemainder += wheel.deltaY * 10.0f * wheelSpeedMultiplier;
-        const auto steps = static_cast<int>(wheelStepRemainder);
-        wheelStepRemainder -= static_cast<float>(steps);
-        if (steps != 0)
-            slider.setValue(slider.getValue() + static_cast<double>(steps) * interval,
-                            juce::sendNotificationSync);
-    }
-    else
-    {
-        const auto proportion = slider.valueToProportionOfLength(slider.getValue());
-        const auto nextProportion = juce::jlimit(0.0, 1.0,
-            proportion + static_cast<double>(wheel.deltaY) * 0.2 * wheelSpeedMultiplier);
-        slider.setValue(slider.proportionOfLengthToValue(nextProportion),
-                        juce::sendNotificationSync);
-    }
-}
-
-void ParameterControl::showValueEditor()
-{
-    if (! interactionEnabled || parameter == nullptr || choiceParameter != nullptr || valueEditorActive)
-        return;
-
-    valueEditorActive = true;
-    if (onTextEditingChanged)
-        onTextEditingChanged(true);
-
-    valueEditor.setText(slider.getTextFromValue(slider.getValue()), false);
-    valueEditor.setVisible(true);
-    valueEditor.toFront(false);
-    valueEditor.grabKeyboardFocus();
-    valueEditor.selectAll();
-}
-
-void ParameterControl::hideValueEditor(const bool discardChanges)
-{
-    if (! valueEditorActive)
-        return;
-
-    const auto enteredText = valueEditor.getText();
-    valueEditorActive = false;
-    valueEditor.setVisible(false);
-
-    if (! discardChanges)
-    {
-        const auto enteredValue = slider.getValueFromText(enteredText);
-        slider.setValue(juce::jlimit(slider.getMinimum(), slider.getMaximum(), enteredValue),
-                        juce::sendNotificationSync);
-    }
-
-    if (onTextEditingChanged)
-        onTextEditingChanged(false);
-
     repaint();
 }
 
@@ -397,6 +295,7 @@ void ParameterControl::resetToDefault()
     if (parameter == nullptr || ! interactionEnabled)
         return;
 
+    juce::Slider::ScopedDragNotification gesture(slider);
     slider.setValue(parameter->convertFrom0to1(parameter->getDefaultValue()),
                     juce::sendNotificationSync);
 }

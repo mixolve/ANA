@@ -122,10 +122,11 @@ std::shared_ptr<offline::AnalysisResult> EditorRenderer::buildAnalysisResult(
     const offline::Worker::ShouldCancel& shouldCancel,
     const offline::Worker::ProgressCallback& onProgress)
 {
-    const juce::ScopedReadLock processingLock(lock.getProcessingReadWriteLock());
-    const auto playbackRegions = collectPlaybackRegions();
-    return analysePlaybackRegions(
-        offlineDocumentController, playbackRegions, request, request.revision | (uint64_t { 1 } << 63),
-        shouldCancel, onProgress);
+    return lock.withProcessingReadLock(shouldCancel, [&]
+    {
+        return analysePlaybackRegions(
+            offlineDocumentController, collectPlaybackRegions(), request, request.revision | (uint64_t { 1 } << 63),
+            shouldCancel, onProgress);
+    });
 }
 }

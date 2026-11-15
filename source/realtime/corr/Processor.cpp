@@ -9,16 +9,6 @@ namespace ana::corr
 {
 namespace
 {
-juce::Point<float> complexBin(const float* data, const int bin) noexcept
-{
-    return { data[2 * bin], data[2 * bin + 1] };
-}
-
-size_t modeArrayIndex(const CorrProcessor::Mode mode) noexcept
-{
-    return static_cast<size_t>(CorrProcessor::modeIndex(mode));
-}
-
 float correlationValue(const juce::Point<float> left,
                        const juce::Point<float> right,
                        const CorrProcessor::Mode mode) noexcept
@@ -45,12 +35,6 @@ float correlationValue(const juce::Point<float> left,
         : juce::jlimit(minimumCoefficient, maximumCoefficient, 2.0f * crossReal / energy);
 }
 
-template <typename ModeBins>
-void fillModeBins(ModeBins& values, const float value) noexcept
-{
-    for (auto& mode : values)
-        mode.fill(value);
-}
 }
 
 void CorrProcessor::processBlock(const juce::AudioBuffer<float>& buffer, const int fftSize,
@@ -86,13 +70,13 @@ void CorrProcessor::publish(const fft::StereoFftFrame& frame,
     const auto alpha = spectrum_processing::averagingAlpha(
         frame.hopSize, fftStream.getSampleRate(), averagingTimeMilliseconds);
     const auto update = 1.0f - alpha;
-    const auto modeIndexValue = modeArrayIndex(mode);
+    const auto modeIndexValue = static_cast<size_t>(modeIndex(mode));
 
     for (int bin = 0; bin < binCount; ++bin)
     {
         const auto binIndex = static_cast<size_t>(bin);
         const auto current = correlationValue(
-            complexBin(frame.left, bin), complexBin(frame.right, bin), mode);
+            fft::complexBin(frame.left, bin), fft::complexBin(frame.right, bin), mode);
         auto& average = averages[modeIndexValue][binIndex];
         average = alpha * average + update * current;
         publishedAverages[modeIndexValue][binIndex].store(average, std::memory_order_relaxed);

@@ -18,7 +18,7 @@ class LvlsView final : public juce::Component, private juce::Timer
 public:
     explicit LvlsView(PluginProcessor& processorRef);
 
-    void centerParts();
+    void refreshPartLayout();
     void paint(juce::Graphics& graphics) override;
     void resized() override;
     void mouseMove(const juce::MouseEvent& event) override;
@@ -31,13 +31,9 @@ private:
     void timerCallback() override;
     void refreshPersistentViewState();
     void setPersistentParameter(const char* parameterId, float value);
-    void storeHistoryZoomState();
-    double getHistoryDurationSeconds() const noexcept;
-    std::pair<float, float> getHistoryLufsBounds() const noexcept;
     void layoutPeakModeButtons();
     int getLvlsWidth(bool loudness = false) const noexcept;
     std::array<bool, 3> getVisibleParts() const noexcept;
-    bool isHistoryCleanView() const noexcept;
     std::array<int, 3> getMinimumPartWidths() const noexcept;
     std::array<juce::Rectangle<int>, 3> getPartBounds() const noexcept;
     int findPartSeparator(int x) const noexcept;
@@ -55,8 +51,19 @@ private:
     float shortTermMaximumLufs = ana::lvls::LvlsProcessor::minimumDecibels;
     float integratedMaximumLufs = ana::lvls::LvlsProcessor::minimumDecibels;
     float loudnessRange = 0.0f;
-    float historyTruePeak = ana::lvls::LvlsProcessor::minimumDecibels;
-    std::array<std::vector<float>, ana::lvls::LvlsProcessor::historySeriesCount> loudnessHistories;
+    // Numerical readouts hold a snapshot; the meters above remain live.
+    ana::lvls::LvlsProcessor::Values readoutPeakValues;
+    ana::lvls::LvlsProcessor::Values readoutLoudnessValues;
+    ana::lvls::LvlsProcessor::Values readoutMetricsValues;
+    std::array<float, 4> pendingPeakReadoutGains {};
+    std::array<float, 4> pendingMetricsReadoutGains {};
+    std::array<uint64_t, 3> lastReadoutResetEpochs {};
+    uint32_t readoutWindowStartMs = 0;
+    int lastReadoutIntervalMs = -1;
+    bool readoutWindowStarted = false;
+    bool readoutWindowHasAudio = false;
+    float metricsTruePeak = ana::lvls::LvlsProcessor::minimumDecibels;
+    std::array<juce::String, 4> metricsDifferenceReadouts { "---", "---", "---", "---" };
     uint64_t displayedRevision = 0;
     bool displayedOffline = false;
     std::array<float, 3> partWeights { 1.0f, 1.0f, 1.0f };
@@ -69,14 +76,6 @@ private:
     ControlButton peakModeButton { "PEAK" };
     ControlButton rmsModeButton { "RMS" };
     ControlButton peakChannelModeButton { "MS" };
-    ControlButton historySviewButton { "browser-maximize" };
-    RangeSlider historyHorizontalZoom;
-    RangeSlider historyVerticalZoom { RangeSlider::Orientation::vertical };
-    ParameterControl historyTimeStartReadout;
-    ParameterControl historyTimeEndReadout;
-    ParameterControl historyLevelHighReadout;
-    ParameterControl historyLevelLowReadout;
     bool showPeakLvls = true;
     bool showMidSideLvls = false;
-    bool historySolo = false;
 };

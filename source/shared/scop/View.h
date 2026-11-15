@@ -15,7 +15,12 @@ public:
     void setFrozen(bool value) { realtime.setFrozen(value); }
     void clearHistory() { realtime.clearHistory(); }
     void refreshWaveform() { if (processor.isOfflineMode()) offline.refreshWaveform(); }
-    void equalizeBandHeights() { if (processor.isOfflineMode()) offline.equalizeBandHeights(); else realtime.equalizeBandHeights(); }
+    void refreshBandLayout() { realtime.refreshBandLayout(); offline.refreshBandLayout(); }
+    void setLinkedNormalization(bool enabled)
+    {
+        if (processor.isOfflineMode()) offline.setLinkedNormalization(enabled);
+        else realtime.setLinkedNormalization(enabled);
+    }
     void refreshDisplaySettings() { if (processor.isOfflineMode()) offline.refreshDisplaySettings(); else realtime.refreshDisplaySettings(); }
     void setFullSourceView(bool value) { realtime.setFullSourceView(value); offline.setFullSourceView(value); }
 private:

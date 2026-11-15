@@ -6,26 +6,6 @@
 
 namespace ana::corr
 {
-namespace
-{
-juce::Point<float> complexBin(const float* data, const int bin) noexcept
-{
-    return { data[2 * bin], data[2 * bin + 1] };
-}
-
-size_t modeArrayIndex(const CorrProcessor::Mode mode) noexcept
-{
-    return static_cast<size_t>(CorrProcessor::modeIndex(mode));
-}
-
-template <typename ModeBins>
-void fillModeBins(ModeBins& values, const float value) noexcept
-{
-    for (auto& mode : values)
-        mode.fill(value);
-}
-}
-
 void CorrProcessor::processOfflineBlock(const juce::AudioBuffer<float>& buffer, const int fftSize,
                                         const float fftOverlap, const Mode mode) noexcept
 {
@@ -39,12 +19,17 @@ void CorrProcessor::processOfflineBlock(const juce::AudioBuffer<float>& buffer, 
                            });
 }
 
+void CorrProcessor::resetOfflineStream() noexcept
+{
+    // Unrelated items must not share FFT frames or the local MIN window.
+    fftStream.reset();
+    resetMinimumWindowState(offlineMinimumState);
+}
+
 void CorrProcessor::beginOfflineMinimumPass() noexcept
 {
-    // Restart only FFT framing for pass two; retain whole-file AVG from pass one.
-    fftStream.reset();
+    resetOfflineStream();
     offlineMinimumPass = true;
-    resetMinimumWindowState(offlineMinimumState);
 
     for (size_t mode = 0; mode < static_cast<size_t>(modeCount); ++mode)
     {
@@ -94,8 +79,8 @@ void CorrProcessor::publishOffline(const fft::StereoFftFrame& frame, const Mode 
     for (int bin = 0; bin < binCount; ++bin)
     {
         const auto binIndex = static_cast<size_t>(bin);
-        const auto left = complexBin(frame.left, bin);
-        const auto right = complexBin(frame.right, bin);
+        const auto left = fft::complexBin(frame.left, bin);
+        const auto right = fft::complexBin(frame.right, bin);
         const auto leftPower = static_cast<double>(left.x) * left.x
             + static_cast<double>(left.y) * left.y;
         const auto rightPower = static_cast<double>(right.x) * right.x
@@ -146,7 +131,7 @@ void CorrProcessor::publishOffline(const fft::StereoFftFrame& frame, const Mode 
 void CorrProcessor::publishOfflineMinimum(const fft::StereoFftFrame& frame,
                                           const Mode mode) noexcept
 {
-    const auto index = modeArrayIndex(mode);
+    const auto index = static_cast<size_t>(modeIndex(mode));
     updateMinimumWindow(frame, mode, offlineMinimumState,
                         offlineMinimums[index], publishedMinimums[index]);
 

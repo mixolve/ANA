@@ -27,6 +27,8 @@ public:
     void resetColumnAccumulator();
     void accumulateBand(size_t bandIndex, const AnalysisChannelSamples& samples) noexcept;
     void accumulateWideband(const AnalysisChannelSamples& samples) noexcept;
+    void accumulateWidebandExtrema(const AnalysisChannelSamples& minimums,
+                                   const AnalysisChannelSamples& maximums) noexcept;
     void appendColumn(size_t activeBandCount);
     void writeColumn(size_t activeBandCount, size_t columnIndex);
 
@@ -38,6 +40,7 @@ public:
     AnalysisChannelSamples widebandColumnMinimums;
     AnalysisChannelSamples widebandColumnMaximums;
     uint64_t readCursor = 0;
+    uint64_t readPeakCursor = 0;
     double columnSampleProgress = 0.0;
     double timeMilliseconds = 0.0;
     size_t bandCount = 0;

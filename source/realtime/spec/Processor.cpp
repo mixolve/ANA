@@ -1,53 +1,11 @@
 #include "shared/spec/Processor.h"
 #include "shared/spec/SpectrumProcessing.h"
-#include "shared/spec/SpectrumChannelLevels.h"
+#include "shared/spec/ChannelLevels.h"
 
 #include <algorithm>
 
 namespace ana::spec
 {
-namespace
-{
-using ChannelValues = std::array<float, channelCount>;
-
-ChannelValues decibelValues(const fft::StereoSpectrumLevels& levels) noexcept
-{
-    return { levels.stereoDecibels, levels.leftDecibels, levels.rightDecibels,
-             levels.midDecibels, levels.sideDecibels };
-}
-
-template <typename Channels>
-void fillChannels(Channels& channels, const float value) noexcept
-{
-    for (auto& channel : channels)
-        channel.fill(value);
-}
-
-template <typename AtomicChannels>
-void storeChannels(AtomicChannels& channels, const float value) noexcept
-{
-    for (auto& channel : channels)
-        for (auto& bin : channel)
-            bin.store(value, std::memory_order_relaxed);
-}
-}
-
-void SpecProcessor::resetRealtimeState() noexcept
-{
-    fillChannels(averageLevels, minimumDecibels);
-    storeChannels(publishedAverageLevels, minimumDecibels);
-    storeChannels(publishedCurrentLevels, minimumDecibels);
-}
-
-void SpecProcessor::resetMapState() noexcept
-{
-    storeChannels(publishedMapCurrentLevels, minimumDecibels);
-    fillChannels(mapAccumulatedLevels, minimumDecibels);
-    mapAccumulatedFrameCount = 0;
-    mapAccumulatorFftSize = 0;
-    publishedMapFftSize.store(0, std::memory_order_release);
-}
-
 void SpecProcessor::requestRealtimeReset() noexcept
 {
     realtimeResetRequested.store(true, std::memory_order_release);
@@ -167,8 +125,8 @@ void SpecProcessor::publish(const fft::StereoFftFrame& frame,
     for (int bin = 0; bin < binCount; ++bin)
     {
         const auto binIndex = static_cast<size_t>(bin);
-        const auto values = decibelValues(
-            fft::calculateStereoSpectrumLevels(frame, bin, 2.0f, minimumDecibels));
+        const auto values = fft::calculateStereoSpectrumLevels(
+            frame, bin, 2.0f, minimumDecibels).decibelValues();
 
         for (size_t channel = 0; channel < channelCount; ++channel)
         {
@@ -194,7 +152,8 @@ void SpecProcessor::publishMap(const fft::StereoFftFrame& frame) noexcept
     const auto binCount = fftSize / 2 + 1;
     if (mapAccumulatorFftSize != fftSize)
     {
-        fillChannels(mapAccumulatedLevels, minimumDecibels);
+        for (auto& channel : mapAccumulatedLevels)
+            channel.fill(minimumDecibels);
         mapAccumulatedFrameCount = 0;
         mapAccumulatorFftSize = fftSize;
     }
@@ -203,8 +162,8 @@ void SpecProcessor::publishMap(const fft::StereoFftFrame& frame) noexcept
     for (int bin = 0; bin < binCount; ++bin)
     {
         const auto binIndex = static_cast<size_t>(bin);
-        const auto values = decibelValues(
-            fft::calculateStereoSpectrumLevels(frame, bin, 1.0f, minimumDecibels));
+        const auto values = fft::calculateStereoSpectrumLevels(
+            frame, bin, 1.0f, minimumDecibels).decibelValues();
 
         for (size_t channel = 0; channel < channelCount; ++channel)
         {

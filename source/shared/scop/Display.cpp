@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace ana::scop::display
 {
@@ -9,6 +10,7 @@ DisplayedModes getDisplayedModes(const ana::ScopChannelMode mode) noexcept
 {
     switch (mode)
     {
+        case ana::ScopChannelMode::st: return { { 0, 1 }, 2 };
         case ana::ScopChannelMode::lr: return { { 0, 1 }, 2 };
         case ana::ScopChannelMode::ms: return { { 2, 3 }, 2 };
         case ana::ScopChannelMode::left: return { { 0, 0 }, 1 };
@@ -17,7 +19,7 @@ DisplayedModes getDisplayedModes(const ana::ScopChannelMode mode) noexcept
         case ana::ScopChannelMode::side: return { { 3, 3 }, 1 };
     }
 
-    return { { 2, 2 }, 1 };
+    return { { 0, 1 }, 2 };
 }
 
 juce::String formatZoomValue(const float decibels)
@@ -26,19 +28,21 @@ juce::String formatZoomValue(const float decibels)
     return juce::String::formatted("%+.2f", displayValue);
 }
 
-void drawWaveformEnvelope(juce::Graphics& graphics,
-                          const std::vector<float>& minimums,
-                          const std::vector<float>& maximums,
-                          const juce::Rectangle<float> bounds,
-                          const float rangeStart,
-                          const float rangeEnd,
-                          const float verticalZoomDecibels,
-                          const bool filledStyle)
+namespace
 {
-    if (minimums.empty() || maximums.size() != minimums.size() || bounds.isEmpty())
+template <typename GetExtrema>
+void drawEnvelope(juce::Graphics& graphics,
+                  const size_t sourceColumns,
+                  GetExtrema&& getExtrema,
+                  const juce::Rectangle<float> bounds,
+                  const float rangeStart,
+                  const float rangeEnd,
+                  const float verticalZoomDecibels,
+                  const bool filledStyle)
+{
+    if (sourceColumns == 0 || bounds.isEmpty())
         return;
 
-    const auto sourceColumns = minimums.size();
     const auto visibleStart = juce::jlimit(0.0f, 0.999f, rangeStart);
     const auto visibleEnd = juce::jlimit(visibleStart + 0.001f, 1.0f, rangeEnd);
     const auto firstSourcePosition = visibleStart * static_cast<float>(sourceColumns - 1);
@@ -89,8 +93,7 @@ void drawWaveformEnvelope(juce::Graphics& graphics,
          sourceIndex <= lastSourceIndex;
          ++sourceIndex)
     {
-        auto minimum = minimums[sourceIndex];
-        auto maximum = maximums[sourceIndex];
+        auto [minimum, maximum] = getExtrema(sourceIndex);
 
         if (minimum > maximum)
         {
@@ -121,5 +124,49 @@ void drawWaveformEnvelope(juce::Graphics& graphics,
     }
 
     flushPath();
+}
+}
+
+void drawWaveformEnvelope(juce::Graphics& graphics,
+                          const std::vector<float>& minimums,
+                          const std::vector<float>& maximums,
+                          const juce::Rectangle<float> bounds,
+                          const float rangeStart,
+                          const float rangeEnd,
+                          const float verticalZoomDecibels,
+                          const bool filledStyle)
+{
+    if (minimums.empty() || maximums.size() != minimums.size())
+        return;
+
+    drawEnvelope(graphics, minimums.size(), [&] (const size_t index)
+    {
+        return std::pair<float, float> { minimums[index], maximums[index] };
+    }, bounds, rangeStart, rangeEnd, verticalZoomDecibels, filledStyle);
+}
+
+void drawStereoWaveformEnvelope(juce::Graphics& graphics,
+                                const Envelope& left,
+                                const Envelope& right,
+                                const juce::Rectangle<float> bounds,
+                                const float rangeStart,
+                                const float rangeEnd,
+                                const float verticalZoomDecibels,
+                                const bool filledStyle)
+{
+    const auto columnCount = left.minimums.size();
+    if (columnCount == 0 || left.maximums.size() != columnCount
+        || right.minimums.size() != columnCount || right.maximums.size() != columnCount)
+        return;
+
+    drawEnvelope(graphics, columnCount, [&] (const size_t index)
+    {
+        // A missing history column has min > max in BOTH channels. Min/max
+        // naturally preserves that sentinel and leaves a gap in the display.
+        return std::pair<float, float> {
+            std::min(left.minimums[index], right.minimums[index]),
+            std::max(left.maximums[index], right.maximums[index])
+        };
+    }, bounds, rangeStart, rangeEnd, verticalZoomDecibels, filledStyle);
 }
 }

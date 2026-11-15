@@ -22,12 +22,12 @@ public:
     {
         constexpr ProcessingOptions(bool peakRmsIn = true,
                                     bool loudnessIn = true,
-                                    bool historyIn = true) noexcept
-            : peakRms(peakRmsIn), loudness(loudnessIn), history(historyIn) {}
+                                    bool metricsIn = true) noexcept
+            : peakRms(peakRmsIn), loudness(loudnessIn), metrics(metricsIn) {}
 
         bool peakRms;
         bool loudness;
-        bool history;
+        bool metrics;
     };
 
     struct Values
@@ -46,9 +46,6 @@ public:
         float loudnessRange = 0.0f;
     };
 
-    static constexpr size_t historyCapacity = 3600;
-    static constexpr size_t historySeriesCount = 3;
-    enum HistorySeries : size_t { momentaryHistory = 0, shortTermHistory, integratedHistory };
     static constexpr size_t loudnessHistogramBinCount = 941;
     static constexpr size_t maximumBlockSize = 32768;
 
@@ -63,7 +60,10 @@ public:
                       bool holdOnTransportStop = false,
                       ProcessingOptions options = {}) noexcept;
     Values getValues() const noexcept;
-    void copyHistory(size_t series, std::vector<float>& destination) const;
+    // Atomically consume the highest true peaks received since the previous
+    // readout poll. Meter ballistics are deliberately not involved.
+    std::array<float, 4> consumeReadoutPeakGains() noexcept;
+    uint64_t getResetEpoch() const noexcept;
     uint64_t getRevision() const noexcept;
 
     struct Biquad
@@ -82,9 +82,8 @@ public:
 
 private:
     void configureKWeighting() noexcept;
-    void publishHistoryValues(const std::array<float, historySeriesCount>& values) noexcept;
     void updateRollingLoudnessPowers() noexcept;
-    void publishLoudnessFrame(bool includeLoudness, bool includeHistory) noexcept;
+    void publishLoudnessFrame(bool includeLoudness, bool includeMetrics) noexcept;
     void addLoudnessBlock(float power,
                           std::array<double, loudnessHistogramBinCount>& energies,
                           std::array<uint64_t, loudnessHistogramBinCount>& counts) noexcept;
@@ -95,7 +94,6 @@ private:
     std::array<Biquad, 2> highPasses;
     std::unique_ptr<juce::dsp::Oversampling<float>> truePeakOversampler;
     size_t truePeakMaximumInputBlockSamples = 1;
-    std::array<std::array<std::atomic<float>, historyCapacity>, historySeriesCount> publishedHistory;
     std::array<std::atomic<float>, 4> publishedPeakDecibels {
         std::atomic<float> { minimumDecibels }, std::atomic<float> { minimumDecibels },
         std::atomic<float> { minimumDecibels }, std::atomic<float> { minimumDecibels }
@@ -123,7 +121,11 @@ private:
     std::atomic<float> publishedShortTermMaximumLufs { minimumDecibels };
     std::atomic<float> publishedIntegratedMaximumLufs { minimumDecibels };
     std::atomic<float> publishedLoudnessRange { 0.0f };
-    std::atomic<size_t> historyWriteCount { 0 };
+    std::array<std::atomic<float>, 4> readoutPeakGains {
+        std::atomic<float> { 0.0f }, std::atomic<float> { 0.0f },
+        std::atomic<float> { 0.0f }, std::atomic<float> { 0.0f }
+    };
+    std::atomic<uint64_t> resetEpoch { 0 };
     std::atomic<uint64_t> revision { 0 };
     std::atomic<bool> clearRequested { false };
     std::atomic<bool> frozen { false };

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "shared/shell/Controls.h"
+#include "shared/scop/BandView.h"
 #include "shared/scop/AnalysisTypes.h"
 #include "Processor.h"
 #include "shared/scop/History.h"
@@ -13,63 +13,41 @@
 #include <functional>
 #include <memory>
 
-class PluginProcessor;
-
-class RealtimeScopView final : public juce::Component, private juce::Timer
+class RealtimeScopView final : public ana::scop::BandView, private juce::Timer
 {
 public:
     explicit RealtimeScopView(PluginProcessor& processorRef);
 
     void setFrozen(bool shouldFreeze);
-    void clearHistory();
-    void equalizeBandHeights();
-    void refreshDisplaySettings();
     void setFullSourceView(bool shouldShowFullSource);
+    void clearHistory();
+    void refreshDisplaySettings();
     void paint(juce::Graphics& graphics) override;
     void resized() override;
-    void mouseMove(const juce::MouseEvent& event) override;
-    void mouseExit(const juce::MouseEvent& event) override;
-    void mouseDown(const juce::MouseEvent& event) override;
-    void mouseDrag(const juce::MouseEvent& event) override;
-    void mouseUp(const juce::MouseEvent& event) override;
 
 private:
+    uint64_t clearRevision=0;
     void timerCallback() override;
     void resetHistory();
     void resizeHistory(size_t newColumnCount);
-    void clearBandHistory(size_t bandIndex);
-    void normalizeBandWithZoom(size_t bandIndex);
+    void clearBandHistory(size_t bandIndex) override;
+    bool isBandNormalizationEnabled(size_t bandIndex) const override;
+    int minimumBandHeight() const noexcept override;
+    const ana::scop::Envelope* getBandEnvelope(
+        size_t bandIndex, size_t channelIndex) const noexcept override;
     void appendHistoryColumn(size_t activeBandCount);
-    void refreshBandModeButtons();
     ana::scop::AnalysisChannelSamples getRealtimeAnalysisChannelSamples(
         size_t bandIndex, size_t sampleIndex) const noexcept;
-    ana::scop::AnalysisChannelSamples getRealtimeWidebandAnalysisChannelSamples(
-        size_t sampleIndex) const noexcept;
-    juce::Rectangle<float> getBandBounds(size_t bandIndex, size_t activeBandCount) const noexcept;
-    bool shouldShowZoomSliders(size_t bandIndex, size_t activeBandCount) const noexcept;
-    bool hasVisibleZoomSliders() const noexcept;
-    int findBandSeparator(int y, size_t activeBandCount) const noexcept;
-    size_t getWaveformColumnCount() const noexcept;
 
-    PluginProcessor& processor;
     ana::MultibandScop::SampleBatch incomingSamples;
-    SliderLookAndFeel bandZoomLookAndFeel;
-    std::array<std::array<std::unique_ptr<ControlButton>, 6>, ana::MultibandScop::numBands> bandModeButtons;
-    std::array<std::unique_ptr<ControlButton>, ana::MultibandScop::numBands> bandClearButtons;
-    std::array<std::unique_ptr<ControlButton>, ana::MultibandScop::numBands> bandSingleViewButtons;
-    std::array<std::unique_ptr<juce::Slider>, ana::MultibandScop::numBands> bandZoomSliders;
-    std::array<std::unique_ptr<EllipsisLabel>, ana::MultibandScop::numBands> bandZoomValueLabels;
-    std::array<std::unique_ptr<ControlButton>, ana::MultibandScop::numBands> bandNormalizeButtons;
     ana::ScopHistory history;
-    std::array<float, ana::MultibandScop::numBands> bandHeightWeights;
-    double realtimeResumeTimeMilliseconds = 0.0;
+    uint64_t observedResetRevision = 0;
+    uint64_t observedSlopeRevision = 0;
     size_t leftToRightColumn = 0;
     int renderedLeftToRight = -1;
     bool frozen = false;
-    bool updatingBandControls = false;
-    bool fullSourceView = false;
+    bool suspendedWhileHidden = false;
+    bool usingPeakAggregation = false;
     int lastComponentWidth = 0;
     int lastComponentHeight = 0;
-    int singleViewBand = -1;
-    int draggedBandSeparator = -1;
 };

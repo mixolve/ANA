@@ -1,6 +1,7 @@
 #pragma once
 
 #include "StereoFftStream.h"
+#include "shared/spec/Channels.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,17 @@ struct StereoSpectrumLevels
     float stereoDecibels = 0.0f;
     float midDecibels = 0.0f;
     float sideDecibels = 0.0f;
+
+    // Keep the SPEC channel order in one place for FREQ and MAP consumers.
+    std::array<float, spec::channelCount> decibelValues() const noexcept
+    {
+        return { stereoDecibels, leftDecibels, rightDecibels, midDecibels, sideDecibels };
+    }
+
+    std::array<float, spec::channelCount> gainValues() const noexcept
+    {
+        return { stereoGain, leftGain, rightGain, midGain, sideGain };
+    }
 };
 
 inline float spectrumGainToDecibels(const float gain, const float minimumDecibels) noexcept
@@ -33,10 +45,6 @@ inline StereoSpectrumLevels calculateStereoSpectrumLevels(
     const float magnitudeScale,
     const float minimumDecibels) noexcept
 {
-    const auto complexBin = [bin] (const float* data)
-    {
-        return juce::Point<float> { data[2 * bin], data[2 * bin + 1] };
-    };
     const auto magnitude = [] (const juce::Point<float> value)
     {
         return std::hypot(value.x, value.y);
@@ -48,8 +56,8 @@ inline StereoSpectrumLevels calculateStereoSpectrumLevels(
         return std::max(0.0f, value * magnitudeScale / denominator);
     };
 
-    const auto leftComplex = complexBin(frame.left);
-    const auto rightComplex = complexBin(frame.right);
+    const auto leftComplex = complexBin(frame.left, bin);
+    const auto rightComplex = complexBin(frame.right, bin);
     const auto midComplex = (leftComplex + rightComplex) * 0.5f;
     const auto sideComplex = (leftComplex - rightComplex) * 0.5f;
 
@@ -57,7 +65,7 @@ inline StereoSpectrumLevels calculateStereoSpectrumLevels(
     levels.leftGain = calibratedGain(magnitude(leftComplex));
     levels.rightGain = calibratedGain(magnitude(rightComplex));
     // STEREO averages magnitudes; MID/SIDE remain phase-aware transforms.
-    levels.stereoGain = calibratedGain((magnitude(leftComplex) + magnitude(rightComplex)) * 0.5f);
+    levels.stereoGain = (levels.leftGain + levels.rightGain) * 0.5f;
     levels.midGain = calibratedGain(magnitude(midComplex));
     levels.sideGain = calibratedGain(magnitude(sideComplex));
 

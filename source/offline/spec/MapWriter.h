@@ -2,8 +2,8 @@
 
 #include "offline/shell/AnalysisResult.h"
 #include "shared/spec/FrequencyScale.h"
-#include "shared/spec/SpectrogramFrequencyScale.h"
-#include "shared/spec/SpectrumChannelLevels.h"
+#include "shared/spec/MapFrequencyScale.h"
+#include "shared/spec/ChannelLevels.h"
 
 namespace ana::offline
 {
@@ -40,9 +40,6 @@ struct SpectrogramMapWriter
                   const double sampleRate,
                   const double normalisedTime)
     {
-        if (bucketCount == 0)
-            return;
-
         const auto bucketIndex = std::min(bucketCount - 1,
             static_cast<size_t>(std::floor(
                 juce::jlimit(0.0f, 1.0f, static_cast<float>(normalisedTime))
@@ -84,13 +81,7 @@ struct SpectrogramMapWriter
         {
             const auto levels = fft::calculateStereoSpectrumLevels(
                 frame, static_cast<int>(bin), 1.0f, spectrogramFloorDb);
-            binLevels[bin] = ChannelValues {
-                levels.stereoDecibels,
-                levels.leftDecibels,
-                levels.rightDecibels,
-                levels.midDecibels,
-                levels.sideDecibels
-            };
+            binLevels[bin] = levels.decibelValues();
         }
 
         // Preserve the strongest STFT frame when several land in one display column.
@@ -120,12 +111,12 @@ struct SpectrogramMapWriter
         {
             const auto centreNormalised = 1.0f
                 - (static_cast<float>(row) + 0.5f) / static_cast<float>(map.rowCount);
-            const auto centreFrequency = spectrogram_frequency::frequencyAt(
+            const auto centreFrequency = map_frequency_scale::frequencyAt(
                 lowFrequency, highFrequency, centreNormalised);
 
             ChannelValues rowLevels {};
             rowLevels.fill(spectrogramFloorDb);
-            if (binFrequency > 0.0f)
+            if (binFrequency > 0.0f && centreFrequency <= static_cast<float>(sampleRate * 0.5))
             {
                 const auto exactBin = juce::jlimit(
                     1.0f, static_cast<float>(binCount - 1),
@@ -182,4 +173,3 @@ struct SpectrogramMapWriter
 };
 
 }
-

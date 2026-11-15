@@ -8,22 +8,6 @@ namespace ana::corr
 {
 namespace
 {
-juce::Point<float> complexBin(const float* data, const int bin) noexcept
-{
-    return { data[2 * bin], data[2 * bin + 1] };
-}
-
-size_t modeArrayIndex(const CorrProcessor::Mode mode) noexcept
-{
-    return static_cast<size_t>(CorrProcessor::modeIndex(mode));
-}
-
-template <typename ModeBins>
-void fillModeBins(ModeBins& values, const float value) noexcept
-{
-    for (auto& mode : values)
-        mode.fill(value);
-}
 
 template <typename AtomicModeBins>
 void storeModeBins(AtomicModeBins& values, const float value) noexcept
@@ -86,7 +70,7 @@ void CorrProcessor::copyCorr(const Mode mode, const DisplayType type,
     const auto binCount = fftSize > 0 ? fftSize / 2 + 1 : 0;
     destination.resize(static_cast<size_t>(binCount));
 
-    const auto index = modeArrayIndex(mode);
+    const auto index = static_cast<size_t>(modeIndex(mode));
     const auto& source = type == DisplayType::average
         ? publishedAverages[index] : publishedMinimums[index];
     for (int bin = 0; bin < binCount; ++bin)
@@ -147,8 +131,8 @@ void CorrProcessor::updateMinimumWindow(
     {
         const auto arrayIndex = static_cast<size_t>(index);
         const auto ringIndex = ringOffset + arrayIndex;
-        const auto left = complexBin(frame.left, index);
-        const auto right = complexBin(frame.right, index);
+        const auto left = fft::complexBin(frame.left, index);
+        const auto right = fft::complexBin(frame.right, index);
         const auto leftPower = static_cast<double>(left.x) * left.x
             + static_cast<double>(left.y) * left.y;
         const auto rightPower = static_cast<double>(right.x) * right.x

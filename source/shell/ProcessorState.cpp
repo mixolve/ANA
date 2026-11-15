@@ -149,6 +149,17 @@ ana::ScopChannelMode PluginProcessor::getScopChannelMode(const size_t bandIndex)
     return ana::scop::defaultChannelMode;
 }
 
+ana::ScopChannelMode PluginProcessor::getScopOverallMonitorMode() const noexcept
+{
+    if (const auto* value = getRawParameterValue(scopOverallMonitorParameterId))
+    {
+        const auto index = juce::jlimit(0, static_cast<int>(ana::scopChannelModeCount) - 1,
+                                        static_cast<int>(std::round(value->load(std::memory_order_relaxed))));
+        return static_cast<ana::ScopChannelMode>(index);
+    }
+    return ana::scop::defaultChannelMode;
+}
+
 float PluginProcessor::getScopVerticalZoomDecibels(const size_t bandIndex) const noexcept
 {
     if (bandIndex < scopVerticalZoomParameterIds.size())
@@ -173,11 +184,47 @@ bool PluginProcessor::isScopBandNormalized(const size_t bandIndex) const noexcep
     return ana::scop::defaultBandNormalized;
 }
 
+bool PluginProcessor::isScopLinkedNormalized() const noexcept
+{
+    if (const auto* value = getRawParameterValue(scopLinkedNormalizeParameterId))
+        return value->load(std::memory_order_relaxed) >= 0.5f;
+    return false;
+}
 
 juce::Point<int> PluginProcessor::getLastEditorSize() const noexcept
 {
     return { lastEditorWidth.load(std::memory_order_relaxed),
              lastEditorHeight.load(std::memory_order_relaxed) };
+}
+
+bool PluginProcessor::areScopBandsEqualHeight() const noexcept
+{
+    return bool(parameters.state.getProperty("ui.scop.equal-height",false));
+}
+
+void PluginProcessor::setScopBandsEqualHeight(bool enabled)
+{
+    auto* parameter=parameters.getParameter(scopEqualHeightParameterId);
+    const auto value=enabled?1.0f:0.0f;
+    if(!juce::approximatelyEqual(parameter->getValue(),value)) parameter->setValueNotifyingHost(value);
+    parameters.state.setProperty("ui.scop.equal-height",enabled,nullptr);
+    if (enabled)
+    {
+        std::array<float,ana::dsp::LinkwitzRileyCrossover::numBands> weights;
+        weights.fill(1.0f);
+        setScopBandHeightWeights(weights);
+    }
+}
+
+bool PluginProcessor::areLvlsPartsCentered() const noexcept
+{
+    return bool(parameters.state.getProperty("ui.lvls.parts-centered",true));
+}
+
+void PluginProcessor::setLvlsPartsCentered(bool enabled)
+{
+    parameters.state.setProperty("ui.lvls.parts-centered",enabled,nullptr);
+    if (enabled) setLvlsSectionWeights({1.0f,1.0f,1.0f});
 }
 
 std::array<float, 3> PluginProcessor::getLvlsSectionWeights() const noexcept
@@ -240,6 +287,12 @@ bool PluginProcessor::isCleanView() const noexcept
     return clean != nullptr && clean->load(std::memory_order_relaxed) >= 0.5f;
 }
 
+bool PluginProcessor::isScreensaverEnabled() const noexcept
+{
+    const auto* screensaver = parameters.getRawParameterValue(screensaverParameterId);
+    return screensaver != nullptr && screensaver->load(std::memory_order_relaxed) >= 0.5f;
+}
+
 
 const char* PluginProcessor::resolveParameterId(const char* id) const noexcept
 {
@@ -272,7 +325,7 @@ void PluginProcessor::setSpecMonitorMode(const int mode)
         return;
 
     modeParameter->setValueNotifyingHost(modeParameter->convertTo0to1(static_cast<float>(nextMode)));
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
+    notifyHostOfStateChange();
 }
 
 void PluginProcessor::setCorrMode(const int mode)
@@ -290,7 +343,7 @@ void PluginProcessor::setCorrMode(const int mode)
     modeParameter->setValueNotifyingHost(modeParameter->convertTo0to1(static_cast<float>(nextMode)));
     constrainCorrRangeForMode(nextMode);
     corrProcessor.requestClear();
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
+    notifyHostOfStateChange();
 }
 
 void PluginProcessor::constrainCorrRangeForMode(const int mode)
@@ -345,8 +398,6 @@ void PluginProcessor::setLastEditorSize(const int width, const int height) noexc
     {
         parameters.state.setProperty(editorWidthStateKey, validWidth, nullptr);
         parameters.state.setProperty(editorHeightStateKey, validHeight, nullptr);
-        updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                              .withNonParameterStateChanged(true));
     }
 }
 
@@ -361,19 +412,13 @@ void PluginProcessor::setLvlsSectionWeights(const std::array<float, 3>& weights)
     normalizeLayoutWeights(safeWeights);
 
     const auto current = getLvlsSectionWeights();
-    auto changed = false;
     for (size_t index = 0; index < safeWeights.size(); ++index)
     {
         if (std::abs(current[index] - safeWeights[index]) <= 1.0e-5f)
             continue;
 
         parameters.state.setProperty(lvlsSectionWeightStateKeys[index], safeWeights[index], nullptr);
-        changed = true;
     }
-
-    if (changed)
-        updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                              .withNonParameterStateChanged(true));
 }
 
 void PluginProcessor::setScopBandHeightWeights(
@@ -387,17 +432,12 @@ void PluginProcessor::setScopBandHeightWeights(
     normalizeLayoutWeights(safeWeights);
 
     const auto current = getScopBandHeightWeights();
-    auto changed = false;
     for (size_t index = 0; index < safeWeights.size(); ++index)
     {
         if (std::abs(current[index] - safeWeights[index]) <= 1.0e-5f)
             continue;
         parameters.state.setProperty(scopBandHeightStateKeys[index], safeWeights[index], nullptr);
-        changed = true;
     }
-    if (changed)
-        updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                              .withNonParameterStateChanged(true));
 }
 
 void PluginProcessor::setAnalyzerPageState(const ana::AnalyzerPage page)
@@ -409,7 +449,7 @@ void PluginProcessor::setAnalyzerPageState(const ana::AnalyzerPage page)
         module->setValueNotifyingHost(module->convertTo0to1(static_cast<float>(page)));
     if (page == ana::AnalyzerPage::spec)
         specProcessor.requestRealtimeReset();
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
+    notifyHostOfStateChange();
 }
 
 void PluginProcessor::setSpecMapView(const bool shouldUseMap)
@@ -418,7 +458,7 @@ void PluginProcessor::setSpecMapView(const bool shouldUseMap)
     if (view == nullptr || isSpecMapView() == shouldUseMap)
         return;
     view->setValueNotifyingHost(view->convertTo0to1(shouldUseMap ? 1.0f : 0.0f));
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
+    notifyHostOfStateChange();
 }
 
 ana::dsp::LinkwitzRileyCrossover::CrossoverFrequencies PluginProcessor::getCrossoverFrequencies() const noexcept
@@ -456,12 +496,13 @@ void PluginProcessor::setScopSingleViewBand(const int bandIndex)
         return;
 
     parameters.state.setProperty(scopSingleViewStateKey, validBand, nullptr);
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                          .withNonParameterStateChanged(true));
 }
 
 void PluginProcessor::setScopFullSourceView(const bool shouldShowFullSource)
 {
+    auto* parameter=parameters.getParameter(scopOverallFullParameterId);
+    const auto value=shouldShowFullSource?1.0f:0.0f;
+    if(!juce::approximatelyEqual(parameter->getValue(),value)) parameter->setValueNotifyingHost(value);
     if (isScopFullSourceView() == shouldShowFullSource)
         return;
 
@@ -469,8 +510,6 @@ void PluginProcessor::setScopFullSourceView(const bool shouldShowFullSource)
     if (shouldShowFullSource)
         parameters.state.setProperty(scopSingleViewStateKey, -1, nullptr);
 
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                          .withNonParameterStateChanged(true));
 }
 
 void PluginProcessor::setScopChannelMode(const size_t bandIndex, const ana::ScopChannelMode mode)
@@ -518,6 +557,16 @@ void PluginProcessor::setScopBandNormalized(const size_t bandIndex, const bool s
     parameter->endChangeGesture();
 }
 
+void PluginProcessor::setScopLinkedNormalized(const bool shouldNormalize)
+{
+    if (auto* parameter = getActiveParameter(scopLinkedNormalizeParameterId))
+    {
+        parameter->beginChangeGesture();
+        parameter->setValueNotifyingHost(shouldNormalize ? 1.0f : 0.0f);
+        parameter->endChangeGesture();
+    }
+}
+
 bool PluginProcessor::areScopHorizontalZoomControlsVisible() const noexcept
 {
     if (const auto* value = getRawParameterValue(scopHorizontalZoomControlsParameterId))
@@ -532,4 +581,17 @@ bool PluginProcessor::areScopHorizontalReadoutsVisible() const noexcept
         return value->load(std::memory_order_relaxed) >= 0.5f;
 
     return true;
+}
+
+void PluginProcessor::requestScopClear()
+{
+    if(isOfflineMode()) return;
+    auto* parameter=parameters.getParameter(scopClearParameterId);
+    parameter->beginChangeGesture(); parameter->setValueNotifyingHost(1.0f); parameter->endChangeGesture();
+}
+
+int PluginProcessor::getCollapsedDockCount() const
+{
+    const auto* value=parameters.getRawParameterValue(dockCountParameterId);
+    return value!=nullptr?juce::jlimit(1,16,juce::roundToInt(value->load(std::memory_order_relaxed))):6;
 }

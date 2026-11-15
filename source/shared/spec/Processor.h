@@ -88,7 +88,6 @@ private:
 
     using OfflineSumValues = std::array<double, maximumBinCount>;
     using ChannelOfflineSumValues = std::array<OfflineSumValues, channelCount>;
-    using OfflineCountValues = std::array<uint64_t, maximumBinCount>;
 
     fft::StereoFftStream fftStream;
     fft::StereoFftStream mapFftStream;
@@ -100,7 +99,7 @@ private:
     ChannelBinValues mapAccumulatedLevels {};
     AtomicChannelBinValues publishedMapCurrentLevels {};
     ChannelOfflineSumValues offlinePowerSums {};
-    OfflineCountValues offlineMagnitudeCount {};
+    uint64_t offlineFrameCount = 0;
     std::atomic<int> publishedFftSize { 0 };
     std::atomic<int> publishedMapFftSize { 0 };
     std::atomic<uint64_t> revision { 0 };
@@ -118,4 +117,3 @@ private:
     int lastFrameSize = 0;
 };
 }
-

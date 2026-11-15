@@ -3,6 +3,7 @@
 #include "shell/Processor.h"
 #include "shared/shell/AnalyzerViewUtilities.h"
 #include "shared/shell/GraphColours.h"
+#include "shared/shell/ParameterControl.h"
 #include "shared/spec/Settings.h"
 
 namespace ana::spec::display
@@ -33,7 +34,7 @@ inline juce::Colour readGraphColour(const PluginProcessor& processor, const char
 inline float readGraphOpacity(const PluginProcessor& processor) noexcept
 {
     return juce::jlimit(0.01f, 1.0f, readParameterValue(
-        processor, PluginProcessor::specGraphOpacityParameterId, 100.0f) * 0.01f);
+        processor, PluginProcessor::specGraphOpacityParameterId, 50.0f) * 0.01f);
 }
 
 inline SpecFrequencyRange readSpecFrequencyRange(const PluginProcessor& processor) noexcept
@@ -118,6 +119,49 @@ specChannelsForMode(const ana::spec::MonitorMode mode) noexcept
     }
 
     return { Channel::stereo, Channel::stereo };
+}
+
+inline void applyFrequencySliderToRange(const ana::frequency_scale::Scale scale,
+                                          RangeSlider& slider,
+                                          ParameterControl& lowControl,
+                                          ParameterControl& highControl)
+{
+    lowControl.getSlider().setValue(ana::frequency_scale::frequencyAt(
+        scale, ana::frequency_scale::minimumHz,
+        ana::frequency_scale::maximumHz, slider.getRangeStart()),
+        juce::sendNotificationSync);
+    highControl.getSlider().setValue(ana::frequency_scale::frequencyAt(
+        scale, ana::frequency_scale::minimumHz,
+        ana::frequency_scale::maximumHz, slider.getRangeEnd()),
+        juce::sendNotificationSync);
+}
+
+inline void applyVerticalSliderToFrequencyRange(const ana::frequency_scale::Scale scale,
+                                                 RangeSlider& slider,
+                                                 ParameterControl& lowControl,
+                                                 ParameterControl& highControl)
+{
+    highControl.getSlider().setValue(ana::frequency_scale::frequencyAt(
+        scale, ana::frequency_scale::minimumHz,
+        ana::frequency_scale::maximumHz, 1.0f - slider.getRangeStart()),
+        juce::sendNotificationSync);
+    lowControl.getSlider().setValue(ana::frequency_scale::frequencyAt(
+        scale, ana::frequency_scale::minimumHz,
+        ana::frequency_scale::maximumHz, 1.0f - slider.getRangeEnd()),
+        juce::sendNotificationSync);
+}
+
+inline void applyVerticalSliderToLevelRange(RangeSlider& slider,
+                                             ParameterControl& lowControl,
+                                             ParameterControl& highControl)
+{
+    constexpr auto span = ana::spec::maximumDisplayDecibels - ana::spec::minimumDisplayDecibels;
+    lowControl.getSlider().setValue(
+        ana::spec::maximumDisplayDecibels - slider.getRangeEnd() * span,
+        juce::sendNotificationSync);
+    highControl.getSlider().setValue(
+        ana::spec::maximumDisplayDecibels - slider.getRangeStart() * span,
+        juce::sendNotificationSync);
 }
 
 inline juce::Rectangle<float> splitPaneForCursor(const juce::Rectangle<float> plotBounds,

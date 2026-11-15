@@ -17,6 +17,11 @@ enum class WindowType
     gaussian200Db
 };
 
+inline juce::Point<float> complexBin(const float* data, const int bin) noexcept
+{
+    return { data[2 * bin], data[2 * bin + 1] };
+}
+
 struct StereoFftFrame
 {
     const float* left = nullptr;
@@ -79,56 +84,35 @@ public:
     // Offline MAP accepts a display-raster-derived hop instead of an FFT-derived hop.
     template <typename FrameHandler>
     void processSpectrogramBlockWithHop(const juce::AudioBuffer<float>& buffer,
-                                        const int requestedFftSize,
-                                        const int requestedHopSize,
-                                        FrameHandler&& onFrame) noexcept
+                                         const int requestedFftSize,
+                                         const int requestedHopSize,
+                                         FrameHandler&& onFrame) noexcept
     {
-        if (buffer.getNumSamples() <= 0 || buffer.getNumChannels() <= 0)
-            return;
-
-        const auto fftIndex = getFftIndex(requestedFftSize);
-        const auto fftSize = supportedFftSizes[static_cast<size_t>(fftIndex)];
-        const auto hopSize = std::max(1, requestedHopSize);
-
-        // Preserve the ring across ARA blocks; analysis-state changes restart frame progress only.
-        if (activeFftIndex != fftIndex || activeWindowType != WindowType::gaussian200Db)
-        {
-            activeFftIndex = fftIndex;
-            activeHopSize = hopSize;
-            activeWindowType = WindowType::gaussian200Db;
-            samplesSinceAnalysis = 0;
-        }
-        else if (activeHopSize != hopSize)
-        {
-            activeHopSize = hopSize;
-            samplesSinceAnalysis = 0;
-        }
-
-        const auto* left = buffer.getReadPointer(0);
-        const auto* right = buffer.getReadPointer(std::min(1, buffer.getNumChannels() - 1));
-        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
-        {
-            leftRing[static_cast<size_t>(ringWritePosition)] = left[sample];
-            rightRing[static_cast<size_t>(ringWritePosition)] = right[sample];
-            ringWritePosition = (ringWritePosition + 1) & (maximumFftSize - 1);
-            validSampleCount = std::min(fftSize, validSampleCount + 1);
-
-            if (++samplesSinceAnalysis >= hopSize)
-            {
-                samplesSinceAnalysis = 0;
-                analyse(fftIndex, hopSize, WindowType::gaussian200Db, sample + 1,
-                        std::forward<FrameHandler>(onFrame));
-            }
-        }
+        processFramesWithHop(buffer, requestedFftSize, requestedHopSize,
+                             WindowType::gaussian200Db, true,
+                             std::forward<FrameHandler>(onFrame));
     }
 
 
     template <typename FrameHandler>
     void processBlockWithHop(const juce::AudioBuffer<float>& buffer,
-                             const int requestedFftSize,
-                             const int requestedHopSize,
-                             const WindowType windowType,
-                             FrameHandler&& onFrame) noexcept
+                              const int requestedFftSize,
+                              const int requestedHopSize,
+                              const WindowType windowType,
+                              FrameHandler&& onFrame) noexcept
+    {
+        processFramesWithHop(buffer, requestedFftSize, requestedHopSize, windowType,
+                             false, std::forward<FrameHandler>(onFrame));
+    }
+
+private:
+    template <typename FrameHandler>
+    void processFramesWithHop(const juce::AudioBuffer<float>& buffer,
+                              const int requestedFftSize,
+                              const int requestedHopSize,
+                              const WindowType windowType,
+                              const bool emitPartialFrames,
+                              FrameHandler&& onFrame) noexcept
     {
         if (buffer.getNumSamples() <= 0 || buffer.getNumChannels() <= 0)
             return;
@@ -137,14 +121,16 @@ public:
         const auto fftSize = supportedFftSizes[static_cast<size_t>(fftIndex)];
         const auto hopSize = std::max(1, requestedHopSize);
 
-        // FFT size, hop and window changes invalidate partial frame progress.
+        // Offline MAP also emits zero-padded leading frames for centred windows.
+        // Other streams wait for a complete frame after size/window changes.
         if (activeFftIndex != fftIndex || activeWindowType != windowType)
         {
             activeFftIndex = fftIndex;
             activeHopSize = hopSize;
             activeWindowType = windowType;
             samplesSinceAnalysis = 0;
-            validSampleCount = 0;
+            if (! emitPartialFrames)
+                validSampleCount = 0;
         }
         else if (activeHopSize != hopSize)
         {
@@ -186,13 +172,14 @@ public:
             if (samplesSinceAnalysis >= hopSize)
             {
                 samplesSinceAnalysis = 0;
-                if (validSampleCount >= fftSize)
-                    analyse(fftIndex, hopSize, windowType, 0, std::forward<FrameHandler>(onFrame));
+                if (emitPartialFrames || validSampleCount >= fftSize)
+                    analyse(fftIndex, hopSize, windowType,
+                            emitPartialFrames ? inputPosition : 0,
+                            std::forward<FrameHandler>(onFrame));
             }
         }
     }
 
-private:
     int getFftIndex(int requestedFftSize) const noexcept;
 
     template <typename FrameHandler>

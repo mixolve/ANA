@@ -7,7 +7,7 @@ namespace ana::lvls
 {
 namespace
 {
-constexpr float historyStepSeconds = 0.1f;
+constexpr float loudnessFrameStepSeconds = 0.1f;
 constexpr float absoluteLoudnessGate = -70.0f;
 constexpr float loudnessHistogramLow = -70.0f;
 constexpr float loudnessHistogramStep = 0.1f;
@@ -80,7 +80,7 @@ float LvlsProcessor::Biquad::process(const float input) noexcept
 void LvlsProcessor::prepare(const double newSampleRate, const int maximumBlockSamples) noexcept
 {
     sampleRate = std::max(1.0, newSampleRate);
-    loudnessFrameSampleCount = static_cast<uint32_t>(std::max(1.0, std::round(sampleRate * historyStepSeconds)));
+    loudnessFrameSampleCount = static_cast<uint32_t>(std::max(1.0, std::round(sampleRate * loudnessFrameStepSeconds)));
     const auto maximumRmsWindowSamples = static_cast<size_t>(std::ceil(sampleRate * 3.0));
     for (auto& history : rmsPowerHistory)
         history.assign(maximumRmsWindowSamples, 0.0f);
@@ -106,9 +106,6 @@ void LvlsProcessor::reset() noexcept
         filter.reset();
     if (truePeakOversampler != nullptr)
         truePeakOversampler->reset();
-    for (auto& series : publishedHistory)
-        for (auto& value : series)
-            value.store(LvlsProcessor::minimumDecibels, std::memory_order_relaxed);
     for (auto& value : publishedPeakDecibels)
         value.store(LvlsProcessor::minimumDecibels, std::memory_order_relaxed);
     for (auto& value : publishedRmsDecibels)
@@ -126,11 +123,12 @@ void LvlsProcessor::reset() noexcept
     publishedShortTermMaximumLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_relaxed);
     publishedIntegratedMaximumLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_relaxed);
     publishedLoudnessRange.store(0.0f, std::memory_order_relaxed);
-    historyWriteCount.store(0, std::memory_order_release);
     for (auto& history : rmsPowerHistory)
         std::fill(history.begin(), history.end(), 0.0f);
     rmsPowerSums.fill(0.0);
     std::fill(loudnessPowerHistory.begin(), loudnessPowerHistory.end(), 0.0f);
+    for (auto& gain : readoutPeakGains)
+        gain.store(0.0f, std::memory_order_relaxed);
     peakGains.fill(0.0f);
     peakHoldGains.fill(0.0f);
     peakHoldSamplesRemaining.fill(0);
@@ -147,31 +145,16 @@ void LvlsProcessor::reset() noexcept
     loudnessRangeCounts.fill(0);
     integratedFrameWriteCount = 0;
     pendingLoudnessFrameSamples = 0;
+    resetEpoch.fetch_add(1, std::memory_order_release);
     revision.fetch_add(1, std::memory_order_release);
 }
 
 void LvlsProcessor::requestClear() noexcept
 {
     clearRequested.store(true, std::memory_order_release);
-
-    for (auto& value : publishedPeakDecibels)
-        value.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    for (auto& value : publishedRmsDecibels)
-        value.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    for (auto& value : publishedPeakMaximumDecibels)
-        value.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    for (auto& value : publishedPeakHoldDecibels)
-        value.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    for (auto& value : publishedRmsMaximumDecibels)
-        value.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    publishedMomentaryLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    publishedShortTermLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    publishedIntegratedLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    publishedMomentaryMaximumLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    publishedShortTermMaximumLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    publishedIntegratedMaximumLufs.store(LvlsProcessor::minimumDecibels, std::memory_order_release);
-    publishedLoudnessRange.store(0.0f, std::memory_order_release);
-    historyWriteCount.store(0, std::memory_order_release);
+    // Let open readout views clear their held numbers immediately, even if
+    // the host is stopped and no audio callback follows yet.
+    resetEpoch.fetch_add(1, std::memory_order_release);
     revision.fetch_add(1, std::memory_order_release);
 }
 
@@ -198,9 +181,8 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
         || buffer.getNumSamples() <= 0 || buffer.getNumChannels() <= 0)
         return;
 
-    const auto processPeakSignal = options.peakRms;
-    const auto processLoudnessSignal = options.loudness || options.history;
-    if (! processPeakSignal && ! processLoudnessSignal)
+    const auto processLoudnessSignal = options.loudness || options.metrics;
+    if (! options.peakRms && ! processLoudnessSignal)
         return;
 
     if (holdOnTransportStop)
@@ -215,7 +197,7 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
     const auto sampleCount = buffer.getNumSamples();
     const auto channelCount = std::min(2, buffer.getNumChannels());
     std::array<float, 4> blockPeaks {};
-    if (processPeakSignal && truePeakOversampler != nullptr)
+    if (options.peakRms && truePeakOversampler != nullptr)
     {
         // JUCE Oversampling has a fixed prepared block capacity; chunk oversized callbacks.
         const juce::dsp::AudioBlock<const float> inputBlock(buffer);
@@ -317,7 +299,7 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
             if (pendingLoudnessFrameSamples >= loudnessFrameSampleCount)
             {
                 updateRollingLoudnessPowers();
-                publishLoudnessFrame(options.loudness, options.history);
+                publishLoudnessFrame(options.loudness, options.metrics);
             }
         }
         if (options.peakRms)
@@ -326,7 +308,7 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
     if (processLoudnessSignal)
         updateRollingLoudnessPowers();
 
-    if (processPeakSignal)
+    if (options.peakRms)
     {
         const auto durationSeconds = static_cast<float>(sampleCount / sampleRate);
         const auto peakRelease = std::pow(10.0f, -durationSeconds);
@@ -352,8 +334,16 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
             }
         }
 
+        // Capture actual per-block oversampled peaks independently of meter
+        // release/hold. A lock-free maximum/exchange lets the UI aggregate
+        // every block, including peaks between two 30 Hz repaints.
         for (size_t channel = 0; channel < blockPeaks.size(); ++channel)
         {
+            auto oldGain = readoutPeakGains[channel].load(std::memory_order_relaxed);
+            while (blockPeaks[channel] > oldGain
+                   && ! readoutPeakGains[channel].compare_exchange_weak(
+                       oldGain, blockPeaks[channel], std::memory_order_acq_rel,
+                       std::memory_order_relaxed)) {}
             const auto peakDecibels = decibels(peakGains[channel]);
             publishedPeakDecibels[channel].store(peakDecibels, std::memory_order_release);
             publishedPeakHoldDecibels[channel].store(decibels(peakHoldGains[channel]),
@@ -361,19 +351,16 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
             publishedPeakMaximumDecibels[channel].store(std::max(
                 peakDecibels, publishedPeakMaximumDecibels[channel].load(std::memory_order_relaxed)),
                 std::memory_order_release);
-            if (options.peakRms)
-            {
-                const auto rmsSampleCount = std::max<size_t>(1,
-                    std::min(rmsPowerWriteCount, rmsWindowSamples));
-                // AES-17 RMS reference: a full-scale sine reads 0 dB.
-                const auto rmsDecibels = juce::jmax(LvlsProcessor::minimumDecibels,
-                    powerDecibels(static_cast<float>(rmsPowerSums[channel]
-                        / static_cast<double>(rmsSampleCount))) + aes17RmsReferenceOffset);
-                publishedRmsDecibels[channel].store(rmsDecibels, std::memory_order_release);
-                publishedRmsMaximumDecibels[channel].store(std::max(
-                    rmsDecibels, publishedRmsMaximumDecibels[channel].load(std::memory_order_relaxed)),
-                    std::memory_order_release);
-            }
+            const auto rmsSampleCount = std::max<size_t>(1,
+                std::min(rmsPowerWriteCount, rmsWindowSamples));
+            // AES-17 RMS reference: a full-scale sine reads 0 dB.
+            const auto rmsDecibels = juce::jmax(LvlsProcessor::minimumDecibels,
+                powerDecibels(static_cast<float>(rmsPowerSums[channel]
+                    / static_cast<double>(rmsSampleCount))) + aes17RmsReferenceOffset);
+            publishedRmsDecibels[channel].store(rmsDecibels, std::memory_order_release);
+            publishedRmsMaximumDecibels[channel].store(std::max(
+                rmsDecibels, publishedRmsMaximumDecibels[channel].load(std::memory_order_relaxed)),
+                std::memory_order_release);
         }
     }
     if (options.loudness)
@@ -397,7 +384,7 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
                 integratedLufs, publishedIntegratedMaximumLufs.load(std::memory_order_relaxed)),
                 std::memory_order_release);
     }
-    if (options.history)
+    if (options.metrics)
         publishedLoudnessRange.store(getLoudnessRange(), std::memory_order_release);
 
     revision.fetch_add(1, std::memory_order_release);
@@ -406,6 +393,8 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
 LvlsProcessor::Values LvlsProcessor::getValues() const noexcept
 {
     Values values;
+    if (clearRequested.load(std::memory_order_acquire))
+        return values;
     for (size_t index = 0; index < values.peakDecibels.size(); ++index)
     {
         values.peakDecibels[index] = publishedPeakDecibels[index].load(std::memory_order_acquire);
@@ -424,16 +413,17 @@ LvlsProcessor::Values LvlsProcessor::getValues() const noexcept
     return values;
 }
 
-void LvlsProcessor::copyHistory(const size_t series, std::vector<float>& destination) const
+std::array<float, 4> LvlsProcessor::consumeReadoutPeakGains() noexcept
 {
-    const auto writeCount = historyWriteCount.load(std::memory_order_acquire);
-    const auto count = std::min(writeCount, historyCapacity);
-    destination.resize(count);
-    const auto first = writeCount > historyCapacity ? writeCount - historyCapacity : 0;
-    const auto seriesIndex = std::min(series, historySeriesCount - 1);
-    for (size_t index = 0; index < count; ++index)
-        destination[index] = publishedHistory[seriesIndex][(first + index) % historyCapacity]
-            .load(std::memory_order_acquire);
+    std::array<float, 4> result {};
+    for (size_t channel = 0; channel < result.size(); ++channel)
+        result[channel] = readoutPeakGains[channel].exchange(0.0f, std::memory_order_acq_rel);
+    return result;
+}
+
+uint64_t LvlsProcessor::getResetEpoch() const noexcept
+{
+    return resetEpoch.load(std::memory_order_acquire);
 }
 
 uint64_t LvlsProcessor::getRevision() const noexcept
@@ -460,31 +450,20 @@ void LvlsProcessor::updateRollingLoudnessPowers() noexcept
 }
 
 void LvlsProcessor::publishLoudnessFrame(const bool includeLoudness,
-                                               const bool includeHistory) noexcept
+                                               const bool includeMetrics) noexcept
 {
     if (pendingLoudnessFrameSamples == 0)
         return;
 
     ++integratedFrameWriteCount;
-    if ((includeLoudness || includeHistory) && loudnessPowerWriteCount >= momentaryWindowSamples)
+    if ((includeLoudness || includeMetrics) && loudnessPowerWriteCount >= momentaryWindowSamples)
         addLoudnessBlock(momentaryLufsPower,
                          integratedLoudnessEnergies,
                          integratedLoudnessCounts);
 
-    if (includeHistory)
-    {
-        publishHistoryValues({
-            loudnessPowerWriteCount >= momentaryWindowSamples
-                ? lufsFromPower(momentaryLufsPower) : LvlsProcessor::minimumDecibels,
-            loudnessPowerWriteCount >= shortTermWindowSamples
-                ? lufsFromPower(shortTermLufsPower) : LvlsProcessor::minimumDecibels,
-            getIntegratedLufs()
-        });
-    }
-
     if (loudnessPowerWriteCount >= shortTermWindowSamples)
     {
-        if (includeHistory && integratedFrameWriteCount % loudnessRangeFrameStride == 0)
+        if (includeMetrics && integratedFrameWriteCount % loudnessRangeFrameStride == 0)
             addLoudnessBlock(shortTermLufsPower,
                              loudnessRangeEnergies,
                              loudnessRangeCounts);
@@ -578,12 +557,4 @@ float LvlsProcessor::getLoudnessRange() const noexcept
     return std::max(0.0f, static_cast<float>(highIndex - lowIndex) * loudnessHistogramStep);
 }
 
-void LvlsProcessor::publishHistoryValues(
-    const std::array<float, historySeriesCount>& values) noexcept
-{
-    const auto writeCount = historyWriteCount.fetch_add(1, std::memory_order_acq_rel);
-    for (size_t series = 0; series < historySeriesCount; ++series)
-        publishedHistory[series][writeCount % historyCapacity]
-            .store(values[series], std::memory_order_release);
-}
 }

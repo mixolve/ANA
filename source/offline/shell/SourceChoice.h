@@ -25,6 +25,7 @@ struct SourceChoice
     uint64_t audioContentFingerprint = 0;
     bool hasAudioContentFingerprint = false;
     juce::String audioSourcePath;
+    bool selectedByHost = false;
 
     bool operator==(const SourceChoice& other) const
     {
@@ -43,6 +44,7 @@ struct SourceChoice
             && juce::approximatelyEqual(gain, other.gain)
             && hostEnumerated == other.hostEnumerated
             && activeTake == other.activeTake
+            && selectedByHost == other.selectedByHost
             && audioContentFingerprint == other.audioContentFingerprint
             && hasAudioContentFingerprint == other.hasAudioContentFingerprint;
     }

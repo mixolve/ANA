@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Controls.h"
+#include "Theme.h"
 
 #include <functional>
 #include <memory>
@@ -13,6 +13,7 @@ public:
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent& event) override;
     bool keyPressed(const juce::KeyPress& key) override;
 
 private:
@@ -21,11 +22,20 @@ private:
                                              const void* data,
                                              size_t dataSize);
 
-    juce::HyperlinkButton webLink { "WEB", juce::URL("https://mixolve.cc/") };
-    juce::HyperlinkButton manualLink { "MANUAL", juce::URL() };
-    juce::HyperlinkButton licensesLink { "LICENSES", juce::URL() };
-    std::vector<std::unique_ptr<EllipsisLabel>> textLabels;
+    std::unique_ptr<juce::Component> webLink, manualLink, licensesLink;
+    std::vector<std::unique_ptr<juce::Component>> textLabels;
     std::vector<juce::Component*> contentRows;
-    ControlButton okButton { "OK" };
     std::function<void()> onClose;
+
+    struct EmailCopyListener final : juce::MouseListener
+    {
+        void mouseUp(const juce::MouseEvent&) override
+        {
+            if (onClick != nullptr)
+                onClick();
+        }
+
+        std::function<void()> onClick;
+    };
+    EmailCopyListener emailCopyListener;
 };

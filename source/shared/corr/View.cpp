@@ -31,7 +31,7 @@ juce::Colour readGraphColour(const PluginProcessor& processor, const char* param
 float readGraphOpacity(const PluginProcessor& processor) noexcept
 {
     return juce::jlimit(0.01f, 1.0f, readParameterValue(
-        processor, PluginProcessor::corrGraphOpacityParameterId, 100.0f) * 0.01f);
+        processor, PluginProcessor::corrGraphOpacityParameterId, 50.0f) * 0.01f);
 }
 }
 
@@ -46,10 +46,12 @@ CorrView::CorrView(PluginProcessor& processorRef)
       rangeHighControl(processorRef.getParameters(), PluginProcessor::corrRangeHighParameterId,
                        "HIGH", [] (const double value) { return formatCorrCoefficient(value); })
 {
-    for (auto* component : std::array<juce::Component*, 11> {
+    setName("corr-graph");
+    frequencyRangeSlider.setComponentID("corr-frequency-range");
+    corrRangeSlider.setComponentID("corr-coefficient-range");
+    for (auto* component : std::array<juce::Component*, 8> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl,
-             &cursorReadoutLabel, &cursorNoteReadoutLabel, &cursorVerticalReadoutLabel, &phaseModeButton, &freqModeButton,
-             &signedModeButton, &frequencyRangeSlider })
+             &cursorReadoutLabel, &cursorNoteReadoutLabel, &cursorVerticalReadoutLabel, &frequencyRangeSlider })
         addAndMakeVisible(*component);
     addAndMakeVisible(corrRangeSlider);
 
@@ -57,6 +59,7 @@ CorrView::CorrView(PluginProcessor& processorRef)
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
     {
         control->setCompact(true);
+        control->setRangeAdjustmentEnabled(false);
         control->onValueChanged = [this] { repaint(); };
     }
     configureCursorReadoutLabel(cursorReadoutLabel);
@@ -65,21 +68,6 @@ CorrView::CorrView(PluginProcessor& processorRef)
 
     configureCursorReadoutLabel(cursorVerticalReadoutLabel);
 
-    phaseModeButton.onClick = [this]
-    {
-        setCorrMode(ana::corr::CorrProcessor::modeIndex(
-            ana::corr::CorrProcessor::Mode::phase));
-    };
-    freqModeButton.onClick = [this]
-    {
-        setCorrMode(ana::corr::CorrProcessor::modeIndex(
-            ana::corr::CorrProcessor::Mode::frequency));
-    };
-    signedModeButton.onClick = [this]
-    {
-        setCorrMode(ana::corr::CorrProcessor::modeIndex(
-            ana::corr::CorrProcessor::Mode::signedCorrelation));
-    };
     frequencyRangeSlider.onRangeChanged = [this]
     {
         if (! synchronisingRanges)
@@ -95,7 +83,7 @@ CorrView::CorrView(PluginProcessor& processorRef)
 
 void CorrView::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(ana::ui::background);
+    graphics.fillAll(ana::ui::windowBackground);
     const auto plotBounds = getPlotBounds();
     if (plotBounds.isEmpty())
         return;
@@ -171,9 +159,7 @@ void CorrView::paint(juce::Graphics& graphics)
     if (! processor.isCleanView() && cursorInside)
     {
         graphics.setColour(ana::ui::white);
-        const auto* cursorNotes = processor.getRawParameterValue(PluginProcessor::corrCursorNotesParameterId);
-        if (cursorReadout == nullptr || cursorReadout->load(std::memory_order_relaxed) >= 0.5f
-            || cursorNotes == nullptr || cursorNotes->load(std::memory_order_relaxed) >= 0.5f)
+        if (cursorReadout == nullptr || cursorReadout->load(std::memory_order_relaxed) >= 0.5f)
             graphics.drawLine(cursorPosition.x, plotBounds.getY(), cursorPosition.x, plotBounds.getBottom(), 0.5f);
         if (cursorVerticalReadout == nullptr || cursorVerticalReadout->load(std::memory_order_relaxed) >= 0.5f)
             graphics.drawLine(plotBounds.getX(), cursorPosition.y, plotBounds.getRight(), cursorPosition.y, 0.5f);
@@ -278,12 +264,11 @@ void CorrView::resized()
     const auto graphRight = plotBounds.getRight();
     auto topArea = juce::Rectangle<int>(plotBounds.getX(), plotBounds.getY(),
                                         plotBounds.getWidth(), ana::ui::controlHeight);
+    topArea.removeFromLeft(ana::ui::analyzer_detail::topLeftOverlayWidth(*this));
+    const int overlayWidth=ana::ui::analyzer_detail::topRightOverlayWidth(*this);
+    if(overlayWidth>0) topArea.removeFromRight(overlayWidth+(showVerticalZoom?0:bandRangeSliderHeight+ana::ui::gap.pixels()));
     auto topReadouts = topArea.removeFromRight(coefficientReadoutWidth);
     ana::ui::gap.removeFromRight(topArea);
-    ana::ui::FixedGapRow topControls(topArea);
-    signedModeButton.setBounds(topControls.takeLeft(signedModeButton.getPreferredWidth()));
-    phaseModeButton.setBounds(topControls.takeLeft(phaseModeButton.getPreferredWidth()));
-    freqModeButton.setBounds(topControls.takeLeft(freqModeButton.getPreferredWidth()));
     ana::ui::FixedGapRow topReadoutControls(topReadouts);
     rangeHighControl.setBounds(topReadoutControls.takeLeft(coefficientReadoutWidth));
     frequencyLowControl.setBounds(plotBounds.getX(), readoutY, frequencyReadoutWidth, ana::ui::controlHeight);
@@ -296,38 +281,14 @@ void CorrView::resized()
                                    frequencyReadoutWidth, ana::ui::controlHeight);
     rangeLowControl.setBounds(graphRight - coefficientReadoutWidth, readoutY,
                               coefficientReadoutWidth, ana::ui::controlHeight);
-    cursorReadoutLabel.setBounds({});
-    cursorNoteReadoutLabel.setBounds({});
-    cursorVerticalReadoutLabel.setBounds({});
-    if (showCursorHorizontal || showCursorNotes || showCursorVertical)
-    {
-        const auto left = frequencyLowControl.getRight() + ana::ui::gap.pixels();
-        const auto right = frequencyHighControl.getX() - ana::ui::gap.pixels();
-        const auto noteWidth = ana::ui::textControlWidth(4) - 2 * (ana::ui::textPadding - 4);
-        const auto baseWidth = (showCursorHorizontal ? frequencyReadoutWidth : 0)
-            + (showCursorNotes ? (showCursorHorizontal ? ana::ui::gap.pixels() : 0) + noteWidth : 0);
-        const auto verticalFits = showCursorVertical && baseWidth + (baseWidth > 0 ? ana::ui::gap.pixels() : 0)
-            + coefficientReadoutWidth <= right - left;
-        const auto cursorWidth = baseWidth
-            + (verticalFits ? (baseWidth > 0 ? ana::ui::gap.pixels() : 0) + coefficientReadoutWidth : 0);
-        const auto cursorX = juce::jlimit(left,
-            std::max(left, right - cursorWidth),
-            plotBounds.getCentreX() - cursorWidth / 2);
-        if (showCursorHorizontal)
-            cursorReadoutLabel.setBounds(cursorX, readoutY,
-                                         frequencyReadoutWidth, ana::ui::controlHeight);
-        if (showCursorNotes)
-            cursorNoteReadoutLabel.setBounds(cursorX
-                + (showCursorHorizontal ? frequencyReadoutWidth + ana::ui::gap.pixels() : 0),
-                readoutY, noteWidth, ana::ui::controlHeight);
-        if (showCursorVertical)
-            cursorVerticalReadoutLabel.setBounds(verticalFits
-                                                     ? cursorX + baseWidth + (baseWidth > 0 ? ana::ui::gap.pixels() : 0)
-                                                     : graphRight - coefficientReadoutWidth,
-                                                 verticalFits ? readoutY
-                                                     : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
-                                                 coefficientReadoutWidth, ana::ui::controlHeight);
-    }
+    // The same top-of-window cursor layout is shared by all CORR modes.
+    const auto cursorNoteWidth = ana::ui::textControlWidth(4)
+        - 2 * (ana::ui::textPadding - 4);
+    ana::ui::analyzer_detail::layoutCursorReadoutsAtTop(topArea, plotBounds, {
+        { &cursorReadoutLabel, showCursorHorizontal ? frequencyReadoutWidth : 0 },
+        { &cursorNoteReadoutLabel, showCursorNotes ? cursorNoteWidth : 0 },
+        { &cursorVerticalReadoutLabel, showCursorVertical ? coefficientReadoutWidth : 0 }
+    });
     frequencyRangeSlider.setBounds(showHorizontalZoom
         ? juce::Rectangle<int>(0, getHeight() - bandRangeSliderHeight,
                                getWidth() - (showVerticalZoom
@@ -359,6 +320,7 @@ void CorrView::mouseMove(const juce::MouseEvent& event)
     if (processor.isCleanView())
     {
         cursorInside = false;
+        clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
         return;
     }
 
@@ -400,12 +362,15 @@ void CorrView::mouseMove(const juce::MouseEvent& event)
                                                highRange - normalisedY * (highRange - lowRange)),
                                            juce::dontSendNotification);
     }
+    else if (!isInsidePluginWindow(*this, event.getScreenPosition()))
+        clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
     repaint();
 }
 
-void CorrView::mouseExit(const juce::MouseEvent&)
+void CorrView::mouseExit(const juce::MouseEvent& event)
 {
-    cursorInside = false;
+    ana::ui::analyzer_detail::handleCursorExit(*this, event.getScreenPosition(), cursorInside,
+        cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
     repaint();
 }
 
@@ -414,6 +379,7 @@ void CorrView::refreshMode()
     displayedOffline = processor.isOfflineMode();
     displayedRevision = 0;
     cursorInside = false;
+    clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
     primaryCorr.clear();
     secondaryCorr.clear();
     refreshControls();
@@ -423,6 +389,12 @@ void CorrView::refreshMode()
 
 void CorrView::timerCallback()
 {
+    if (!isShowing()) return;
+    if (!isInsidePluginWindow(*this, juce::Desktop::getMousePosition()))
+    {
+        cursorInside = false;
+        clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
+    }
     if (displayedOffline != processor.isOfflineMode())
         refreshMode();
     syncRangeSliders();
@@ -475,20 +447,14 @@ int CorrView::getCorrModeIndex() const noexcept
 
 void CorrView::syncRangeSliders()
 {
-    const auto read = [this] (const char* id, const float fallback)
-    {
-        if (const auto* value = processor.getRawParameterValue(id))
-            return value->load(std::memory_order_relaxed);
-        return fallback;
-    };
-    const auto lowFrequency = read(PluginProcessor::corrLowParameterId, ana::frequency_scale::minimumHz);
-    const auto highFrequency = read(PluginProcessor::corrHighParameterId, ana::frequency_scale::maximumHz);
+    const auto lowFrequency = readParameterValue(processor, PluginProcessor::corrLowParameterId, ana::frequency_scale::minimumHz);
+    const auto highFrequency = readParameterValue(processor, PluginProcessor::corrHighParameterId, ana::frequency_scale::maximumHz);
     const auto frequencyMode = getCorrModeIndex()
         == ana::corr::CorrProcessor::modeIndex(ana::corr::CorrProcessor::Mode::frequency);
     const auto minimumRange = ana::corr::rangeMinimum(frequencyMode);
     const auto lowRange = std::max(minimumRange,
-                                   read(PluginProcessor::corrRangeLowParameterId, minimumRange));
-    const auto highRange = read(PluginProcessor::corrRangeHighParameterId,
+                                   readParameterValue(processor, PluginProcessor::corrRangeLowParameterId, minimumRange));
+    const auto highRange = readParameterValue(processor, PluginProcessor::corrRangeHighParameterId,
                                 ana::corr::defaultHighCoefficient);
     const auto* horizontalReadouts = processor.getRawParameterValue(
         PluginProcessor::corrHorizontalReadoutsParameterId);
@@ -535,18 +501,6 @@ void CorrView::refreshControls()
     const auto mode = getCorrModeIndex();
     const auto freqMode = mode
         == ana::corr::CorrProcessor::modeIndex(ana::corr::CorrProcessor::Mode::frequency);
-    phaseModeButton.setVisible(true);
-    freqModeButton.setVisible(true);
-    signedModeButton.setVisible(true);
-    phaseModeButton.setToggleState(
-        mode == ana::corr::CorrProcessor::modeIndex(ana::corr::CorrProcessor::Mode::phase),
-        juce::dontSendNotification);
-    freqModeButton.setToggleState(
-        mode == ana::corr::CorrProcessor::modeIndex(ana::corr::CorrProcessor::Mode::frequency),
-        juce::dontSendNotification);
-    signedModeButton.setToggleState(
-        mode == ana::corr::CorrProcessor::modeIndex(ana::corr::CorrProcessor::Mode::signedCorrelation),
-        juce::dontSendNotification);
     auto& lowRangeSlider = rangeLowControl.getSlider();
     auto& highRangeSlider = rangeHighControl.getSlider();
     const auto minimumRange = static_cast<double>(ana::corr::rangeMinimum(freqMode));

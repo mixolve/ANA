@@ -11,8 +11,8 @@ enum class ColourMap
 };
 
 inline constexpr std::array<const char*, 2> colourMapLabels {
-    "MULTICOLOR 2",
-    "GRAYSCALE"
+    "MULTI COLOR 2",
+    "GRAY SCALE"
 };
 inline constexpr int defaultColourMapIndex = 0;
 
@@ -39,5 +39,5 @@ inline constexpr float minimumDisplaySpanDecibels = 1.0f;
 inline constexpr float minimumSlopeDecibelsPerOctave = -12.0f;
 inline constexpr float maximumSlopeDecibelsPerOctave = 12.0f;
 inline constexpr float defaultSlopeDecibelsPerOctave = 4.5f;
-inline constexpr float slopeStepDecibelsPerOctave = 0.1f;
+inline constexpr float slopeStepDecibelsPerOctave = 0.01f;
 }

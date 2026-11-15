@@ -5,7 +5,7 @@
 #include "shared/spec/Settings.h"
 #include "shared/spec/SpectrumProcessing.h"
 #include "shared/shell/AnalyzerViewUtilities.h"
-#include "shared/spec/SpectrogramFrequencyScale.h"
+#include "shared/spec/MapFrequencyScale.h"
 #include "shared/shell/GraphColours.h"
 
 #include <algorithm>
@@ -47,6 +47,8 @@ float sampleMapSpectrum(const std::vector<float>& spectrum,
         return floorDb;
 
     const auto maxBin = static_cast<int>(spectrum.size()) - 1;
+    if (centreFrequency > static_cast<float>(maxBin) * binFrequency)
+        return floorDb;
     const auto clampBin = [maxBin, binFrequency] (const float frequency)
     {
         return juce::jlimit(1.0f, static_cast<float>(maxBin), frequency / binFrequency);
@@ -85,16 +87,13 @@ RealtimeSpecView::RealtimeSpecView(PluginProcessor& processorRef,
                        "RANGE-HIGH", [] (const double value) { return formatReadoutLevel(value); }),
       snapshots(snapshotData)
 {
-    for (auto* control : std::array<ParameterControl*, 2> {
-             &frequencyLowControl, &frequencyHighControl })
-        control->setWheelSpeedMultiplier(1600.0f);
-    for (auto* control : std::array<ParameterControl*, 2> {
-             &rangeLowControl, &rangeHighControl })
-        control->setWheelSpeedMultiplier(40.0f);
+    setName(processor.isSpecMapView() ? "spec-map-graph" : "spec-freq-graph");
+    frequencyRangeSlider.setComponentID("spec-frequency-range");
+    verticalRangeSlider.setComponentID("spec-level-range");
 
     for (auto* component : std::array<juce::Component*, 6> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl,
-             &frequencyRangeSlider, &magnitudeRangeSlider })
+             &frequencyRangeSlider, &verticalRangeSlider })
         addAndMakeVisible(*component);
 
     configureCursorReadoutLabel(cursorReadoutLabel);
@@ -110,12 +109,6 @@ RealtimeSpecView::RealtimeSpecView(PluginProcessor& processorRef,
 
     viewMode = processor.isSpecMapView() ? ViewMode::map : ViewMode::frequency;
     processor.getSpecProcessor().setRealtimeMapMode(viewMode == ViewMode::map);
-    freqButton.setToggleState(viewMode == ViewMode::frequency, juce::dontSendNotification);
-    mapButton.setToggleState(viewMode == ViewMode::map, juce::dontSendNotification);
-    freqButton.onClick = [this] { setViewMode(ViewMode::frequency); };
-    mapButton.onClick = [this] { setViewMode(ViewMode::map); };
-    addAndMakeVisible(freqButton);
-    addAndMakeVisible(mapButton);
 
     for (size_t index = 0; index < monitorButtons.size(); ++index)
     {
@@ -145,6 +138,7 @@ RealtimeSpecView::RealtimeSpecView(PluginProcessor& processorRef,
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
     {
         control->setCompact(true);
+        control->setRangeAdjustmentEnabled(false);
         control->onValueChanged = [this] { repaint(); };
     }
 
@@ -172,7 +166,7 @@ RealtimeSpecView::RealtimeSpecView(PluginProcessor& processorRef,
         if (! synchronisingRanges)
             updateFrequencyRangeFromSlider();
     };
-    magnitudeRangeSlider.onRangeChanged = [this]
+    verticalRangeSlider.onRangeChanged = [this]
     {
         if (! synchronisingRanges)
             updateVerticalRangeFromSlider();
@@ -187,6 +181,7 @@ bool RealtimeSpecView::captureSnapshot(const size_t snapshotIndex)
         return false;
 
     ana::spec::SpectrumSnapshot captured;
+    captured.name = snapshots[snapshotIndex].name;
     captured.colour = snapshots[snapshotIndex].colour;
     captured.gainDb = snapshots[snapshotIndex].gainDb;
 
@@ -239,7 +234,7 @@ void RealtimeSpecView::clearSpectrogram()
 
 void RealtimeSpecView::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(ana::ui::background);
+    graphics.fillAll(ana::ui::windowBackground);
     const auto plotBounds = getPlotBounds();
     if (plotBounds.isEmpty())
         return;
@@ -273,7 +268,7 @@ void RealtimeSpecView::paint(juce::Graphics& graphics)
         {
             const auto cursorPane = splitPaneForCursor(plotBounds, cursorPosition.y, useSplitView);
             graphics.setColour(ana::ui::white.withAlpha(0.65f));
-            if (showVerticalCursor || showNotes)
+            if (showVerticalCursor)
                 graphics.drawLine(cursorPane.getX(), cursorPosition.y,
                                   cursorPane.getRight(), cursorPosition.y, 0.5f);
             if (showHorizontalCursor)
@@ -372,7 +367,7 @@ void RealtimeSpecView::paint(juce::Graphics& graphics)
     {
         const auto cursorPane = splitPaneForCursor(plotBounds, cursorPosition.y, useSplitView);
         graphics.setColour(ana::ui::white);
-        if (showHorizontalCursor || showCursorNotes)
+        if (showHorizontalCursor)
             graphics.drawLine(cursorPosition.x, plotBounds.getY(), cursorPosition.x, plotBounds.getBottom(), 0.5f);
         if (showVerticalCursor)
             graphics.drawLine(cursorPane.getX(), cursorPosition.y, cursorPane.getRight(), cursorPosition.y, 0.5f);
@@ -394,7 +389,7 @@ void RealtimeSpecView::resized()
     const auto showCursorNotes = readVisibility(PluginProcessor::specCursorNotesParameterId);
     const auto showCursorVertical = (freqMode || mapMode)
         && readVisibility(PluginProcessor::specCursorVerticalReadoutParameterId);
-    const auto showMonitor = readVisibility(PluginProcessor::specMonitorControlsParameterId);
+    const bool showMonitor = false;
     const auto showHorizontalZoom = freqMode
         && readVisibility(PluginProcessor::specHorizontalZoomParameterId);
     const auto showVerticalZoom = (freqMode || mapMode)
@@ -411,13 +406,14 @@ void RealtimeSpecView::resized()
         : (freqMode ? levelReadoutWidth : 0);
     auto topArea = juce::Rectangle<int>(plotBounds.getX(), plotBounds.getY(),
                                         plotBounds.getWidth(), ana::ui::controlHeight);
+    topArea.removeFromLeft(ana::ui::analyzer_detail::topLeftOverlayWidth(*this));
+    const int overlayWidth=ana::ui::analyzer_detail::topRightOverlayWidth(*this);
+    if(overlayWidth>0) topArea.removeFromRight(overlayWidth+(showVerticalZoom?0:bandRangeSliderHeight+ana::ui::gap.pixels()));
     auto topReadouts = topArea.removeFromRight(rangeReadoutWidth);
     if (rangeReadoutWidth > 0)
         ana::ui::gap.removeFromRight(topArea);
 
     ana::ui::FixedGapRow topControls(topArea);
-    freqButton.setBounds(topControls.takeLeft(freqButton.getPreferredWidth()));
-    mapButton.setBounds(topControls.takeLeft(mapButton.getPreferredWidth()));
     int monitorWidth = 0;
     for (const auto& button : monitorButtons)
         monitorWidth += button->getPreferredWidth() + (monitorWidth > 0 ? ana::ui::gap.pixels() : 0);
@@ -488,67 +484,31 @@ void RealtimeSpecView::resized()
         rangeLowControl.setBounds({});
     }
 
-    cursorReadoutLabel.setBounds({});
-    cursorNoteReadoutLabel.setBounds({});
-    cursorVerticalReadoutLabel.setBounds({});
-    if ((showCursorHorizontal || showCursorNotes || showCursorVertical) && freqMode)
+    // Place the three hover readouts in the header of FREQ and MAP.
+    // Unlike the axis labels they must not move with the lower axis.
+    const auto cursorNoteWidth = ana::ui::textControlWidth(4)
+        - 2 * (ana::ui::textPadding - cursorNotePadding);
+    if (freqMode)
     {
-        const auto left = frequencyLowControl.getRight() + ana::ui::gap.pixels();
-        const auto right = frequencyHighControl.getX() - ana::ui::gap.pixels();
-        const auto noteWidth = ana::ui::textControlWidth(4)
-            - 2 * (ana::ui::textPadding - cursorNotePadding);
-        const auto cursorBaseWidth = (showCursorHorizontal ? frequencyReadoutWidth : 0)
-            + (showCursorNotes ? (showCursorHorizontal ? ana::ui::gap.pixels() : 0) + noteWidth : 0);
-        const auto verticalFits = showCursorVertical && cursorBaseWidth
-            + (cursorBaseWidth > 0 ? ana::ui::gap.pixels() : 0)
-            + levelReadoutWidth <= right - left;
-        const auto cursorWidth = cursorBaseWidth
-            + (verticalFits ? (cursorBaseWidth > 0 ? ana::ui::gap.pixels() : 0) + levelReadoutWidth : 0);
-        const auto cursorX = juce::jlimit(left, std::max(left, right - cursorWidth),
-                                          plotBounds.getCentreX() - cursorWidth / 2);
-        if (showCursorHorizontal)
-            cursorReadoutLabel.setBounds(cursorX, readoutY,
-                                         frequencyReadoutWidth, ana::ui::controlHeight);
-        if (showCursorNotes)
-            cursorNoteReadoutLabel.setBounds(cursorX
-                                                + (showCursorHorizontal ? frequencyReadoutWidth + ana::ui::gap.pixels() : 0), readoutY,
-                                             noteWidth, ana::ui::controlHeight);
-        if (showCursorVertical)
-            cursorVerticalReadoutLabel.setBounds(verticalFits
-                                                     ? cursorX + cursorBaseWidth
-                                                         + (cursorBaseWidth > 0 ? ana::ui::gap.pixels() : 0)
-                                                     : graphRight - levelReadoutWidth,
-                                                 verticalFits ? readoutY
-                                                     : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
-                                                 levelReadoutWidth, ana::ui::controlHeight);
+        ana::ui::analyzer_detail::layoutCursorReadoutsAtTop(topArea, plotBounds, {
+            { &cursorReadoutLabel, showCursorHorizontal ? frequencyReadoutWidth : 0 },
+            { &cursorNoteReadoutLabel, showCursorNotes ? cursorNoteWidth : 0 },
+            { &cursorVerticalReadoutLabel, showCursorVertical ? levelReadoutWidth : 0 }
+        });
     }
-    else if ((showCursorHorizontal || showCursorNotes || showCursorVertical) && mapMode)
+    else if (mapMode)
     {
-        const auto right = frequencyLowControl.getX() - ana::ui::gap.pixels();
-        const auto left = plotBounds.getX();
-        const auto noteWidth = ana::ui::textControlWidth(4)
-            - 2 * (ana::ui::textPadding - cursorNotePadding);
-        const auto frequencyWidth = (showCursorVertical ? mapCursorFrequencyWidth : 0)
-            + (showCursorNotes ? (showCursorVertical ? ana::ui::gap.pixels() : 0) + noteWidth : 0);
-        const auto timeFits = showCursorHorizontal && frequencyWidth
-            + (frequencyWidth > 0 ? ana::ui::gap.pixels() : 0) + mapCursorTimeWidth <= right - left;
-        const auto cursorWidth = frequencyWidth
-            + (timeFits ? (frequencyWidth > 0 ? ana::ui::gap.pixels() : 0) + mapCursorTimeWidth : 0);
-        const auto cursorX = juce::jlimit(left, std::max(left, right - cursorWidth),
-                                        plotBounds.getCentreX() - cursorWidth / 2);
-        if (showCursorVertical)
-            cursorVerticalReadoutLabel.setBounds(cursorX, readoutY,
-                mapCursorFrequencyWidth, ana::ui::controlHeight);
-        if (showCursorNotes)
-            cursorNoteReadoutLabel.setBounds(cursorX
-                + (showCursorVertical ? mapCursorFrequencyWidth + ana::ui::gap.pixels() : 0),
-                readoutY, noteWidth, ana::ui::controlHeight);
-        if (showCursorHorizontal)
-            cursorReadoutLabel.setBounds(timeFits
-                ? cursorX + frequencyWidth + (frequencyWidth > 0 ? ana::ui::gap.pixels() : 0)
-                : graphRight - mapCursorTimeWidth,
-                timeFits ? readoutY : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
-                mapCursorTimeWidth, ana::ui::controlHeight);
+        ana::ui::analyzer_detail::layoutCursorReadoutsAtTop(topArea, plotBounds, {
+            { &cursorVerticalReadoutLabel, showCursorVertical ? mapCursorFrequencyWidth : 0 },
+            { &cursorNoteReadoutLabel, showCursorNotes ? cursorNoteWidth : 0 },
+            { &cursorReadoutLabel, showCursorHorizontal ? mapCursorTimeWidth : 0 }
+        });
+    }
+    else
+    {
+        cursorReadoutLabel.setBounds({});
+        cursorNoteReadoutLabel.setBounds({});
+        cursorVerticalReadoutLabel.setBounds({});
     }
 
     const auto horizontalZoomWidth = getWidth() - (showVerticalZoom
@@ -557,7 +517,7 @@ void RealtimeSpecView::resized()
         ? juce::Rectangle<int>(0, getHeight() - bandRangeSliderHeight,
                                horizontalZoomWidth, bandRangeSliderHeight)
         : juce::Rectangle<int>());
-    magnitudeRangeSlider.setBounds(showVerticalZoom
+    verticalRangeSlider.setBounds(showVerticalZoom
         ? juce::Rectangle<int>(getWidth() - bandZoomSliderWidth, 0,
                                bandZoomSliderWidth, getHeight())
         : juce::Rectangle<int>());
@@ -588,35 +548,20 @@ void RealtimeSpecView::mouseDown(const juce::MouseEvent& event)
 
 void RealtimeSpecView::mouseMove(const juce::MouseEvent& event)
 {
-    if (processor.isCleanView())
-    {
-        cursorInside = false;
-        return;
-    }
-
-    const auto nextCursorInside = getPlotBounds().contains(event.position);
-    if (! nextCursorInside)
-    {
-        if (cursorInside)
-        {
-            cursorInside = false;
-            repaint();
-        }
-        return;
-    }
-
-    if (cursorInside && cursorPosition == event.position)
-        return;
-
-    cursorInside = true;
-    cursorPosition = event.position;
-    updateCursorReadouts();
-    repaint();
+    ana::ui::analyzer_detail::handleCursorHover(
+        *this, cursorInside, cursorPosition, getPlotBounds(), event.position,
+        processor.isCleanView(), [this] { updateCursorReadouts(); });
 }
 
 void RealtimeSpecView::updateCursorReadouts()
 {
-    if ((cursorInside || lastCursorFrequency > 0.0f) && ! getPlotBounds().isEmpty())
+    if (processor.isCleanView() || getPlotBounds().isEmpty())
+    {
+        clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
+        return;
+    }
+    if (!cursorInside)
+        return;
     {
         const auto plotBounds = getPlotBounds();
         const auto frequencyRange = readSpecFrequencyRange(processor);
@@ -670,39 +615,30 @@ void RealtimeSpecView::updateCursorReadouts()
     }
 }
 
-void RealtimeSpecView::mouseExit(const juce::MouseEvent&)
+void RealtimeSpecView::mouseExit(const juce::MouseEvent& event)
 {
-    if (! cursorInside)
-        return;
-
-    cursorInside = false;
+    ana::ui::analyzer_detail::handleCursorExit(*this, event.getScreenPosition(), cursorInside,
+        cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
     repaint();
 }
 
 juce::Rectangle<float> RealtimeSpecView::getPlotBounds() const noexcept
 {
-    auto bounds = getLocalBounds().toFloat();
-    if (processor.isCleanView())
-        return bounds;
-    const auto* horizontalZoom = processor.getRawParameterValue(
-        PluginProcessor::specHorizontalZoomParameterId);
-    const auto* verticalZoom = processor.getRawParameterValue(
-        PluginProcessor::specVerticalZoomParameterId);
-    const auto freqMode = viewMode == ViewMode::frequency;
-    const auto mapMode = viewMode == ViewMode::map;
-    const auto showHorizontalZoom = freqMode && (horizontalZoom == nullptr
-        || horizontalZoom->load(std::memory_order_relaxed) >= 0.5f);
-    const auto showVerticalZoom = (freqMode || mapMode) && (verticalZoom == nullptr
-        || verticalZoom->load(std::memory_order_relaxed) >= 0.5f);
-    if (showHorizontalZoom)
-        bounds.removeFromBottom(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
-    if (showVerticalZoom)
-        bounds.removeFromRight(static_cast<float>(bandZoomSliderWidth + ana::ui::gap.pixels()));
-    return bounds;
+    return ana::ui::analyzer_detail::specPlotBounds(
+        *this, processor, viewMode == ViewMode::frequency,
+        viewMode == ViewMode::map, false);
 }
 
 void RealtimeSpecView::timerCallback()
 {
+    // The audio processor continues collecting data while this view is hidden.
+    // Do not build spectrogram textures or poll graph controls off-screen.
+    if (!isShowing()) return;
+    if (!isInsidePluginWindow(*this, juce::Desktop::getMousePosition()))
+    {
+        cursorInside = false;
+        clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
+    }
     if (processor.isOfflineMode())
         return;
     const auto restoredViewMode = processor.isSpecMapView()
@@ -730,7 +666,7 @@ void RealtimeSpecView::timerCallback()
         || ! juce::approximatelyEqual(renderedMapRangeHigh, highRange);
     const auto slopeChanged = ! juce::approximatelyEqual(renderedMapSlope, slope);
     const auto highQuality = readParameterValue(
-        processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f;
+        processor, PluginProcessor::specMapHighQualityRenderingParameterId, 1.0f) >= 0.5f;
     const auto highQualityChanged = renderedMapHighQuality != (highQuality ? 1 : 0);
     const auto mapLeftToRight = readParameterValue(
         processor, PluginProcessor::specMapLeftToRightParameterId, 0.0f) >= 0.5f;
@@ -793,26 +729,16 @@ void RealtimeSpecView::timerCallback()
 
 void RealtimeSpecView::refreshControls()
 {
-    freqButton.setVisible(true);
-    mapButton.setVisible(true);
-    const auto readValue = [this] (const char* parameterId, const float fallback)
-    {
-        if (const auto* value = processor.getRawParameterValue(parameterId))
-            return value->load(std::memory_order_relaxed);
-        return fallback;
-    };
     const auto freqMode = viewMode == ViewMode::frequency;
     const auto mapMode = viewMode == ViewMode::map;
-    const auto showMonitor = readValue(PluginProcessor::specMonitorControlsParameterId, 1.0f) >= 0.5f;
-    const auto showHorizontalZoom = readValue(PluginProcessor::specHorizontalZoomParameterId, 1.0f) >= 0.5f;
-    const auto showVerticalZoom = readValue(PluginProcessor::specVerticalZoomParameterId, 1.0f) >= 0.5f;
-    const auto showHorizontalReadouts = readValue(PluginProcessor::specHorizontalReadoutsParameterId, 1.0f) >= 0.5f;
-    const auto showVerticalReadouts = readValue(PluginProcessor::specVerticalReadoutsParameterId, 1.0f) >= 0.5f;
-    const auto showCursorHorizontal = readValue(PluginProcessor::specCursorReadoutParameterId, 1.0f) >= 0.5f;
-    const auto showCursorNotes = readValue(PluginProcessor::specCursorNotesParameterId, 1.0f) >= 0.5f;
-    const auto showCursorVertical = readValue(PluginProcessor::specCursorVerticalReadoutParameterId, 1.0f) >= 0.5f;
-    freqButton.setToggleState(freqMode, juce::dontSendNotification);
-    mapButton.setToggleState(mapMode, juce::dontSendNotification);
+    const bool showMonitor = false;
+    const auto showHorizontalZoom = readParameterValue(processor, PluginProcessor::specHorizontalZoomParameterId, 1.0f) >= 0.5f;
+    const auto showVerticalZoom = readParameterValue(processor, PluginProcessor::specVerticalZoomParameterId, 1.0f) >= 0.5f;
+    const auto showHorizontalReadouts = readParameterValue(processor, PluginProcessor::specHorizontalReadoutsParameterId, 1.0f) >= 0.5f;
+    const auto showVerticalReadouts = readParameterValue(processor, PluginProcessor::specVerticalReadoutsParameterId, 1.0f) >= 0.5f;
+    const auto showCursorHorizontal = readParameterValue(processor, PluginProcessor::specCursorReadoutParameterId, 1.0f) >= 0.5f;
+    const auto showCursorNotes = readParameterValue(processor, PluginProcessor::specCursorNotesParameterId, 1.0f) >= 0.5f;
+    const auto showCursorVertical = readParameterValue(processor, PluginProcessor::specCursorVerticalReadoutParameterId, 1.0f) >= 0.5f;
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto modeIndex = ana::spec::monitorModeIndex(monitorMode);
     const auto splitAvailable = ana::spec::supportsSplitView(monitorMode);
@@ -824,10 +750,10 @@ void RealtimeSpecView::refreshControls()
     splitButton.setVisible(showMonitor && freqMode);
     splitButton.setEnabled(splitAvailable);
     splitButton.setToggleState(splitAvailable
-                                   && readValue(PluginProcessor::specSplitViewParameterId, 0.0f) >= 0.5f,
+                                   && readParameterValue(processor, PluginProcessor::specSplitViewParameterId, 0.0f) >= 0.5f,
                                juce::dontSendNotification);
     frequencyRangeSlider.setVisible(showHorizontalZoom && freqMode);
-    magnitudeRangeSlider.setVisible(showVerticalZoom && (freqMode || mapMode));
+    verticalRangeSlider.setVisible(showVerticalZoom && (freqMode || mapMode));
 
     frequencyLowControl.setVisible((freqMode && showHorizontalReadouts)
         || (mapMode && showVerticalReadouts));
@@ -844,6 +770,7 @@ void RealtimeSpecView::refreshControls()
 
 void RealtimeSpecView::setViewMode(const ViewMode nextViewMode)
 {
+    setName(nextViewMode == ViewMode::map ? "spec-map-graph" : "spec-freq-graph");
     if (viewMode == nextViewMode)
         return;
 
@@ -851,6 +778,9 @@ void RealtimeSpecView::setViewMode(const ViewMode nextViewMode)
     processor.setSpecMapView(viewMode == ViewMode::map);
     processor.getSpecProcessor().setRealtimeMapMode(viewMode == ViewMode::map);
     cursorInside = false;
+    // The pointer is still on MAP/FREQ, so no plot mouseMove arrives yet.
+    // Discard readouts from the previous coordinate system immediately.
+    clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
     if (viewMode == ViewMode::map)
     {
         resetSpectrogramImage();
@@ -874,6 +804,10 @@ void RealtimeSpecView::resetSpectrogramImage()
         && spectrogramImage.getWidth() == width
         && spectrogramImage.getHeight() == height
         && realtimeSpectrogramLevels.size() == static_cast<size_t>(width * height))
+        return;
+
+    // A transient degenerate layout must not collapse the retained levels.
+    if (spectrogramImage.isValid() && (width < 2 || height < 2))
         return;
 
     const auto oldWidth = spectrogramImage.isValid() ? spectrogramImage.getWidth() : 0;
@@ -955,7 +889,7 @@ void RealtimeSpecView::rebuildRealtimeSpectrogramImage()
     renderedMapRangeHigh = highRange;
     renderedMapSlope = slope;
     renderedMapHighQuality = readParameterValue(
-        processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f ? 1 : 0;
+        processor, PluginProcessor::specMapHighQualityRenderingParameterId, 1.0f) >= 0.5f ? 1 : 0;
     renderedMapFrequencyScale = static_cast<int>(frequencyScale);
     renderedMapColourMap = static_cast<int>(colourMap);
 }
@@ -996,7 +930,7 @@ void RealtimeSpecView::appendSpectrogramFrame(const int columnCount)
     const auto highRange = displayRange.high;
     const auto binFrequency = static_cast<float>(sampleRate) / static_cast<float>(fftSize);
     const auto highQuality = readParameterValue(
-        processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f;
+        processor, PluginProcessor::specMapHighQualityRenderingParameterId, 1.0f) >= 0.5f;
     const auto width = spectrogramImage.getWidth();
     const auto height = spectrogramImage.getHeight();
     const auto columnsToAppend = juce::jlimit(1, width, columnCount);
@@ -1144,12 +1078,12 @@ void RealtimeSpecView::syncRangeSliders()
             frequencyScale,
             ana::frequency_scale::minimumHz,
             ana::frequency_scale::maximumHz, highFrequency);
-        magnitudeRangeSlider.setRange(1.0f - upper, 1.0f - lower);
+        verticalRangeSlider.setRange(1.0f - upper, 1.0f - lower);
     }
     else
     {
         constexpr auto magnitudeSpan = ana::spec::maximumDisplayDecibels - ana::spec::minimumDisplayDecibels;
-        magnitudeRangeSlider.setRange((ana::spec::maximumDisplayDecibels - std::max(lowRange, highRange)) / magnitudeSpan,
+        verticalRangeSlider.setRange((ana::spec::maximumDisplayDecibels - std::max(lowRange, highRange)) / magnitudeSpan,
                                       (ana::spec::maximumDisplayDecibels - std::min(lowRange, highRange)) / magnitudeSpan);
     }
     if (processor.isCleanView())
@@ -1158,15 +1092,9 @@ void RealtimeSpecView::syncRangeSliders()
 
 void RealtimeSpecView::updateFrequencyRangeFromSlider()
 {
-    const auto frequencyScale = readSpecFrequencyScale(processor);
-    const auto lowFrequency = ana::frequency_scale::frequencyAt(
-        frequencyScale, ana::frequency_scale::minimumHz,
-        ana::frequency_scale::maximumHz, frequencyRangeSlider.getRangeStart());
-    const auto highFrequency = ana::frequency_scale::frequencyAt(
-        frequencyScale, ana::frequency_scale::minimumHz,
-        ana::frequency_scale::maximumHz, frequencyRangeSlider.getRangeEnd());
-    frequencyLowControl.getSlider().setValue(lowFrequency, juce::sendNotificationSync);
-    frequencyHighControl.getSlider().setValue(highFrequency, juce::sendNotificationSync);
+    ana::spec::display::applyFrequencySliderToRange(
+        readSpecFrequencyScale(processor), frequencyRangeSlider,
+        frequencyLowControl, frequencyHighControl);
     repaint();
 }
 
@@ -1174,29 +1102,16 @@ void RealtimeSpecView::updateVerticalRangeFromSlider()
 {
     if (viewMode == ViewMode::map)
     {
-        const auto frequencyScale = readSpecFrequencyScale(processor);
-        const auto highFrequency = ana::frequency_scale::frequencyAt(
-            frequencyScale, ana::frequency_scale::minimumHz,
-            ana::frequency_scale::maximumHz, 1.0f - magnitudeRangeSlider.getRangeStart());
-        const auto lowFrequency = ana::frequency_scale::frequencyAt(
-            frequencyScale, ana::frequency_scale::minimumHz,
-            ana::frequency_scale::maximumHz, 1.0f - magnitudeRangeSlider.getRangeEnd());
-        frequencyLowControl.getSlider().setValue(lowFrequency, juce::sendNotificationSync);
-        frequencyHighControl.getSlider().setValue(highFrequency, juce::sendNotificationSync);
+        ana::spec::display::applyVerticalSliderToFrequencyRange(
+            readSpecFrequencyScale(processor), verticalRangeSlider,
+            frequencyLowControl, frequencyHighControl);
 
         clearSpectrogram();
         repaint();
         return;
     }
 
-    constexpr auto span = ana::spec::maximumDisplayDecibels - ana::spec::minimumDisplayDecibels;
-    const auto highRange = ana::spec::maximumDisplayDecibels - magnitudeRangeSlider.getRangeStart() * span;
-    const auto lowRange = ana::spec::maximumDisplayDecibels - magnitudeRangeSlider.getRangeEnd() * span;
-    rangeLowControl.getSlider().setValue(lowRange, juce::sendNotificationSync);
-    rangeHighControl.getSlider().setValue(highRange, juce::sendNotificationSync);
-
-    // Recolour on the refresh cadence, not every mouseDrag, to keep large maps responsive.
-    if (viewMode == ViewMode::map)
-        scheduleMapImageRebuild();
+    ana::spec::display::applyVerticalSliderToLevelRange(
+        verticalRangeSlider, rangeLowControl, rangeHighControl);
     repaint();
 }

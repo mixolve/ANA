@@ -1,5 +1,6 @@
 #include "OscController.h"
 #include "Processor.h"
+#include "shared/shell/HostSlots.h"
 #include "shared/spec/FrequencyScale.h"
 
 #include <algorithm>
@@ -126,7 +127,8 @@ void OscController::oscMessageReceived(const juce::OSCMessage& message)
         return;
 
     const auto parameterId = address.substring(juce::String(addressPrefix).length());
-    if (message.size() < 1)
+    if(parameterId=="request") { sendCurrentState(true); return; }
+    if (message.size() < 1 || !processor.getHostSlots().assigned(parameterId))
         return;
     auto* parameter = processor.getParameters().getParameter(parameterId);
     if (parameter == nullptr)
@@ -205,17 +207,12 @@ void OscController::oscMessageReceived(const juce::OSCMessage& message)
 
 void OscController::oscBundleReceived(const juce::OSCBundle& bundle)
 {
-    handleBundle(bundle);
-}
-
-void OscController::handleBundle(const juce::OSCBundle& bundle)
-{
     for (const auto& element : bundle)
     {
         if (element.isMessage())
             oscMessageReceived(element.getMessage());
         else if (element.isBundle())
-            handleBundle(element.getBundle());
+            oscBundleReceived(element.getBundle());
     }
 }
 
@@ -230,11 +227,14 @@ void OscController::sendCurrentState(const bool force)
         return;
 
     auto& state = processor.getParameters();
+    juce::String signature;
+    for(int slot=0;slot<HostSlots::count;++slot) signature+=processor.getHostSlots().targetId(slot)+"|";
+    if(signature!=assignedSignature) { assignedSignature=signature; lastSentValues.clear(); }
     for (const auto& child : state.state)
     {
         const auto id = child.getProperty("id").toString();
         auto* parameter = state.getParameter(id);
-        if (id.isEmpty() || parameter == nullptr)
+        if (id.isEmpty() || parameter == nullptr || !processor.getHostSlots().assigned(id))
             continue;
 
         const auto normalized = parameter->getValue();

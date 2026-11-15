@@ -47,9 +47,6 @@ private:
     EllipsisLabel cursorReadoutLabel;
     EllipsisLabel cursorNoteReadoutLabel;
     EllipsisLabel cursorVerticalReadoutLabel;
-    ControlButton phaseModeButton { "PHASE" };
-    ControlButton freqModeButton { "FREQ" };
-    ControlButton signedModeButton { "SIGNED" };
     RangeSlider frequencyRangeSlider;
     RangeSlider corrRangeSlider { RangeSlider::Orientation::vertical };
     std::vector<float> primaryCorr;

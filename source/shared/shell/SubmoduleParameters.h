@@ -13,9 +13,8 @@ inline juce::String parameterName(const juce::String& id)
     return id.toUpperCase().replace("/", " / ");
 }
 
-inline constexpr std::array<std::array<const char*, 2>, 19> specIds {{
+inline constexpr std::array<std::array<const char*, 2>, 18> specIds {{
     { "spec/freq/fft-size", "spec/map/fft-size" },
-    { "spec/freq/fft-overlap", "spec/map/fft-overlap" },
     { "spec/freq/freq-scale", "spec/map/freq-scale" },
     { "spec/freq/slope", "spec/map/slope" },
     { "spec/freq/low", "spec/map/low" },
@@ -26,8 +25,8 @@ inline constexpr std::array<std::array<const char*, 2>, 19> specIds {{
     { "spec/freq/ro-vert", "spec/map/ro-vert" },
     { "spec/freq/clear-on-play", "spec/map/clear-on-play" },
     { "spec/freq/reset-click", "spec/map/reset-click" },
-    { "spec/freq/cur-notes", "spec/map/cur-notes" },
-    { "spec/freq/cur-horiz", "spec/map/cur-horiz" },
+    { "spec/freq/cur-note", "spec/map/cur-note" },
+    { "spec/freq/cur-hzr", "spec/map/cur-hzr" },
     { "spec/freq/cur-vert", "spec/map/cur-vert" },
     { "spec/freq/monitor", "spec/map/monitor" },
     { "spec/freq/zoom-horiz", "spec/map/zoom-horiz" },
@@ -52,8 +51,8 @@ inline constexpr std::array<std::array<const char*, 3>, 25> corrIds {{
     { "corr/phase/reset-click", "corr/freq/reset-click", "corr/signed/reset-click" },
     { "corr/phase/ro-horiz", "corr/freq/ro-horiz", "corr/signed/ro-horiz" },
     { "corr/phase/ro-vert", "corr/freq/ro-vert", "corr/signed/ro-vert" },
-    { "corr/phase/cur-notes", "corr/freq/cur-notes", "corr/signed/cur-notes" },
-    { "corr/phase/cur-horiz", "corr/freq/cur-horiz", "corr/signed/cur-horiz" },
+    { "corr/phase/cur-note", "corr/freq/cur-note", "corr/signed/cur-note" },
+    { "corr/phase/cur-hzr", "corr/freq/cur-hzr", "corr/signed/cur-hzr" },
     { "corr/phase/cur-vert", "corr/freq/cur-vert", "corr/signed/cur-vert" },
     { "corr/phase/zoom-horiz", "corr/freq/zoom-horiz", "corr/signed/zoom-horiz" },
     { "corr/phase/zoom-vert", "corr/freq/zoom-vert", "corr/signed/zoom-vert" },
@@ -130,17 +129,22 @@ private:
             clonedRange.start = 0.0f;
             clonedDefault = id.endsWith("low") ? 0.0f : 1.0f;
         }
-        return std::make_unique<juce::AudioParameterFloat>(
-            parameterId, name, clonedRange, clonedDefault, juce::AudioParameterFloatAttributes()
-                .withAutomatable(source.isAutomatable()).withMeta(source.isMetaParameter())
-                .withStringFromValueFunction([sourcePtr = &source] (const float value, const int length)
+        auto attributes = juce::AudioParameterFloatAttributes()
+            .withAutomatable(source.isAutomatable()).withMeta(source.isMetaParameter());
+        // Forward text conversion only when both parameters have the same range.
+        // Converting through the source would clamp MAP values to FREQ limits.
+        if (juce::exactlyEqual(clonedRange.start, range.start)
+            && juce::exactlyEqual(clonedRange.end, range.end))
+            attributes = attributes.withStringFromValueFunction([sourcePtr = &source] (const float value, const int length)
                 {
                     return sourcePtr->getText(sourcePtr->convertTo0to1(value), length);
                 })
                 .withValueFromStringFunction([sourcePtr = &source] (const juce::String& text)
                 {
                     return sourcePtr->convertFrom0to1(sourcePtr->getValueForText(text));
-                }));
+                });
+        return std::make_unique<juce::AudioParameterFloat>(
+            parameterId, name, clonedRange, clonedDefault, attributes);
     }
 
     juce::AudioProcessorValueTreeState::ParameterLayout layout;

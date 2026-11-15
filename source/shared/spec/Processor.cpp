@@ -57,6 +57,22 @@ void SpecProcessor::resetMaximums() noexcept
     fillChannels(maximumLevels, minimumDecibels);
 }
 
+void SpecProcessor::resetRealtimeState() noexcept
+{
+    fillChannels(averageLevels, minimumDecibels);
+    storeChannels(publishedAverageLevels, minimumDecibels);
+    storeChannels(publishedCurrentLevels, minimumDecibels);
+}
+
+void SpecProcessor::resetMapState() noexcept
+{
+    storeChannels(publishedMapCurrentLevels, minimumDecibels);
+    fillChannels(mapAccumulatedLevels, minimumDecibels);
+    mapAccumulatedFrameCount = 0;
+    mapAccumulatorFftSize = 0;
+    publishedMapFftSize.store(0, std::memory_order_release);
+}
+
 void SpecProcessor::requestClear() noexcept
 {
     clearRequested.store(true, std::memory_order_release);

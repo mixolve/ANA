@@ -1,11 +1,10 @@
 #include "Analyzer.h"
 #include "SourceCatalog.h"
+#include "BandlimitedResampler.h"
 
 #include "shared/corr/Processor.h"
 #include "shared/scop/AnalysisTypes.h"
-#include "shared/spec/FrequencyScale.h"
-#include "shared/spec/SpectrumChannelLevels.h"
-#include "shared/spec/SpectrogramFrequencyScale.h"
+#include "shared/scop/SlopeCompensator.h"
 #include "shared/spec/Processor.h"
 #include "offline/spec/MapFrameStream.h"
 #include "offline/spec/MapWriter.h"
@@ -16,12 +15,87 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <set>
 
 namespace ana::offline
 {
 namespace
 {
 constexpr int readBlockSize = 4096;
+
+double analysisSampleRate(const AnalysisResult& result, const double sourceRate)
+{
+    if (result.specSampleRate > 0.0) return result.specSampleRate;
+    if (result.corrSampleRate > 0.0) return result.corrSampleRate;
+    if (result.lvlsSampleRate > 0.0) return result.lvlsSampleRate;
+    return sourceRate;
+}
+
+template <typename Process, typename Cancel, typename Progress>
+bool readSourceBlocks(juce::AudioFormatReader& reader,
+                      const juce::int64 start, const juce::int64 end,
+                      const float gain, const double outputRate, Process&& process,
+                      Cancel&& shouldCancel, Progress&& onProgress)
+{
+    const auto increment = reader.sampleRate / outputRate;
+    const auto resample = ! juce::approximatelyEqual(reader.sampleRate, outputRate);
+    const auto sampleCount = resample
+        ? std::max<juce::int64>(1, static_cast<juce::int64>(std::llround(static_cast<double>(end - start) / increment)))
+        : end - start;
+    juce::AudioBuffer<float> buffer(2, readBlockSize);
+    juce::AudioBuffer<float> sourceBuffer;
+    if (resample)
+    {
+        BandlimitedResampler::prepare();
+        sourceBuffer.setSize(2, static_cast<int>(std::ceil(readBlockSize * increment))
+                                  + BandlimitedResampler::kernelRadius * 2 + 2);
+    }
+    for (juce::int64 position = 0; position < sampleCount; position += readBlockSize)
+    {
+        if (shouldCancel())
+            return false;
+        const auto samples = static_cast<int>(std::min<juce::int64>(readBlockSize, sampleCount - position));
+        if (resample)
+        {
+            // Pad each source segment independently; the sinc kernel must not
+            // borrow audio from outside the selected item's source range.
+            const auto sourcePosition = static_cast<double>(start) + static_cast<double>(position) * increment;
+            const auto first = static_cast<juce::int64>(std::floor(sourcePosition))
+                - BandlimitedResampler::kernelRadius + 1;
+            const auto last = static_cast<juce::int64>(std::floor(sourcePosition + (samples - 1) * increment))
+                + BandlimitedResampler::kernelRadius + 1;
+            const auto readStart = std::max(start, first);
+            const auto readEnd = std::min(end, last);
+            sourceBuffer.clear();
+            if (readEnd > readStart
+                && ! reader.read(&sourceBuffer, static_cast<int>(readStart - first),
+                                  static_cast<int>(readEnd - readStart), readStart, true, true))
+                return false;
+            for (int channel = 0; channel < 2; ++channel)
+                for (int sample = 0; sample < samples; ++sample)
+                    buffer.setSample(channel, sample, BandlimitedResampler::interpolate(
+                        sourceBuffer.getReadPointer(channel), static_cast<int>(last - first),
+                        sourcePosition - static_cast<double>(first) + sample * increment, increment));
+        }
+        else if (! reader.read(&buffer, 0, samples, start + position, true, true))
+            return false;
+        buffer.applyGain(0, samples, gain);
+        juce::AudioBuffer<float> block(buffer.getArrayOfWritePointers(), 2, samples);
+        const auto sourceOffset = resample
+            ? static_cast<juce::int64>(std::llround(static_cast<double>(position) * increment)) : position;
+        process(block, start + sourceOffset);
+        onProgress(static_cast<float>(position + samples) / static_cast<float>(sampleCount));
+    }
+    return true;
+}
+
+void resetSegmentStreams(AnalysisResult& result, const bool includeSpec, const bool includeCorr)
+{
+    if (includeSpec && result.spec != nullptr)
+        result.spec->resetOfflineStream();
+    if (includeCorr && result.corr != nullptr)
+        result.corr->resetOfflineStream();
+}
 
 void accumulateEnvelope(scop::AnalysisChannelEnvelopes& envelopes,
                         const size_t column,
@@ -37,13 +111,16 @@ void accumulateEnvelope(scop::AnalysisChannelEnvelopes& envelopes,
 
 void accumulateScopSample(offline::AnalysisResult& result,
                            dsp::LinkwitzRileyCrossover& crossover,
+                           scop::SlopeCompensator& slopeCompensator,
                            const size_t column,
                            const float left,
                            const float right) noexcept
 {
-    accumulateEnvelope(result.wideband, column, scop::makeAnalysisChannelSamples(left, right));
+    const auto tilted = slopeCompensator.processSample(left, right);
+    accumulateEnvelope(result.wideband, column, scop::makeAnalysisChannelSamples(
+        static_cast<float>(tilted.left), static_cast<float>(tilted.right)));
 
-    const auto bands = crossover.processSample(left, right);
+    const auto bands = crossover.processSample(tilted.left, tilted.right);
     for (size_t bandIndex = 0; bandIndex < result.activeBandCount; ++bandIndex)
     {
         const auto bandLeft = static_cast<float>(bands[bandIndex].left);
@@ -100,10 +177,9 @@ static void prepareSpec(offline::AnalysisResult& result,
 
 static void processSpecBlock(offline::AnalysisResult& result,
                              juce::AudioBuffer<float>& buffer,
-                             const int samplesToProcess,
                              const double sampleRate)
 {
-    if (result.spec == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+    if (result.spec == nullptr || sampleRate <= 0.0)
         return;
 
     if (result.specSampleRate <= 0.0)
@@ -112,16 +188,13 @@ static void processSpecBlock(offline::AnalysisResult& result,
         result.spec->prepare(sampleRate);
     }
 
-    if (! juce::approximatelyEqual(result.specSampleRate, sampleRate))
-        return;
-
     result.spec->processOfflineBlock(buffer, result.specFftSize, result.specFftOverlap);
 }
 
 static void prepareCorr(offline::AnalysisResult& result,
-                                       const int fftSize,
-                                       const float fftOverlap,
-                                       const int mode)
+                        const int fftSize,
+                        const float fftOverlap,
+                        const int mode)
 {
     result.corr = std::make_shared<corr::CorrProcessor>();
     result.corrSampleRate = 0.0;
@@ -131,11 +204,10 @@ static void prepareCorr(offline::AnalysisResult& result,
 }
 
 static void processCorrBlock(offline::AnalysisResult& result,
-                                    juce::AudioBuffer<float>& buffer,
-                                    const int samplesToProcess,
-                                    const double sampleRate)
+                             juce::AudioBuffer<float>& buffer,
+                             const double sampleRate)
 {
-    if (result.corr == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+    if (result.corr == nullptr || sampleRate <= 0.0)
         return;
 
     if (result.corrSampleRate <= 0.0)
@@ -143,9 +215,6 @@ static void processCorrBlock(offline::AnalysisResult& result,
         result.corrSampleRate = sampleRate;
         result.corr->prepare(sampleRate);
     }
-
-    if (! juce::approximatelyEqual(result.corrSampleRate, sampleRate))
-        return;
 
     const auto corrMode = corr::CorrProcessor::modeFromIndex(result.corrMode);
     result.corr->processOfflineBlock(buffer, result.corrFftSize,
@@ -162,17 +231,16 @@ static void prepareLvls(offline::AnalysisResult& result)
 struct LvlsConfig
 {
     lvls::LvlsProcessor::ProcessingOptions options;
-    float rmsWindowMs = 300.0f;
-    float peakHoldMs = 1000.0f;
+    float rmsWindowMs = lvls::defaultRmsWindowMilliseconds;
+    float peakHoldMs = lvls::defaultPeakHoldMilliseconds;
 };
 
 static void processLvlsBlock(offline::AnalysisResult& result,
-                              juce::AudioBuffer<float>& buffer,
-                              const int samplesToProcess,
-                              const double sampleRate,
+                             juce::AudioBuffer<float>& buffer,
+                             const double sampleRate,
                               const LvlsConfig& config)
 {
-    if (result.lvls == nullptr || sampleRate <= 0.0 || samplesToProcess <= 0)
+    if (result.lvls == nullptr || sampleRate <= 0.0)
         return;
 
     if (result.lvlsSampleRate <= 0.0)
@@ -181,39 +249,24 @@ static void processLvlsBlock(offline::AnalysisResult& result,
         result.lvls->prepare(sampleRate);
     }
 
-    if (! juce::approximatelyEqual(result.lvlsSampleRate, sampleRate))
-        return;
-
     result.lvls->processBlock(buffer, config.rmsWindowMs, config.peakHoldMs, false, config.options);
 }
 
 static void processBlock(
     offline::AnalysisResult& result,
     juce::AudioBuffer<float>& buffer,
-    const int samplesToProcess,
     const double sampleRate,
     const bool includeSpec,
     const bool includeCorr,
     const bool includeLvls,
     const LvlsConfig& lvlsConfig)
 {
-    if (samplesToProcess <= 0 || sampleRate <= 0.0
-        || (! includeSpec && ! includeCorr && ! includeLvls))
-        return;
-
-    const auto validSamples = std::min(samplesToProcess, buffer.getNumSamples());
-    if (validSamples <= 0)
-        return;
-
-    auto processingBuffer = juce::AudioBuffer<float>(
-        buffer.getArrayOfWritePointers(), buffer.getNumChannels(), validSamples);
-
     if (includeSpec)
-        processSpecBlock(result, processingBuffer, validSamples, sampleRate);
+        processSpecBlock(result, buffer, sampleRate);
     if (includeCorr)
-        processCorrBlock(result, processingBuffer, validSamples, sampleRate);
+        processCorrBlock(result, buffer, sampleRate);
     if (includeLvls)
-        processLvlsBlock(result, processingBuffer, validSamples, sampleRate, lvlsConfig);
+        processLvlsBlock(result, buffer, sampleRate, lvlsConfig);
 }
 
 template <typename PlaybackTimeForSourceSample>
@@ -244,7 +297,6 @@ static bool analyseMapSourceSegmentDirect(
     if (result.specSampleRate <= 0.0)
         result.specSampleRate = sourceRate;
     result.spec->prepare(sourceRate);
-    result.spec->resetOfflineStream();
     const auto segmentStart = playbackTimeForSourceSample(static_cast<double>(validSourceStart));
     const auto segmentEnd = playbackTimeForSourceSample(static_cast<double>(validSourceEnd));
     writer.addTimeSpan((segmentStart - result.startTimeSeconds) / result.durationSeconds,
@@ -273,6 +325,7 @@ static bool analyseTakeSource(
     juce::ARAAudioSource& source,
     const dsp::LinkwitzRileyCrossover::CrossoverFrequencies& frequencies,
     const size_t crossoverCount,
+    const float scopSlopeDbPerOctave,
     const bool includeScop,
     const bool includeSpec,
     const bool includeCorr,
@@ -308,49 +361,37 @@ static bool analyseTakeSource(
             return true;
     }
 
-    if (includeSpec && specMapWriter == nullptr && result.spec != nullptr)
-        result.spec->resetOfflineStream();
-
+    resetSegmentStreams(result, includeSpec && specMapWriter == nullptr, includeCorr);
     juce::ARAAudioSourceReader reader(&source);
-    juce::AudioBuffer<float> readBuffer(2, readBlockSize);
     dsp::LinkwitzRileyCrossover crossover;
-    crossover.prepare(sourceRate);
-    crossover.setCrossoverCount(crossoverCount);
-    crossover.setCrossoverFrequencies(frequencies);
-    for (juce::int64 readPosition = 0;
-         readPosition < sourceSampleCount;
-         readPosition += readBlockSize)
+    scop::SlopeCompensator slopeCompensator;
+    if (includeScop)
     {
-        if (shouldCancel())
-            return false;
-
-        const auto samplesToRead = static_cast<int>(std::min<juce::int64>(
-            readBlockSize, sourceSampleCount - readPosition));
-        if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
-            continue;
-
-        processBlock(result, readBuffer, samplesToRead, sourceRate,
-                     includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
-        onProgress(static_cast<float>(readPosition + samplesToRead)
-                   / static_cast<float>(sourceSampleCount));
-
-        if (! includeScop)
-            continue;
-
-        const auto* left = readBuffer.getReadPointer(0);
-        const auto* right = readBuffer.getReadPointer(1);
-
-        for (int sampleIndex = 0; sampleIndex < samplesToRead; ++sampleIndex)
-        {
-            const auto normalizedTime = static_cast<double>(readPosition + sampleIndex)
-                / static_cast<double>(sourceSampleCount);
-            const auto column = std::min(columnCount - 1,
-                static_cast<size_t>(normalizedTime * static_cast<double>(columnCount)));
-            accumulateScopSample(result, crossover, column, left[sampleIndex], right[sampleIndex]);
-        }
+        // Filtering follows readSourceBlocks' output rate (possibly resampled).
+        crossover.prepare(analysisSampleRate(result, sourceRate));
+        slopeCompensator.prepare(analysisSampleRate(result, sourceRate));
+        slopeCompensator.setSlope(scopSlopeDbPerOctave);
+        crossover.setCrossoverCount(crossoverCount);
+        crossover.setCrossoverFrequencies(frequencies);
     }
-
-    return true;
+    const auto analysisRate = analysisSampleRate(result, sourceRate);
+    return readSourceBlocks(reader, 0, sourceSampleCount, 1.0f, analysisRate,
+        [&] (juce::AudioBuffer<float>& buffer, const juce::int64 position)
+        {
+            processBlock(result, buffer, analysisRate,
+                         includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
+            if (! includeScop)
+                return;
+            const auto* left = buffer.getReadPointer(0);
+            const auto* right = buffer.getReadPointer(1);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                const auto time = static_cast<double>(position + sample) / static_cast<double>(sourceSampleCount);
+                const auto column = std::min(columnCount - 1,
+                    static_cast<size_t>(time * static_cast<double>(columnCount)));
+                accumulateScopSample(result, crossover, slopeCompensator, column, left[sample], right[sample]);
+            }
+        }, shouldCancel, onProgress);
 }
 
 static void initialiseEnvelopes(offline::AnalysisResult& result, const size_t columnCount)
@@ -394,6 +435,7 @@ static bool analyseHostTakeChoice(
     const offline::SourceChoice& choice,
     const dsp::LinkwitzRileyCrossover::CrossoverFrequencies& frequencies,
     const size_t crossoverCount,
+    const float scopSlopeDbPerOctave,
     const bool includeScop,
     const bool includeSpec,
     const bool includeCorr,
@@ -444,55 +486,40 @@ static bool analyseHostTakeChoice(
             return true;
     }
 
-    if (includeSpec && specMapWriter == nullptr && result.spec != nullptr)
-        result.spec->resetOfflineStream();
-
-    juce::AudioBuffer<float> readBuffer(2, readBlockSize);
+    resetSegmentStreams(result, includeSpec && specMapWriter == nullptr, includeCorr);
     dsp::LinkwitzRileyCrossover crossover;
-    crossover.prepare(sourceRate);
-    crossover.setCrossoverCount(crossoverCount);
-    crossover.setCrossoverFrequencies(frequencies);
-    const auto sourceSamplesPerPlaybackSecond = choice.playRate * sourceRate;
-    for (auto readPosition = sourceStart; readPosition < sourceEnd; readPosition += readBlockSize)
+    scop::SlopeCompensator slopeCompensator;
+    if (includeScop)
     {
-        if (shouldCancel())
-            return false;
-
-        const auto samplesToRead = static_cast<int>(std::min<juce::int64>(
-            readBlockSize, sourceEnd - readPosition));
-        if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
-            continue;
-
-        if (! juce::approximatelyEqual(choice.gain, 1.0))
-            readBuffer.applyGain(0, samplesToRead, static_cast<float>(choice.gain));
-
-        processBlock(result, readBuffer, samplesToRead, sourceRate,
-                     includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
-        onProgress(static_cast<float>(readPosition + samplesToRead - sourceStart)
-                   / static_cast<float>(sourceEnd - sourceStart));
-
-        if (! includeScop)
-            continue;
-
-        const auto* left = readBuffer.getReadPointer(0);
-        const auto* right = readBuffer.getReadPointer(1);
-        for (int sampleIndex = 0; sampleIndex < samplesToRead; ++sampleIndex)
-        {
-            const auto sourceOffset = static_cast<double>(
-                readPosition + sampleIndex - requestedSourceStart);
-            const auto playbackTime = choice.playbackStartSeconds
-                + sourceOffset / sourceSamplesPerPlaybackSecond;
-            const auto normalizedTime = result.durationSeconds > 0.0
-                ? (playbackTime - result.startTimeSeconds) / result.durationSeconds
-                : 0.0;
-            const auto column = std::min(columnCount - 1,
-                static_cast<size_t>(std::max(0.0, normalizedTime)
-                                    * static_cast<double>(columnCount)));
-            accumulateScopSample(result, crossover, column, left[sampleIndex], right[sampleIndex]);
-        }
+        // Filtering follows readSourceBlocks' output rate (possibly resampled).
+        crossover.prepare(analysisSampleRate(result, sourceRate));
+        slopeCompensator.prepare(analysisSampleRate(result, sourceRate));
+        slopeCompensator.setSlope(scopSlopeDbPerOctave);
+        crossover.setCrossoverCount(crossoverCount);
+        crossover.setCrossoverFrequencies(frequencies);
     }
-
-    return true;
+    const auto sourceSamplesPerPlaybackSecond = choice.playRate * sourceRate;
+    const auto analysisRate = analysisSampleRate(result, sourceRate);
+    return readSourceBlocks(reader, sourceStart, sourceEnd, static_cast<float>(choice.gain), analysisRate,
+        [&] (juce::AudioBuffer<float>& buffer, const juce::int64 position)
+        {
+            processBlock(result, buffer, analysisRate,
+                         includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
+            if (! includeScop)
+                return;
+            const auto* left = buffer.getReadPointer(0);
+            const auto* right = buffer.getReadPointer(1);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                const auto playbackTime = choice.playbackStartSeconds
+                    + static_cast<double>(position + sample - requestedSourceStart) / sourceSamplesPerPlaybackSecond;
+                const auto time = result.durationSeconds > 0.0
+                    ? (playbackTime - result.startTimeSeconds) / result.durationSeconds : 0.0;
+                const auto column = std::min(columnCount - 1,
+                    static_cast<size_t>(std::max(0.0, time) * static_cast<double>(columnCount)));
+                accumulateScopSample(result, crossover, slopeCompensator, column, left[sample], right[sample]);
+            }
+        }, shouldCancel, onProgress);
 }
 
 static bool analyseHostTakeChoices(
@@ -503,6 +530,7 @@ static bool analyseHostTakeChoices(
     const int takeNumber,
     const dsp::LinkwitzRileyCrossover::CrossoverFrequencies& frequencies,
     const size_t crossoverCount,
+    const float scopSlopeDbPerOctave,
     const size_t columnCount,
     const bool includeScop,
     const bool includeSpec,
@@ -513,12 +541,24 @@ static bool analyseHostTakeChoices(
     const std::function<bool()>& shouldCancel,
     const std::function<void(float)>& onProgress)
 {
+    // Both TRACK/TAKE and MONITOR/KST select a physical take per item.
+    // Requesting take 2 must not drop items that only have take 1.
+    std::set<juce::String> itemsWithSecondTake;
+    if (takeNumber == 2)
+        for (const auto& choice : choices)
+            if (choice.hostEnumerated && choice.takeNumber == 2)
+                itemsWithSecondTake.insert(choice.sourceId);
+
     std::vector<const offline::SourceChoice*> selectedChoices;
     for (const auto& choice : choices)
     {
         if (! choice.hostEnumerated
-            || (sourceId.isNotEmpty() && choice.sourceId != sourceId)
-            || (takeNumber > 0 && choice.takeNumber != takeNumber))
+            || (sourceId.isNotEmpty() && choice.sourceId != sourceId))
+            continue;
+
+        const auto chosenTake = takeNumber == 2 && itemsWithSecondTake.count(choice.sourceId) != 0
+            ? 2 : 1;
+        if (choice.takeNumber != chosenTake)
             continue;
 
         selectedChoices.push_back(&choice);
@@ -564,15 +604,10 @@ static bool analyseHostTakeChoices(
         const auto choiceDuration = std::max(0.0, choice->playbackDurationSeconds);
         auto reader = createHostTakeReader(documentController, *choice);
         if (reader == nullptr)
-        {
-            completedDuration += choiceDuration;
-            onProgress(firstPassScale * static_cast<float>(
-                completedDuration / std::max(0.001, totalDuration)));
-            continue;
-        }
+            return false;
 
         if (! analyseHostTakeChoice(result, *reader, *choice, frequencies,
-                                    crossoverCount, includeScop, includeSpec,
+                                    crossoverCount, scopSlopeDbPerOctave, includeScop, includeSpec,
                                     includeCorr, includeLvls, lvlsConfig, specMapWriter, shouldCancel,
                                     [&] (const float localProgress)
                                     {
@@ -598,15 +633,10 @@ static bool analyseHostTakeChoices(
             const auto choiceDuration = std::max(0.0, choice->playbackDurationSeconds);
             auto reader = createHostTakeReader(documentController, *choice);
             if (reader == nullptr)
-            {
-                completedDuration += choiceDuration;
-                onProgress(0.5f + 0.5f * static_cast<float>(
-                    completedDuration / std::max(0.001, totalDuration)));
-                continue;
-            }
+                return false;
 
             if (! analyseHostTakeChoice(result, *reader, *choice, frequencies,
-                                        crossoverCount, false, false, true, false,
+                                        crossoverCount, scopSlopeDbPerOctave, false, false, true, false,
                                         lvlsConfig, nullptr, shouldCancel,
                                         [&] (const float localProgress)
                                         {
@@ -647,7 +677,7 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
     const auto crossoverCount = std::min(request.crossoverCount,
                                          dsp::LinkwitzRileyCrossover::numCrossovers);
     const LvlsConfig lvlsConfig {
-        { request.includeLvlsPeakRms, request.includeLvlsLoudness, request.includeLvlsHistory },
+        { request.includeLvlsPeakRms, request.includeLvlsLoudness, request.includeLvlsMetrics },
         request.lvlsRmsWindowMs, request.lvlsPeakHoldMs
     };
     result->activeBandCount = crossoverCount + 1;
@@ -675,7 +705,7 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
         if (! analyseHostTakeChoices(
                 *result, documentController, sourceChoices,
                 request.sourceId, request.takeNumber, request.frequencies,
-                crossoverCount, columnCount, includeScop, includeSpec,
+                crossoverCount, request.scopSlopeDbPerOctave, columnCount, includeScop, includeSpec,
                 includeCorr, includeLvls, lvlsConfig, specMapWriter.get(),
                 shouldCancel, onProgress))
             return {};
@@ -748,7 +778,8 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
         }
 
         const auto sourceRate = audioSource->getSampleRate();
-        const auto sourceStart = std::max<juce::int64>(0, playbackRegion->getStartInAudioModificationSamples());
+        const auto requestedSourceStart = playbackRegion->getStartInAudioModificationSamples();
+        const auto sourceStart = std::max<juce::int64>(0, requestedSourceStart);
         const auto sourceEnd = std::min<juce::int64>(audioSource->getSampleCount(),
                                                      playbackRegion->getEndInAudioModificationSamples());
 
@@ -760,18 +791,23 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
             continue;
         }
 
-        if (includeSpec && specMapWriter == nullptr && result->spec != nullptr)
-            result->spec->resetOfflineStream();
+        resetSegmentStreams(*result, includeSpec && specMapWriter == nullptr, includeCorr);
 
         juce::ARAAudioSourceReader reader(audioSource);
-        juce::AudioBuffer<float> readBuffer(2, readBlockSize);
         dsp::LinkwitzRileyCrossover crossover;
-        crossover.prepare(sourceRate);
-        crossover.setCrossoverCount(crossoverCount);
-        crossover.setCrossoverFrequencies(request.frequencies);
+        scop::SlopeCompensator slopeCompensator;
+        if (includeScop)
+        {
+            crossover.prepare(analysisSampleRate(*result, sourceRate));
+            slopeCompensator.prepare(analysisSampleRate(*result, sourceRate));
+            slopeCompensator.setSlope(request.scopSlopeDbPerOctave);
+            crossover.setCrossoverCount(crossoverCount);
+            crossover.setCrossoverFrequencies(request.frequencies);
+        }
         const auto playbackStart = playbackRegion->getStartInPlaybackTime();
         const auto playbackDuration = playbackRegion->getDurationInPlaybackTime();
-        const auto sourceLength = static_cast<double>(sourceEnd - sourceStart);
+        const auto sourceLength = static_cast<double>(
+            playbackRegion->getEndInAudioModificationSamples() - requestedSourceStart);
         const auto sourceSamplesPerPlaybackSecond = playbackDuration > 0.0
             ? sourceLength / playbackDuration : 0.0;
 
@@ -782,10 +818,10 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
                     *result, mapReader, sourceStart, sourceEnd,
                     playbackStart, playbackStart + playbackDuration,
                     1.0, *specMapWriter,
-                    [sourceStart, playbackStart, sourceSamplesPerPlaybackSecond] (const double sourceSample)
+                    [requestedSourceStart, playbackStart, sourceSamplesPerPlaybackSecond] (const double sourceSample)
                     {
                         return playbackStart
-                            + (sourceSample - static_cast<double>(sourceStart))
+                            + (sourceSample - static_cast<double>(requestedSourceStart))
                                 / sourceSamplesPerPlaybackSecond;
                     },
                     shouldCancel, [&] (const float localProgress)
@@ -805,44 +841,32 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
             }
         }
 
-        for (auto readPosition = sourceStart; readPosition < sourceEnd; readPosition += readBlockSize)
-        {
-            if (shouldCancel())
-                return {};
-
-            const auto samplesToRead = static_cast<int>(std::min<juce::int64>(
-                readBlockSize, sourceEnd - readPosition));
-
-            if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
-                continue;
-
-            processBlock(*result, readBuffer, samplesToRead, sourceRate,
-                     includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
-            const auto localProgress = static_cast<float>(readPosition + samplesToRead - sourceStart)
-                / static_cast<float>(sourceEnd - sourceStart);
-            onProgress(firstPassScale * (static_cast<float>(completedRegions) + localProgress)
-                       / static_cast<float>(regionCount));
-
-            if (! includeScop)
-                continue;
-
-            const auto* left = readBuffer.getReadPointer(0);
-            const auto* right = readBuffer.getReadPointer(1);
-
-            for (int sampleIndex = 0; sampleIndex < samplesToRead; ++sampleIndex)
-            {
-                const auto sourceOffset = static_cast<double>(readPosition - sourceStart + sampleIndex);
-                const auto playbackTime = playbackStart
-                    + (sourceOffset / sourceLength) * playbackDuration;
-                const auto normalizedTime = result->durationSeconds > 0.0
-                    ? (playbackTime - firstTime) / result->durationSeconds
-                    : 0.0;
-                const auto column = std::min(columnCount - 1,
-                    static_cast<size_t>(std::max(0.0, normalizedTime)
-                                        * static_cast<double>(columnCount)));
-                accumulateScopSample(*result, crossover, column, left[sampleIndex], right[sampleIndex]);
-            }
-        }
+        const auto analysisRate = analysisSampleRate(*result, sourceRate);
+        if (! readSourceBlocks(reader, sourceStart, sourceEnd, 1.0f, analysisRate,
+                [&] (juce::AudioBuffer<float>& buffer, const juce::int64 position)
+                {
+                    processBlock(*result, buffer, analysisRate,
+                                 includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
+                    if (! includeScop)
+                        return;
+                    const auto* left = buffer.getReadPointer(0);
+                    const auto* right = buffer.getReadPointer(1);
+                    for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                    {
+                        const auto playbackTime = playbackStart
+                            + (static_cast<double>(position + sample - requestedSourceStart) / sourceLength) * playbackDuration;
+                        const auto time = result->durationSeconds > 0.0
+                            ? (playbackTime - firstTime) / result->durationSeconds : 0.0;
+                        const auto column = std::min(columnCount - 1,
+                            static_cast<size_t>(std::max(0.0, time) * static_cast<double>(columnCount)));
+                        accumulateScopSample(*result, crossover, slopeCompensator, column, left[sample], right[sample]);
+                    }
+                }, shouldCancel, [&] (const float progress)
+                {
+                    onProgress(firstPassScale * (static_cast<float>(completedRegions) + progress)
+                               / static_cast<float>(regionCount));
+                }))
+            return {};
 
         ++completedRegions;
         onProgress(firstPassScale * static_cast<float>(completedRegions)
@@ -885,26 +909,18 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
             }
 
             juce::ARAAudioSourceReader reader(audioSource);
-            juce::AudioBuffer<float> readBuffer(2, readBlockSize);
-            for (auto readPosition = sourceStart;
-                 readPosition < sourceEnd;
-                 readPosition += readBlockSize)
-            {
-                if (shouldCancel())
-                    return {};
-
-                const auto samplesToRead = static_cast<int>(std::min<juce::int64>(
-                    readBlockSize, sourceEnd - readPosition));
-                if (! reader.read(&readBuffer, 0, samplesToRead, readPosition, true, true))
-                    continue;
-
-                processBlock(*result, readBuffer, samplesToRead, sourceRate,
-                                            false, true, false, lvlsConfig);
-                const auto localProgress = static_cast<float>(readPosition + samplesToRead - sourceStart)
-                    / static_cast<float>(sourceEnd - sourceStart);
-                onProgress(0.5f + 0.5f * (static_cast<float>(completedRegions) + localProgress)
-                           / static_cast<float>(regionCount));
-            }
+            resetSegmentStreams(*result, false, true);
+            const auto analysisRate = analysisSampleRate(*result, sourceRate);
+            if (! readSourceBlocks(reader, sourceStart, sourceEnd, 1.0f, analysisRate,
+                    [&] (juce::AudioBuffer<float>& buffer, juce::int64)
+                    {
+                        processBlock(*result, buffer, analysisRate, false, true, false, lvlsConfig);
+                    }, shouldCancel, [&] (const float progress)
+                    {
+                        onProgress(0.5f + 0.5f * (static_cast<float>(completedRegions) + progress)
+                                   / static_cast<float>(regionCount));
+                    }))
+                return {};
             ++completedRegions;
             onProgress(0.5f + 0.5f * static_cast<float>(completedRegions)
                        / static_cast<float>(regionCount));
@@ -915,7 +931,7 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
     {
         if (! analyseTakeSource(
                 *result, *directTake->getAudioSource(), request.frequencies,
-                crossoverCount, includeScop, includeSpec,
+                crossoverCount, request.scopSlopeDbPerOctave, includeScop, includeSpec,
                 includeCorr, includeLvls, lvlsConfig, specMapWriter.get(),
                 shouldCancel, [&] (const float progress)
                 {
@@ -928,7 +944,7 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
             result->corr->beginOfflineMinimumPass();
             if (! analyseTakeSource(
                     *result, *directTake->getAudioSource(), request.frequencies,
-                    crossoverCount, false, false, true, false,
+                    crossoverCount, request.scopSlopeDbPerOctave, false, false, true, false,
                     lvlsConfig, nullptr, shouldCancel, [&] (const float progress)
                     {
                         onProgress(0.5f + 0.5f * progress);

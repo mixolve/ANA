@@ -1,9 +1,68 @@
-#import <Cocoa/Cocoa.h>
 
+#include <juce_opengl/juce_opengl.h>
+#import <Cocoa/Cocoa.h>
+#import <objc/runtime.h>
 #include "AuxiliaryWindowFocus.h"
+
+// Auxiliary peers stay visible when the host loses focus. Only their level is
+// lowered, so a host's floating FX level cannot leak above other applications.
+@interface ANAAuxiliaryActivation : NSObject
+{
+    NSWindow* auxiliaryWindow;
+    NSInteger hostLevel;
+}
+- (instancetype)initWithWindow:(NSWindow*)window;
+- (void)setHostLevel:(NSInteger)level;
+- (void)activationChanged:(NSNotification*)notification;
+@end
+
+@implementation ANAAuxiliaryActivation
+- (instancetype)initWithWindow:(NSWindow*)window
+{
+    self = [super init];
+    if (self != nil)
+    {
+        auxiliaryWindow = window; // Owned by the associated window, not retained.
+        hostLevel = window.level;
+        auto* notifications = [NSNotificationCenter defaultCenter];
+        [notifications addObserver:self selector:@selector(activationChanged:)
+                              name:NSApplicationDidBecomeActiveNotification object:NSApp];
+        [notifications addObserver:self selector:@selector(activationChanged:)
+                              name:NSApplicationDidResignActiveNotification object:NSApp];
+    }
+    return self;
+}
+- (void)setHostLevel:(NSInteger)level
+{
+    hostLevel = level;
+    auxiliaryWindow.level = NSApp.active ? hostLevel : NSNormalWindowLevel;
+}
+- (void)activationChanged:(NSNotification*)notification
+{
+    auxiliaryWindow.level = [notification.name isEqualToString:NSApplicationDidBecomeActiveNotification]
+        ? hostLevel : NSNormalWindowLevel;
+}
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [super dealloc];
+}
+@end
 
 namespace
 {
+char auxiliaryActivationKey;
+ANAAuxiliaryActivation* activationFor(NSWindow* window)
+{
+    auto* activation = static_cast<ANAAuxiliaryActivation*>(objc_getAssociatedObject(window, &auxiliaryActivationKey));
+    if (activation == nil)
+    {
+        activation = [[ANAAuxiliaryActivation alloc] initWithWindow:window];
+        objc_setAssociatedObject(window, &auxiliaryActivationKey, activation, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [activation release];
+    }
+    return activation;
+}
 NSWindow* nativeWindowFor(juce::Component& component)
 {
     auto* view = static_cast<NSView*>(component.getWindowHandle());
@@ -16,9 +75,12 @@ void enableAuxiliaryMouseMoveEvents(juce::Component& component)
     if (auto* window = nativeWindowFor(component))
     {
         [window setAcceptsMouseMovedEvents:YES];
-        // REAPER's floating FX level is app-local in intent. Do not let our
-        // independent auxiliary peers float over another active application.
-        [window setHidesOnDeactivate:YES];
+        // REAPER may restore auxiliary windows through its native screenset
+        // machinery. Explicitly restore the window's interactive hit-test
+        // state as well as mouse-move delivery (used by hover animations).
+        [window setIgnoresMouseEvents:NO];
+        [window setHidesOnDeactivate:NO];
+        activationFor(window);
     }
 }
 
@@ -31,8 +93,8 @@ void matchAuxiliaryWindowLevel(juce::Component& component, juce::Component& owne
 
     if (auto* oldParent = window.parentWindow)
         [oldParent removeChildWindow:window];
-    window.level = ownerWindow.level;
-    window.hidesOnDeactivate = YES;
+    [activationFor(window) setHostLevel:ownerWindow.level];
+    window.hidesOnDeactivate = NO;
 }
 
 void attachAuxiliaryWindowToOwner(juce::Component& component, juce::Component& owner)
@@ -48,7 +110,17 @@ void attachAuxiliaryWindowToOwner(juce::Component& component, juce::Component& o
             [oldParent removeChildWindow:window];
         [ownerWindow addChildWindow:window ordered:NSWindowAbove];
     }
-    window.hidesOnDeactivate = YES;
+    // Screenset activation can reorder the host's native windows after JUCE
+    // has shown the dock. Reassert the child z-order without making the dock
+    // a key window or stealing REAPER's keyboard shortcuts.
+    [window orderFront:nil];
+    // Sit just above the host's normal/floating utility windows. A native
+    // transparent host overlay at the owner's level can otherwise receive
+    // hit-tests while the dock remains visible beneath it.
+    const NSInteger dockLevel = ownerWindow.level < NSModalPanelWindowLevel - 1
+        ? ownerWindow.level + 1 : ownerWindow.level;
+    [activationFor(window) setHostLevel:dockLevel];
+    window.hidesOnDeactivate = NO;
 }
 
 void detachAuxiliaryWindowFromOwner(juce::Component& component)
@@ -70,11 +142,11 @@ void setAuxiliaryTextInputActive(juce::Component& component, const bool active,
         if (currentKeyWindow != nil && currentKeyWindow != window && previousKeyWindow == nullptr)
             previousKeyWindow = [currentKeyWindow retain];
 
-        component.getProperties().set("anaAuxiliaryTextInputActive", true);
+        component.getProperties().set("mixolveAuxiliaryTextInputActive", true);
     }
     else
     {
-        component.getProperties().set("anaAuxiliaryTextInputActive", false);
+        component.getProperties().set("mixolveAuxiliaryTextInputActive", false);
 
         auto* previous = static_cast<NSWindow*>(previousKeyWindow);
         if (previous != nil)

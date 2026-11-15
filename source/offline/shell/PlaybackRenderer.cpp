@@ -26,7 +26,8 @@ public:
     AudioSourceReader(juce::ARAAudioSource* source,
                       const bool shouldBuffer,
                       juce::TimeSliceThread& readerThread,
-                      const int readAheadSize)
+                      const int readAheadSize,
+                      const int realtimeReadTimeoutMs)
     {
         directReader = std::make_unique<juce::ARAAudioSourceReader>(source);
 
@@ -34,7 +35,10 @@ public:
         {
             auto bufferingReader = std::make_unique<juce::BufferingAudioReader>(
                 new juce::ARAAudioSourceReader(source), readerThread, readAheadSize);
-            bufferingReader->setReadTimeout(0);
+            // Zero timeout causes intermittent cache misses in ARA playback.
+            // A very short bounded wait allows the read-ahead thread to catch up
+            // without a long blocking read in the host audio callback.
+            bufferingReader->setReadTimeout(realtimeReadTimeoutMs);
             bufferedReader = std::move(bufferingReader);
         }
     }
@@ -44,14 +48,20 @@ public:
               const int numberOfSamples,
               const juce::int64 readerStartSample,
               const bool useLeftChannel,
-              const bool useRightChannel)
+              const bool useRightChannel,
+              const bool realtime)
     {
-        if (bufferedReader != nullptr
-            && bufferedReader->read(destination, destinationStartSample, numberOfSamples,
-                                    readerStartSample, useLeftChannel, useRightChannel))
-            return true;
-
-        // Fall back to an independent reader until scheduled read-ahead is ready.
+        if (bufferedReader != nullptr)
+        {
+            if (bufferedReader->read(destination, destinationStartSample, numberOfSamples,
+                                     readerStartSample, useLeftChannel, useRightChannel))
+                return true;
+            // The direct ARA reader may block on disk or on host locks. Never
+            // invoke it from realtime playback following a read-ahead miss.
+            // Report failure so the ARA wrapper can request host fallback.
+            if (realtime)
+                return false;
+        }
         return directReader != nullptr
             && directReader->read(destination, destinationStartSample, numberOfSamples,
                                   readerStartSample, useLeftChannel, useRightChannel);
@@ -113,11 +123,18 @@ void PlaybackRenderer::rebuildReaders()
 
         const auto readAheadSize = std::max(4 * preparedBlockSize,
                                             juce::roundToInt(2.0 * preparedSampleRate));
+        const auto callbackMs = 1000.0 * static_cast<double>(preparedBlockSize)
+            / std::max(1.0, preparedSampleRate);
+        // At most one quarter of a block's deadline, never more than 3 ms.
+        // Sub-millisecond callbacks must not be forced to wait even 1 ms.
+        const auto realtimeReadTimeoutMs = std::clamp(
+            static_cast<int>(std::floor(callbackMs * 0.25)), 0, 3);
         readers.emplace(audioSource,
                         std::make_unique<AudioSourceReader>(audioSource,
                                                            useBufferedReaders,
                                                            *sharedReaderThread,
-                                                           readAheadSize));
+                                                           readAheadSize,
+                                                           realtimeReadTimeoutMs));
     };
 
     if (offlineDocumentController != nullptr)
@@ -198,7 +215,7 @@ void PlaybackRenderer::releaseResources()
 }
 
 bool PlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
-                                    const juce::AudioProcessor::Realtime,
+                                    const juce::AudioProcessor::Realtime realtime,
                                     const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept
 {
     const auto processingLock = lock.tryProcessingReadLock();
@@ -247,7 +264,8 @@ bool PlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
                                            samplesToRead,
                                            static_cast<juce::int64>(std::llround(sourceStart)),
                                            true,
-                                           true))
+                                           true,
+                                           realtime == juce::AudioProcessor::Realtime::yes))
                     return false;
             }
             else
@@ -276,7 +294,8 @@ bool PlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
                                               readableCount,
                                               readableStart,
                                               true,
-                                              true))
+                                              true,
+                                              realtime == juce::AudioProcessor::Realtime::yes))
                     return false;
 
                 for (int sampleIndex = 0; sampleIndex < samplesToRead; ++sampleIndex)
@@ -452,9 +471,11 @@ std::shared_ptr<offline::AnalysisResult> PlaybackRenderer::buildAnalysisResult(
     const offline::Worker::ShouldCancel& shouldCancel,
     const offline::Worker::ProgressCallback& onProgress)
 {
-    const juce::ScopedReadLock processingLock(lock.getProcessingReadWriteLock());
-    return analysePlaybackRegions(
-        offlineDocumentController, collectPlaybackRegions(), request, request.revision,
-        shouldCancel, onProgress);
+    return lock.withProcessingReadLock(shouldCancel, [&]
+    {
+        return analysePlaybackRegions(
+            offlineDocumentController, collectPlaybackRegions(), request, request.revision,
+            shouldCancel, onProgress);
+    });
 }
 }

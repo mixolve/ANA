@@ -5,7 +5,6 @@
 #include "PlaybackRenderer.h"
 
 #include <algorithm>
-#include <limits>
 
 
 bool PluginProcessor::isOfflineSourceAvailable() const noexcept
@@ -16,10 +15,17 @@ bool PluginProcessor::isOfflineSourceAvailable() const noexcept
     return bridge.hasTakeCatalogue();
 }
 
+bool PluginProcessor::usesHostFileAnalysis() const noexcept
+{
+    return isOfflineMonitorLocation() || reaperHostBridge.hasTakeCatalogue();
+}
+
 int PluginProcessor::getOfflineAnalysisProgress() const noexcept
 {
     if (offlineRefreshPending.load(std::memory_order_acquire))
         return 0;
+    if (usesHostFileAnalysis())
+        return hostAnalysisWorker.getProgress();
     if (auto* renderer = getEditorRenderer<ana::offline::EditorRenderer>())
         return renderer->getAnalysisProgress();
     if (auto* renderer = getPlaybackRenderer<ana::offline::PlaybackRenderer>())
@@ -40,7 +46,7 @@ void PluginProcessor::cancelOfflineAnalysis()
 void PluginProcessor::requestOfflineAnalysis(const size_t columnCount, const bool forceRefresh,
                                              const bool specMapMode, const size_t specMapRowCount)
 {
-    if (! isOfflineMode())
+    if (! isOfflineMode() || ! juce::Process::isForegroundProcess())
         return;
     const auto pendingRefresh = offlineRefreshPending.exchange(false, std::memory_order_acq_rel);
     const auto shouldForceRefresh = forceRefresh || pendingRefresh;
@@ -49,8 +55,10 @@ void PluginProcessor::requestOfflineAnalysis(const size_t columnCount, const boo
     const auto frequencies = getCrossoverFrequencies();
     const auto sourceChoices = getSourceChoices();
     refreshOfflineSelection(sourceChoices);
-    const auto sourceId = getSelectedOfflineSourceId();
-    const auto takeNumber = getSelectedOfflineTakeNumber();
+    const juce::String sourceId; // Automatic: all items on the current track, or selected items.
+    const auto takeNumber = isOfflineMonitorLocation()
+        ? (isOfflineKeepSecondTake() ? 2 : 1)
+        : getSelectedOfflineTakeNumber();
     const auto& fftSizes = ana::fft::StereoFftStream::supportedFftSizes;
     const auto* specFftSizeValue = getRawParameterValue(specFftSizeParameterId);
     const auto specFftSizeIndex = juce::jlimit(0, static_cast<int>(fftSizes.size()) - 1,
@@ -75,13 +83,15 @@ void PluginProcessor::requestOfflineAnalysis(const size_t columnCount, const boo
     const auto analyzerPage = getAnalyzerPageState();
     const auto includeLvlsPeakRms = isParameterEnabled(lvlsPeakRmsVisibleParameterId);
     const auto includeLvlsLoudness = isParameterEnabled(lvlsLoudnessVisibleParameterId);
-    const auto includeLvlsHistory = isParameterEnabled(lvlsHistoryVisibleParameterId);
+    const auto includeLvlsMetrics = isParameterEnabled(lvlsMetricsVisibleParameterId);
     const auto* lvlsRmsWindow = getRawParameterValue(lvlsRmsWindowMsParameterId);
     const auto* lvlsPeakHold = getRawParameterValue(lvlsPeakHoldMsParameterId);
 
     ana::offline::AnalysisRequest request;
     request.crossoverCount = std::min(crossoverCount, ana::dsp::LinkwitzRileyCrossover::numCrossovers);
     request.frequencies = frequencies;
+    if (const auto* slope = getRawParameterValue(scopSlopeParameterId))
+        request.scopSlopeDbPerOctave = slope->load(std::memory_order_relaxed);
     request.columnCount = std::max<size_t>(1, columnCount);
     request.specFftSize = fftSizes[static_cast<size_t>(specFftSizeIndex)];
     request.specMapMode = analyzerPage == ana::AnalyzerPage::spec && specMapMode;
@@ -99,12 +109,11 @@ void PluginProcessor::requestOfflineAnalysis(const size_t columnCount, const boo
     request.sourceId = sourceId;
     request.takeNumber = takeNumber;
     request.sourceChoices = sourceChoices;
-    request.useHostTakeChoices = isOfflineMonitorLocation()
-        || reaperHostBridge.hasTakeCatalogue();
+    request.useHostTakeChoices = usesHostFileAnalysis();
     request.analyzerPage = analyzerPage;
     request.includeLvlsPeakRms = includeLvlsPeakRms;
     request.includeLvlsLoudness = includeLvlsLoudness;
-    request.includeLvlsHistory = includeLvlsHistory;
+    request.includeLvlsMetrics = includeLvlsMetrics;
     request.lvlsRmsWindowMs = lvlsRmsWindow != nullptr
         ? lvlsRmsWindow->load(std::memory_order_relaxed) : ana::lvls::defaultRmsWindowMilliseconds;
     request.lvlsPeakHoldMs = lvlsPeakHold != nullptr
@@ -112,10 +121,11 @@ void PluginProcessor::requestOfflineAnalysis(const size_t columnCount, const boo
 
     auto* playbackRenderer = getPlaybackRenderer<ana::offline::PlaybackRenderer>();
     auto* editorRenderer = getEditorRenderer<ana::offline::EditorRenderer>();
-    if (playbackRenderer == nullptr && editorRenderer == nullptr)
+    if (request.useHostTakeChoices || (playbackRenderer == nullptr && editorRenderer == nullptr))
     {
-        // Without ARA roles there are no native regions to fall back to. An
-        // empty host catalogue must also replace a previous MONITOR result.
+        // REAPER's catalogue and source files are independent of ARA focus roles.
+        // Keep their worker/result owned by the processor, including when a
+        // renderer is removed and reattached without a media edit.
         request.useHostTakeChoices = true;
         hostAnalysisWorker.request(std::move(request), shouldForceRefresh);
         return;
@@ -130,6 +140,8 @@ void PluginProcessor::requestOfflineAnalysis(const size_t columnCount, const boo
 
 std::shared_ptr<const ana::offline::AnalysisResult> PluginProcessor::getAnalysisResult() const
 {
+    if (usesHostFileAnalysis())
+        return hostAnalysisWorker.getAnalysisResult();
     std::shared_ptr<const ana::offline::AnalysisResult> playbackAnalysis;
 
     if (auto* renderer = getPlaybackRenderer<ana::offline::PlaybackRenderer>())
@@ -193,7 +205,10 @@ std::vector<ana::offline::SourceChoice> PluginProcessor::getSourceChoices() cons
 
 bool PluginProcessor::isOfflineLocationAvailable() const
 {
-    return reaperHostBridge.isAvailable();
+    // A host-interface reattachment must not flip the UI to realtime while
+    // REAPER's source catalogue and processor-owned offline result remain valid.
+    return reaperHostBridge.isAvailable() || reaperHostBridge.hasTakeCatalogue()
+        || monitorHostBridge.hasTakeCatalogue();
 }
 
 bool PluginProcessor::isOfflineMonitorLocation() const noexcept
@@ -226,6 +241,9 @@ juce::String PluginProcessor::getOfflineTrackName() const
 void PluginProcessor::setOfflineMonitorLocation(const bool requestedMonitor)
 {
     const auto monitor = requestedMonitor && isOfflineLocationAvailable();
+    auto* parameter = parameters.getParameter(offlineMonitorParameterId);
+    const auto normalized = monitor ? 1.0f : 0.0f;
+    if (!juce::approximatelyEqual(parameter->getValue(), normalized)) parameter->setValueNotifyingHost(normalized);
     if (offlineMonitorLocation.exchange(monitor, std::memory_order_acq_rel) == monitor)
         return;
     {
@@ -235,8 +253,6 @@ void PluginProcessor::setOfflineMonitorLocation(const bool requestedMonitor)
     monitorHostBridge.setEnabled(monitor);
     forceOfflineRefresh();
     parameters.state.setProperty(offlineLocationStateKey, monitor ? 1 : 0, nullptr);
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                          .withNonParameterStateChanged(true));
 }
 
 bool PluginProcessor::isOfflineAutomaticRefresh() const noexcept
@@ -251,8 +267,6 @@ void PluginProcessor::setOfflineAutomaticRefresh(const bool automatic)
     parameters.state.setProperty(offlineAutomaticRefreshStateKey, automatic, nullptr);
     if (automatic)
         forceOfflineRefresh();
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                          .withNonParameterStateChanged(true));
 }
 
 void PluginProcessor::syncOfflineAnalysisSources(const bool force)
@@ -290,41 +304,15 @@ void PluginProcessor::forceOfflineRefresh()
 
 void PluginProcessor::refreshOfflineSelection(const std::vector<ana::offline::SourceChoice>& choices)
 {
+    if (restoringState.load(std::memory_order_acquire) || choices.empty()) return;
     const auto& bridge = isOfflineMonitorLocation() ? monitorHostBridge : reaperHostBridge;
-    // Do not mistake a partially attached ARA document for REAPER's complete
-    // item/take catalogue while restoring a preset.
-    if (choices.empty() || (bridge.isAvailable() && ! bridge.hasTakeCatalogue()))
-        return;
+    if (bridge.isAvailable() && ! bridge.hasTakeCatalogue()) return;
 
-    auto sourceId = getSelectedOfflineSourceId();
-    if (sourceId.isNotEmpty() && std::none_of(choices.begin(), choices.end(),
-        [&sourceId] (const auto& choice) { return choice.sourceId == sourceId; }))
-    {
+    // Sources are chosen automatically: the instance's parent track in TRACK,
+    // or REAPER's selected items/track in MONITOR. Keep TRACK's saved TAKE
+    // independent of MONITOR's KST state when switching locations.
+    if (getSelectedOfflineSourceId().isNotEmpty())
         setSelectedOfflineSourceId({});
-        sourceId.clear();
-    }
-    if (isOfflineKeepSecondTake() && std::any_of(choices.begin(), choices.end(),
-        [&sourceId] (const auto& choice)
-        {
-            return choice.takeNumber == 2
-                && (sourceId.isEmpty() || choice.sourceId == sourceId);
-        }))
-    {
-        setSelectedOfflineTakeNumber(2);
-        return;
-    }
-    const auto takeNumber = getSelectedOfflineTakeNumber();
-    auto firstTake = std::numeric_limits<int>::max();
-    for (const auto& choice : choices)
-    {
-        if (sourceId.isNotEmpty() && choice.sourceId != sourceId)
-            continue;
-        if (choice.takeNumber == takeNumber)
-            return;
-        firstTake = std::min(firstTake, choice.takeNumber);
-    }
-    if (firstTake != std::numeric_limits<int>::max())
-        setSelectedOfflineTakeNumber(firstTake);
 }
 
 bool PluginProcessor::isOfflineKeepSecondTake() const noexcept
@@ -334,13 +322,14 @@ bool PluginProcessor::isOfflineKeepSecondTake() const noexcept
 
 void PluginProcessor::setOfflineKeepSecondTake(const bool keep)
 {
+    auto* parameter = parameters.getParameter(offlineKeepTakeParameterId);
+    const auto normalized = keep ? 1.0f : 0.0f;
+    if (!juce::approximatelyEqual(parameter->getValue(), normalized)) parameter->setValueNotifyingHost(normalized);
     if (offlineKeepSecondTake.exchange(keep, std::memory_order_acq_rel) == keep)
         return;
     parameters.state.setProperty(offlineKeepSecondTakeStateKey, keep, nullptr);
-    if (keep)
-        refreshOfflineSelection(getSourceChoices());
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                          .withNonParameterStateChanged(true));
+    if (isOfflineMonitorLocation())
+        forceOfflineRefresh();
 }
 
 juce::String PluginProcessor::getSelectedOfflineSourceId() const
@@ -368,14 +357,11 @@ void PluginProcessor::setSelectedOfflineSourceId(const juce::String& sourceId)
         parameters.state.removeProperty(offlineSourceStateKey, nullptr);
     else
         parameters.state.setProperty(offlineSourceStateKey, sourceId, nullptr);
-
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                          .withNonParameterStateChanged(true));
 }
 
 void PluginProcessor::setSelectedOfflineTakeNumber(const int takeNumber)
 {
-    const auto validTakeNumber = juce::jmax(1, takeNumber);
+    const auto validTakeNumber = juce::jlimit(1, 2, takeNumber);
     {
         const juce::ScopedLock scopedLock(offlineSelectionLock);
         if (selectedOfflineTakeNumber == validTakeNumber)
@@ -384,7 +370,15 @@ void PluginProcessor::setSelectedOfflineTakeNumber(const int takeNumber)
     }
 
     parameters.state.setProperty(offlineTakeNumberStateKey, validTakeNumber, nullptr);
+    if (! isOfflineMonitorLocation())
+        forceOfflineRefresh();
+}
 
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
-                          .withNonParameterStateChanged(true));
+void PluginProcessor::requestOfflineRefresh()
+{
+    if (!isOfflineMode()) return;
+    auto* parameter = parameters.getParameter(offlineRefreshParameterId);
+    parameter->beginChangeGesture();
+    parameter->setValueNotifyingHost(1.0f);
+    parameter->endChangeGesture();
 }

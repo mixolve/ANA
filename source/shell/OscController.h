@@ -29,19 +29,19 @@ public:
 private:
     void oscMessageReceived(const juce::OSCMessage&) override;
     void oscBundleReceived(const juce::OSCBundle&) override;
-    void handleBundle(const juce::OSCBundle&);
     void timerCallback() override;
     void handleAsyncUpdate() override;
     void sendCurrentState(bool force);
     static bool readNumber(const juce::OSCArgument&, float&);
 
     PluginProcessor& processor;
-    juce::OSCReceiver receiver { "ANA REALTIME OSC receiver" };
+    juce::OSCReceiver receiver { "ANA OSC receiver" };
     juce::OSCSender sender;
     OscSettings currentSettings;
     OscSettings pendingSettings;
     juce::CriticalSection pendingSettingsLock;
     std::map<juce::String, float> lastSentValues;
+    juce::String assignedSignature;
     bool inputConnected = false;
     bool outputConnected = false;
     mutable std::atomic<bool> portBusy { false };

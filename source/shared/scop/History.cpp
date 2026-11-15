@@ -154,12 +154,18 @@ void ScopHistory::accumulateBand(const size_t bandIndex, const AnalysisChannelSa
 
 void ScopHistory::accumulateWideband(const AnalysisChannelSamples& samples) noexcept
 {
-    for (size_t modeIndex = 0; modeIndex < samples.size(); ++modeIndex)
+    accumulateWidebandExtrema(samples, samples);
+}
+
+void ScopHistory::accumulateWidebandExtrema(const AnalysisChannelSamples& minimums,
+                                            const AnalysisChannelSamples& maximums) noexcept
+{
+    for (size_t modeIndex = 0; modeIndex < minimums.size(); ++modeIndex)
     {
         widebandColumnMinimums[modeIndex] = std::min(
-            widebandColumnMinimums[modeIndex], samples[modeIndex]);
+            widebandColumnMinimums[modeIndex], minimums[modeIndex]);
         widebandColumnMaximums[modeIndex] = std::max(
-            widebandColumnMaximums[modeIndex], samples[modeIndex]);
+            widebandColumnMaximums[modeIndex], maximums[modeIndex]);
     }
 }
 

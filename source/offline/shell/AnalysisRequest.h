@@ -2,8 +2,9 @@
 
 #include "SourceChoice.h"
 #include "shared/scop/Crossover.h"
+#include "shared/scop/Settings.h"
 #include "shared/lvls/Settings.h"
-#include "shared/shell/Page.h"
+#include "shared/shell/AnalyzerPage.h"
 #include "StereoFftStream.h"
 
 #include <JuceHeader.h>
@@ -20,6 +21,7 @@ struct AnalysisRequest
     dsp::LinkwitzRileyCrossover::CrossoverFrequencies frequencies =
         dsp::LinkwitzRileyCrossover::defaultFrequencies;
     size_t crossoverCount = dsp::LinkwitzRileyCrossover::numCrossovers;
+    float scopSlopeDbPerOctave = scop::defaultSlopeDecibelsPerOctave;
     size_t columnCount = 512;
     int specFftSize = fft::StereoFftStream::defaultFftSize;
     float specFftOverlap = fft::StereoFftStream::defaultOverlap;
@@ -36,23 +38,22 @@ struct AnalysisRequest
     AnalyzerPage analyzerPage = AnalyzerPage::spec;
     bool includeLvlsPeakRms = true;
     bool includeLvlsLoudness = true;
-    bool includeLvlsHistory = true;
+    bool includeLvlsMetrics = true;
     float lvlsRmsWindowMs = lvls::defaultRmsWindowMilliseconds;
     float lvlsPeakHoldMs = lvls::defaultPeakHoldMilliseconds;
     uint64_t regionGeneration = 0;
     uint64_t revision = 0;
 
+    bool hasHostSourceChoices() const noexcept
+    {
+        return useHostTakeChoices || std::any_of(sourceChoices.begin(), sourceChoices.end(),
+            [] (const auto& choice) { return choice.hostEnumerated; });
+    }
+
     bool hasSameSettings(const AnalysisRequest& other) const
     {
-        const auto usesHostEnumeratedCatalog = [] (const auto& choices)
-        {
-            return std::any_of(choices.begin(), choices.end(),
-                               [] (const auto& choice) { return choice.hostEnumerated; });
-        };
         const auto compareOfflineRegionGeneration =
-            ! useHostTakeChoices && ! other.useHostTakeChoices
-            && ! usesHostEnumeratedCatalog(sourceChoices)
-            && ! usesHostEnumeratedCatalog(other.sourceChoices);
+            ! hasHostSourceChoices() && ! other.hasHostSourceChoices();
 
         if (analyzerPage != other.analyzerPage
             || sourceId != other.sourceId
@@ -67,6 +68,8 @@ struct AnalysisRequest
             case AnalyzerPage::scop:
                 return crossoverCount == other.crossoverCount
                     && frequencies == other.frequencies
+                    // Cache identity requires exact parameter values.
+                    && juce::exactlyEqual(scopSlopeDbPerOctave, other.scopSlopeDbPerOctave)
                     && columnCount == other.columnCount;
 
             case AnalyzerPage::spec:
@@ -88,7 +91,7 @@ struct AnalysisRequest
             case AnalyzerPage::lvls:
                 return includeLvlsPeakRms == other.includeLvlsPeakRms
                     && includeLvlsLoudness == other.includeLvlsLoudness
-                    && includeLvlsHistory == other.includeLvlsHistory
+                    && includeLvlsMetrics == other.includeLvlsMetrics
                     && juce::approximatelyEqual(lvlsRmsWindowMs, other.lvlsRmsWindowMs)
                     && juce::approximatelyEqual(lvlsPeakHoldMs, other.lvlsPeakHoldMs);
         }

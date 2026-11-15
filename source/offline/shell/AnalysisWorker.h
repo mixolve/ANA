@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace ana::offline
 {
@@ -30,16 +31,26 @@ public:
     void stop();
 
     std::shared_ptr<const AnalysisResult> getAnalysisResult() const;
+    // -1 means the latest build failed; 0..99 is running, 100 is complete/idle.
     int getProgress() const noexcept { return progress.load(std::memory_order_acquire); }
 
 private:
     void run() override;
 
+    struct CacheEntry
+    {
+        AnalysisRequest settings;
+        std::shared_ptr<const AnalysisResult> result;
+    };
+    static constexpr size_t maximumCachedAnalyses = 6;
+
     BuildAnalysis buildAnalysis;
     mutable juce::CriticalSection stateLock;
     std::optional<AnalysisRequest> pendingRequest;
     std::shared_ptr<const AnalysisResult> analysis;
+    std::vector<CacheEntry> completedCache;
     AnalysisRequest latestSettings;
+    double retryNotBeforeMilliseconds = 0.0;
     std::atomic<uint64_t> latestRevision { 0 };
     std::atomic<int> progress { 100 };
     std::atomic<bool> stopped { false };

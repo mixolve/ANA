@@ -6,23 +6,133 @@
 
 namespace ana::spec
 {
+namespace { constexpr const char* snapshotsStateKey = "ana.spec.snapshots"; }
+
+SnapshotStore::SnapshotStore(juce::ValueTree* stateIn) : state(stateIn)
+{
+    synchroniseState();
+}
+
+juce::String SnapshotStore::getName(const size_t index) const
+{
+    return index < snapshots.size() ? snapshots[index].name : juce::String();
+}
+
+void SnapshotStore::setName(const size_t index, const juce::String& name)
+{
+    synchroniseState();
+    if (index >= snapshots.size() || snapshots[index].name == name)
+        return;
+    snapshots[index].name = name;
+    persistState();
+}
+
+void SnapshotStore::persistState()
+{
+    if (state == nullptr)
+        return;
+    juce::ValueTree saved("ANA_SNAPSHOTS");
+    for (size_t index = 0; index < snapshots.size(); ++index)
+    {
+        const auto& snapshot = snapshots[index];
+        juce::ValueTree slot("SNAPSHOT");
+        slot.setProperty("name", snapshot.name, nullptr);
+        slot.setProperty("colour", snapshot.colour.toString(), nullptr);
+        slot.setProperty("gain", snapshot.gainDb, nullptr);
+        slot.setProperty("visible", snapshot.visible, nullptr);
+        juce::MemoryOutputStream payload;
+        if (snapshot.hasData && writeSnapshot(index, payload))
+            slot.setProperty("data", juce::var(payload.getMemoryBlock()), nullptr);
+        saved.addChild(slot, -1, nullptr);
+    }
+    juce::MemoryOutputStream output;
+    saved.writeToStream(output);
+    lastState = juce::var(output.getMemoryBlock());
+    state->setProperty(snapshotsStateKey, lastState, nullptr);
+}
+
+bool SnapshotStore::synchroniseState()
+{
+    if (state == nullptr)
+        return false;
+    const auto stored = state->getProperty(snapshotsStateKey);
+    if (stored == lastState)
+        return false;
+    if (! loadState(stored)) return false;
+    lastState = stored;
+    return true;
+}
+
+bool SnapshotStore::isValidState(const juce::var& stored)
+{
+    SnapshotStore loaded;
+    return loaded.loadState(stored);
+}
+
+bool SnapshotStore::loadState(const juce::var& stored)
+{
+    SnapshotStore loaded;
+    if (! stored.isVoid())
+    {
+        const auto* bytes = stored.getBinaryData();
+        if (bytes == nullptr) return false;
+        const auto saved = juce::ValueTree::readFromData(bytes->getData(), bytes->getSize());
+        if (! saved.hasType("ANA_SNAPSHOTS") || saved.getNumProperties() != 0) return false;
+        for (const auto slot : saved)
+        {
+            if (! slot.hasType("SNAPSHOT") || slot.getNumChildren() != 0
+                || ! slot.hasProperty("name") || ! slot.hasProperty("colour")
+                || ! slot.hasProperty("gain") || ! slot.hasProperty("visible")) return false;
+            const auto colour = slot.getProperty("colour").toString();
+            const auto gain = static_cast<float>(slot.getProperty("gain"));
+            const auto visible = slot.getProperty("visible").toString();
+            if (! slot.getProperty("name").isString() || (colour.isEmpty() || colour.length() > 8)
+                || ! colour.containsOnly("0123456789abcdefABCDEF")
+                || (! slot.getProperty("gain").isDouble() && ! slot.getProperty("gain").isInt())
+                || ! std::isfinite(gain) || gain < snapshotGainMinimumDb || gain > snapshotGainMaximumDb
+                || (visible != "0" && visible != "1")) return false;
+            loaded.snapshots.emplace_back();
+            const auto index = loaded.snapshots.size() - 1;
+            if (slot.hasProperty("data"))
+            {
+                const auto* data = slot.getProperty("data").getBinaryData();
+                if (data == nullptr) return false;
+                juce::MemoryInputStream input(*data, false);
+                if (! loaded.readSnapshot(index, input)) return false;
+            }
+            auto& snapshot = loaded.snapshots[index];
+            snapshot.name = slot.getProperty("name").toString();
+            snapshot.colour = juce::Colour::fromString(colour);
+            snapshot.gainDb = gain;
+            snapshot.visible = visible == "1";
+        }
+    }
+    snapshots = std::move(loaded.snapshots);
+    return true;
+}
+
 size_t SnapshotStore::addSnapshotSlot()
 {
+    synchroniseState();
     snapshots.emplace_back();
+    persistState();
     return snapshots.size() - 1;
 }
 
 bool SnapshotStore::removeSnapshotSlot(const size_t snapshotIndex)
 {
+    synchroniseState();
     if (snapshotIndex >= snapshots.size())
         return false;
 
     snapshots.erase(snapshots.begin() + static_cast<std::ptrdiff_t>(snapshotIndex));
+    persistState();
     return true;
 }
 
 void SnapshotStore::setSnapshotVisible(const size_t snapshotIndex, const bool shouldBeVisible)
 {
+    synchroniseState();
     if (snapshotIndex >= snapshots.size())
         return;
 
@@ -30,10 +140,12 @@ void SnapshotStore::setSnapshotVisible(const size_t snapshotIndex, const bool sh
         return;
 
     snapshots[snapshotIndex].visible = shouldBeVisible;
+    persistState();
 }
 
 void SnapshotStore::setSnapshotColour(const size_t snapshotIndex, const juce::Colour colour)
 {
+    synchroniseState();
     if (snapshotIndex >= snapshots.size())
         return;
 
@@ -41,10 +153,12 @@ void SnapshotStore::setSnapshotColour(const size_t snapshotIndex, const juce::Co
         return;
 
     snapshots[snapshotIndex].colour = colour;
+    persistState();
 }
 
 void SnapshotStore::setSnapshotGain(const size_t snapshotIndex, const float gainDb)
 {
+    synchroniseState();
     if (snapshotIndex >= snapshots.size() || ! std::isfinite(gainDb))
         return;
 
@@ -53,6 +167,7 @@ void SnapshotStore::setSnapshotGain(const size_t snapshotIndex, const float gain
         return;
 
     snapshots[snapshotIndex].gainDb = clampedGain;
+    persistState();
 }
 
 bool SnapshotStore::writeSnapshot(const size_t snapshotIndex, juce::OutputStream& output) const
@@ -100,6 +215,7 @@ bool SnapshotStore::writeSnapshot(const size_t snapshotIndex, juce::OutputStream
 
 bool SnapshotStore::readSnapshot(const size_t snapshotIndex, juce::InputStream& input)
 {
+    synchroniseState();
     if (snapshotIndex >= snapshots.size())
         return false;
 
@@ -157,7 +273,9 @@ bool SnapshotStore::readSnapshot(const size_t snapshotIndex, juce::InputStream& 
         return false;
 
     loaded.hasData = true;
+    loaded.name = snapshots[snapshotIndex].name;
     snapshots[snapshotIndex] = std::move(loaded);
+    persistState();
     return true;
 }
 

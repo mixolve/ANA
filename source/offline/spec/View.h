@@ -5,6 +5,7 @@
 #include "shared/shell/Controls.h"
 #include "shared/shell/ParameterControl.h"
 #include "shared/spec/MonitorMode.h"
+#include "shared/spec/ViewMode.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -32,11 +33,7 @@ public:
     bool captureSnapshot(size_t snapshotIndex);
 
 private:
-    enum class ViewMode
-    {
-        frequency,
-        map
-    };
+    using ViewMode = ana::spec::ViewMode;
 
     void timerCallback() override;
     void syncRangeSliders();
@@ -64,11 +61,9 @@ private:
     EllipsisLabel mapTimeStartReadoutLabel;
     EllipsisLabel mapTimeEndReadoutLabel;
     std::array<std::unique_ptr<ControlButton>, ana::spec::monitorModeCount> monitorButtons;
-    ControlButton freqButton { "FREQ" };
-    ControlButton mapButton { "MAP" };
     RangeSlider frequencyRangeSlider;
     RangeSlider mapTimeRangeSlider;
-    RangeSlider magnitudeRangeSlider { RangeSlider::Orientation::vertical };
+    RangeSlider verticalRangeSlider { RangeSlider::Orientation::vertical };
     std::vector<float> primarySpec;
     std::vector<float> secondarySpec;
     std::vector<ana::spec::SpectrumSnapshot>& snapshots;

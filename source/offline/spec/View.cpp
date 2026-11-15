@@ -5,7 +5,7 @@
 #include "shared/spec/Settings.h"
 #include "shared/spec/SpectrumProcessing.h"
 #include "shared/shell/AnalyzerViewUtilities.h"
-#include "shared/spec/SpectrogramFrequencyScale.h"
+#include "shared/spec/MapFrequencyScale.h"
 #include "shared/shell/GraphColours.h"
 
 #include <algorithm>
@@ -35,17 +35,15 @@ OfflineSpecView::OfflineSpecView(PluginProcessor& processorRef,
                        "RANGE-HIGH", [] (const double value) { return formatReadoutLevel(value); }),
       snapshots(snapshotData)
 {
-    for (auto* control : std::array<ParameterControl*, 2> {
-             &frequencyLowControl, &frequencyHighControl })
-        control->setWheelSpeedMultiplier(1600.0f);
-    for (auto* control : std::array<ParameterControl*, 2> {
-             &rangeLowControl, &rangeHighControl })
-        control->setWheelSpeedMultiplier(40.0f);
+    setName(processor.isSpecMapView() ? "spec-map-graph" : "spec-freq-graph");
+    frequencyRangeSlider.setComponentID("spec-frequency-range");
+    verticalRangeSlider.setComponentID("spec-level-range");
 
     for (auto* component : std::array<juce::Component*, 6> {
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl,
-             &frequencyRangeSlider, &magnitudeRangeSlider })
+             &frequencyRangeSlider, &verticalRangeSlider })
         addAndMakeVisible(*component);
+    mapTimeRangeSlider.setComponentID("spec-time-range");
     addAndMakeVisible(mapTimeRangeSlider);
 
     configureCursorReadoutLabel(cursorReadoutLabel);
@@ -59,20 +57,14 @@ OfflineSpecView::OfflineSpecView(PluginProcessor& processorRef,
     configureCursorReadoutLabel(cursorVerticalReadoutLabel);
     addAndMakeVisible(cursorVerticalReadoutLabel);
 
-    configureCursorReadoutLabel(mapTimeStartReadoutLabel);
-    configureCursorReadoutLabel(mapTimeEndReadoutLabel);
+    configureCursorReadoutLabel(mapTimeStartReadoutLabel, ana::ui::dark);
+    configureCursorReadoutLabel(mapTimeEndReadoutLabel, ana::ui::dark);
     mapTimeStartReadoutLabel.setText("00:00.000", juce::dontSendNotification);
     mapTimeEndReadoutLabel.setText("00:00.000", juce::dontSendNotification);
     addAndMakeVisible(mapTimeStartReadoutLabel);
     addAndMakeVisible(mapTimeEndReadoutLabel);
 
     viewMode = processor.isSpecMapView() ? ViewMode::map : ViewMode::frequency;
-    freqButton.setToggleState(viewMode == ViewMode::frequency, juce::dontSendNotification);
-    mapButton.setToggleState(viewMode == ViewMode::map, juce::dontSendNotification);
-    freqButton.onClick = [this] { setViewMode(ViewMode::frequency); };
-    mapButton.onClick = [this] { setViewMode(ViewMode::map); };
-    addAndMakeVisible(freqButton);
-    addAndMakeVisible(mapButton);
 
     for (size_t index = 0; index < monitorButtons.size(); ++index)
     {
@@ -89,6 +81,7 @@ OfflineSpecView::OfflineSpecView(PluginProcessor& processorRef,
              &frequencyLowControl, &frequencyHighControl, &rangeLowControl, &rangeHighControl })
     {
         control->setCompact(true);
+        control->setRangeAdjustmentEnabled(false);
         control->onValueChanged = [this] { repaint(); };
     }
 
@@ -127,7 +120,7 @@ OfflineSpecView::OfflineSpecView(PluginProcessor& processorRef,
         if (viewMode == ViewMode::map)
             scheduleMapImageRebuild();
     };
-    magnitudeRangeSlider.onRangeChanged = [this]
+    verticalRangeSlider.onRangeChanged = [this]
     {
         if (! synchronisingRanges)
             updateVerticalRangeFromSlider();
@@ -147,6 +140,7 @@ bool OfflineSpecView::captureSnapshot(const size_t snapshotIndex)
         return false;
 
     ana::spec::SpectrumSnapshot captured;
+    captured.name = snapshots[snapshotIndex].name;
     captured.colour = snapshots[snapshotIndex].colour;
     captured.gainDb = snapshots[snapshotIndex].gainDb;
 
@@ -189,7 +183,7 @@ bool OfflineSpecView::captureSnapshot(const size_t snapshotIndex)
 
 void OfflineSpecView::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(ana::ui::background);
+    graphics.fillAll(ana::ui::windowBackground);
     const auto plotBounds = getPlotBounds();
     if (plotBounds.isEmpty())
         return;
@@ -223,7 +217,7 @@ void OfflineSpecView::paint(juce::Graphics& graphics)
         {
             const auto cursorPane = splitPaneForCursor(plotBounds, cursorPosition.y, useSplitView);
             graphics.setColour(ana::ui::white.withAlpha(0.65f));
-            if (showVerticalCursor || showNotes)
+            if (showVerticalCursor)
                 graphics.drawLine(cursorPane.getX(), cursorPosition.y,
                                   cursorPane.getRight(), cursorPosition.y, 0.5f);
             if (showHorizontalCursor)
@@ -323,7 +317,7 @@ void OfflineSpecView::paint(juce::Graphics& graphics)
     {
         const auto cursorPane = splitPaneForCursor(plotBounds, cursorPosition.y, useSplitView);
         graphics.setColour(ana::ui::white);
-        if (showHorizontalCursor || showCursorNotes)
+        if (showHorizontalCursor)
             graphics.drawLine(cursorPosition.x, plotBounds.getY(), cursorPosition.x, plotBounds.getBottom(), 0.5f);
         if (showVerticalCursor)
             graphics.drawLine(cursorPane.getX(), cursorPosition.y, cursorPane.getRight(), cursorPosition.y, 0.5f);
@@ -340,14 +334,13 @@ void OfflineSpecView::resized()
     };
     const auto freqMode = viewMode == ViewMode::frequency;
     const auto mapMode = viewMode == ViewMode::map;
-    const auto offlineMap = mapMode;
     const auto showCursorHorizontal = (freqMode || mapMode)
         && readVisibility(PluginProcessor::specCursorReadoutParameterId);
     const auto showCursorNotes = readVisibility(PluginProcessor::specCursorNotesParameterId);
     const auto showCursorVertical = (freqMode || mapMode)
         && readVisibility(PluginProcessor::specCursorVerticalReadoutParameterId);
-    const auto showMonitor = readVisibility(PluginProcessor::specMonitorControlsParameterId);
-    const auto showHorizontalZoom = (freqMode || offlineMap)
+    const bool showMonitor = false;
+    const auto showHorizontalZoom = (freqMode || mapMode)
         && readVisibility(PluginProcessor::specHorizontalZoomParameterId);
     const auto showVerticalZoom = (freqMode || mapMode)
         && readVisibility(PluginProcessor::specVerticalZoomParameterId);
@@ -364,13 +357,14 @@ void OfflineSpecView::resized()
         : (freqMode ? levelReadoutWidth : 0);
     auto topArea = juce::Rectangle<int>(plotBounds.getX(), plotBounds.getY(),
                                         plotBounds.getWidth(), ana::ui::controlHeight);
+    topArea.removeFromLeft(ana::ui::analyzer_detail::topLeftOverlayWidth(*this));
+    const int overlayWidth=ana::ui::analyzer_detail::topRightOverlayWidth(*this);
+    if(overlayWidth>0) topArea.removeFromRight(overlayWidth+(showVerticalZoom?0:bandRangeSliderHeight+ana::ui::gap.pixels()));
     auto topReadouts = topArea.removeFromRight(rangeReadoutWidth);
     if (rangeReadoutWidth > 0)
         ana::ui::gap.removeFromRight(topArea);
 
     ana::ui::FixedGapRow topControls(topArea);
-    freqButton.setBounds(topControls.takeLeft(freqButton.getPreferredWidth()));
-    mapButton.setBounds(topControls.takeLeft(mapButton.getPreferredWidth()));
     int monitorWidth = 0;
     for (const auto& button : monitorButtons)
         monitorWidth += button->getPreferredWidth() + (monitorWidth > 0 ? ana::ui::gap.pixels() : 0);
@@ -436,7 +430,7 @@ void OfflineSpecView::resized()
         frequencyLowControl.setBounds(graphRight - frequencyReadoutWidth, readoutY,
                                       frequencyReadoutWidth, ana::ui::controlHeight);
         rangeLowControl.setBounds({});
-        if (offlineMap)
+        if (mapMode)
         {
             mapTimeStartReadoutLabel.setBounds(plotBounds.getX(), readoutY,
                                                timeReadoutWidth, ana::ui::controlHeight);
@@ -452,71 +446,31 @@ void OfflineSpecView::resized()
         }
     }
 
-    cursorReadoutLabel.setBounds({});
-    cursorNoteReadoutLabel.setBounds({});
-    cursorVerticalReadoutLabel.setBounds({});
-    if ((showCursorHorizontal || showCursorNotes || showCursorVertical) && freqMode)
+    // Place the three hover readouts in the header of FREQ and MAP.
+    // Unlike the axis labels they must not move with the lower axis.
+    const auto cursorNoteWidth = ana::ui::textControlWidth(4)
+        - 2 * (ana::ui::textPadding - cursorNotePadding);
+    if (freqMode)
     {
-        const auto left = frequencyLowControl.getRight() + ana::ui::gap.pixels();
-        const auto right = frequencyHighControl.getX() - ana::ui::gap.pixels();
-        const auto noteWidth = ana::ui::textControlWidth(4)
-            - 2 * (ana::ui::textPadding - cursorNotePadding);
-        const auto cursorBaseWidth = (showCursorHorizontal ? frequencyReadoutWidth : 0)
-            + (showCursorNotes ? (showCursorHorizontal ? ana::ui::gap.pixels() : 0) + noteWidth : 0);
-        const auto verticalFits = showCursorVertical && cursorBaseWidth
-            + (cursorBaseWidth > 0 ? ana::ui::gap.pixels() : 0)
-            + levelReadoutWidth <= right - left;
-        const auto cursorWidth = cursorBaseWidth
-            + (verticalFits ? (cursorBaseWidth > 0 ? ana::ui::gap.pixels() : 0) + levelReadoutWidth : 0);
-        const auto cursorX = juce::jlimit(left, std::max(left, right - cursorWidth),
-                                          plotBounds.getCentreX() - cursorWidth / 2);
-        if (showCursorHorizontal)
-            cursorReadoutLabel.setBounds(cursorX, readoutY,
-                                         frequencyReadoutWidth, ana::ui::controlHeight);
-        if (showCursorNotes)
-            cursorNoteReadoutLabel.setBounds(cursorX
-                                                + (showCursorHorizontal ? frequencyReadoutWidth + ana::ui::gap.pixels() : 0), readoutY,
-                                             noteWidth, ana::ui::controlHeight);
-        if (showCursorVertical)
-            cursorVerticalReadoutLabel.setBounds(verticalFits
-                                                     ? cursorX + cursorBaseWidth
-                                                         + (cursorBaseWidth > 0 ? ana::ui::gap.pixels() : 0)
-                                                     : graphRight - levelReadoutWidth,
-                                                 verticalFits ? readoutY
-                                                     : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
-                                                 levelReadoutWidth, ana::ui::controlHeight);
+        ana::ui::analyzer_detail::layoutCursorReadoutsAtTop(topArea, plotBounds, {
+            { &cursorReadoutLabel, showCursorHorizontal ? frequencyReadoutWidth : 0 },
+            { &cursorNoteReadoutLabel, showCursorNotes ? cursorNoteWidth : 0 },
+            { &cursorVerticalReadoutLabel, showCursorVertical ? levelReadoutWidth : 0 }
+        });
     }
-    else if ((showCursorHorizontal || showCursorNotes || showCursorVertical) && mapMode)
+    else if (mapMode)
     {
-        const auto left = showHorizontalReadouts
-            ? mapTimeStartReadoutLabel.getRight() + ana::ui::gap.pixels()
-            : plotBounds.getX();
-        const auto right = showHorizontalReadouts
-            ? mapTimeEndReadoutLabel.getX() - ana::ui::gap.pixels()
-            : (showVerticalReadouts ? frequencyLowControl.getX() - ana::ui::gap.pixels() : graphRight);
-        const auto noteWidth = ana::ui::textControlWidth(4)
-            - 2 * (ana::ui::textPadding - cursorNotePadding);
-        const auto frequencyWidth = (showCursorVertical ? mapCursorFrequencyWidth : 0)
-            + (showCursorNotes ? (showCursorVertical ? ana::ui::gap.pixels() : 0) + noteWidth : 0);
-        const auto timeFits = showCursorHorizontal && frequencyWidth
-            + (frequencyWidth > 0 ? ana::ui::gap.pixels() : 0) + mapCursorTimeWidth <= right - left;
-        const auto cursorWidth = frequencyWidth
-            + (timeFits ? (frequencyWidth > 0 ? ana::ui::gap.pixels() : 0) + mapCursorTimeWidth : 0);
-        const auto cursorX = juce::jlimit(left, std::max(left, right - cursorWidth),
-                                        plotBounds.getCentreX() - cursorWidth / 2);
-        if (showCursorVertical)
-            cursorVerticalReadoutLabel.setBounds(cursorX, readoutY,
-                mapCursorFrequencyWidth, ana::ui::controlHeight);
-        if (showCursorNotes)
-            cursorNoteReadoutLabel.setBounds(cursorX
-                + (showCursorVertical ? mapCursorFrequencyWidth + ana::ui::gap.pixels() : 0),
-                readoutY, noteWidth, ana::ui::controlHeight);
-        if (showCursorHorizontal)
-            cursorReadoutLabel.setBounds(timeFits
-                ? cursorX + frequencyWidth + (frequencyWidth > 0 ? ana::ui::gap.pixels() : 0)
-                : graphRight - mapCursorTimeWidth,
-                timeFits ? readoutY : readoutY - ana::ui::controlHeight - ana::ui::gap.pixels(),
-                mapCursorTimeWidth, ana::ui::controlHeight);
+        ana::ui::analyzer_detail::layoutCursorReadoutsAtTop(topArea, plotBounds, {
+            { &cursorVerticalReadoutLabel, showCursorVertical ? mapCursorFrequencyWidth : 0 },
+            { &cursorNoteReadoutLabel, showCursorNotes ? cursorNoteWidth : 0 },
+            { &cursorReadoutLabel, showCursorHorizontal ? mapCursorTimeWidth : 0 }
+        });
+    }
+    else
+    {
+        cursorReadoutLabel.setBounds({});
+        cursorNoteReadoutLabel.setBounds({});
+        cursorVerticalReadoutLabel.setBounds({});
     }
 
     const auto horizontalZoomWidth = getWidth() - (showVerticalZoom
@@ -525,11 +479,11 @@ void OfflineSpecView::resized()
         ? juce::Rectangle<int>(0, getHeight() - bandRangeSliderHeight,
                                horizontalZoomWidth, bandRangeSliderHeight)
         : juce::Rectangle<int>());
-    mapTimeRangeSlider.setBounds(showHorizontalZoom && offlineMap
+    mapTimeRangeSlider.setBounds(showHorizontalZoom && mapMode
         ? juce::Rectangle<int>(0, getHeight() - bandRangeSliderHeight,
                                horizontalZoomWidth, bandRangeSliderHeight)
         : juce::Rectangle<int>());
-    magnitudeRangeSlider.setBounds(showVerticalZoom
+    verticalRangeSlider.setBounds(showVerticalZoom
         ? juce::Rectangle<int>(getWidth() - bandZoomSliderWidth, 0,
                                bandZoomSliderWidth, getHeight())
         : juce::Rectangle<int>());
@@ -565,35 +519,20 @@ void OfflineSpecView::resized()
 
 void OfflineSpecView::mouseMove(const juce::MouseEvent& event)
 {
-    if (processor.isCleanView())
-    {
-        cursorInside = false;
-        return;
-    }
-
-    const auto nextCursorInside = getPlotBounds().contains(event.position);
-    if (! nextCursorInside)
-    {
-        if (cursorInside)
-        {
-            cursorInside = false;
-            repaint();
-        }
-        return;
-    }
-
-    if (cursorInside && cursorPosition == event.position)
-        return;
-
-    cursorInside = true;
-    cursorPosition = event.position;
-    updateCursorReadouts();
-    repaint();
+    ana::ui::analyzer_detail::handleCursorHover(
+        *this, cursorInside, cursorPosition, getPlotBounds(), event.position,
+        processor.isCleanView(), [this] { updateCursorReadouts(); });
 }
 
 void OfflineSpecView::updateCursorReadouts()
 {
-    if ((cursorInside || lastCursorFrequency > 0.0f) && ! getPlotBounds().isEmpty())
+    if (processor.isCleanView() || getPlotBounds().isEmpty())
+    {
+        clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
+        return;
+    }
+    if (!cursorInside)
+        return;
     {
         const auto plotBounds = getPlotBounds();
         const auto frequencyRange = readSpecFrequencyRange(processor);
@@ -647,35 +586,18 @@ void OfflineSpecView::updateCursorReadouts()
     }
 }
 
-void OfflineSpecView::mouseExit(const juce::MouseEvent&)
+void OfflineSpecView::mouseExit(const juce::MouseEvent& event)
 {
-    if (! cursorInside)
-        return;
-
-    cursorInside = false;
+    ana::ui::analyzer_detail::handleCursorExit(*this, event.getScreenPosition(), cursorInside,
+        cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
     repaint();
 }
 
 juce::Rectangle<float> OfflineSpecView::getPlotBounds() const noexcept
 {
-    auto bounds = getLocalBounds().toFloat();
-    if (processor.isCleanView())
-        return bounds;
-    const auto* horizontalZoom = processor.getRawParameterValue(
-        PluginProcessor::specHorizontalZoomParameterId);
-    const auto* verticalZoom = processor.getRawParameterValue(
-        PluginProcessor::specVerticalZoomParameterId);
-    const auto freqMode = viewMode == ViewMode::frequency;
-    const auto mapMode = viewMode == ViewMode::map;
-    const auto showHorizontalZoom = (freqMode || mapMode) && (horizontalZoom == nullptr
-        || horizontalZoom->load(std::memory_order_relaxed) >= 0.5f);
-    const auto showVerticalZoom = (freqMode || mapMode) && (verticalZoom == nullptr
-        || verticalZoom->load(std::memory_order_relaxed) >= 0.5f);
-    if (showHorizontalZoom)
-        bounds.removeFromBottom(static_cast<float>(bandRangeSliderHeight + ana::ui::gap.pixels()));
-    if (showVerticalZoom)
-        bounds.removeFromRight(static_cast<float>(bandZoomSliderWidth + ana::ui::gap.pixels()));
-    return bounds;
+    return ana::ui::analyzer_detail::specPlotBounds(
+        *this, processor, viewMode == ViewMode::frequency,
+        viewMode == ViewMode::map, true);
 }
 
 size_t OfflineSpecView::getOfflineMapColumnCount() const noexcept
@@ -696,6 +618,12 @@ size_t OfflineSpecView::getOfflineMapRowCount() const noexcept
 
 void OfflineSpecView::timerCallback()
 {
+    if (!isShowing()) return;
+    if (!isInsidePluginWindow(*this, juce::Desktop::getMousePosition()))
+    {
+        cursorInside = false;
+        clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
+    }
     if (!processor.isOfflineMode())
         return;
     const auto restoredViewMode = processor.isSpecMapView()
@@ -723,7 +651,7 @@ void OfflineSpecView::timerCallback()
         || ! juce::approximatelyEqual(renderedMapRangeHigh, highRange);
     const auto slopeChanged = ! juce::approximatelyEqual(renderedMapSlope, slope);
     const auto highQuality = readParameterValue(
-        processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f;
+        processor, PluginProcessor::specMapHighQualityRenderingParameterId, 1.0f) >= 0.5f;
     const auto highQualityChanged = renderedMapHighQuality != (highQuality ? 1 : 0);
     const auto mapLeftToRight = readParameterValue(
         processor, PluginProcessor::specMapLeftToRightParameterId, 0.0f) >= 0.5f;
@@ -790,27 +718,16 @@ void OfflineSpecView::timerCallback()
 
 void OfflineSpecView::refreshControls()
 {
-    freqButton.setVisible(true);
-    mapButton.setVisible(true);
-    const auto readValue = [this] (const char* parameterId, const float fallback)
-    {
-        if (const auto* value = processor.getRawParameterValue(parameterId))
-            return value->load(std::memory_order_relaxed);
-        return fallback;
-    };
     const auto freqMode = viewMode == ViewMode::frequency;
     const auto mapMode = viewMode == ViewMode::map;
-    const auto offlineMap = mapMode;
-    const auto showMonitor = readValue(PluginProcessor::specMonitorControlsParameterId, 1.0f) >= 0.5f;
-    const auto showHorizontalZoom = readValue(PluginProcessor::specHorizontalZoomParameterId, 1.0f) >= 0.5f;
-    const auto showVerticalZoom = readValue(PluginProcessor::specVerticalZoomParameterId, 1.0f) >= 0.5f;
-    const auto showHorizontalReadouts = readValue(PluginProcessor::specHorizontalReadoutsParameterId, 1.0f) >= 0.5f;
-    const auto showVerticalReadouts = readValue(PluginProcessor::specVerticalReadoutsParameterId, 1.0f) >= 0.5f;
-    const auto showCursorHorizontal = readValue(PluginProcessor::specCursorReadoutParameterId, 1.0f) >= 0.5f;
-    const auto showCursorNotes = readValue(PluginProcessor::specCursorNotesParameterId, 1.0f) >= 0.5f;
-    const auto showCursorVertical = readValue(PluginProcessor::specCursorVerticalReadoutParameterId, 1.0f) >= 0.5f;
-    freqButton.setToggleState(freqMode, juce::dontSendNotification);
-    mapButton.setToggleState(mapMode, juce::dontSendNotification);
+    const bool showMonitor = false;
+    const auto showHorizontalZoom = readParameterValue(processor, PluginProcessor::specHorizontalZoomParameterId, 1.0f) >= 0.5f;
+    const auto showVerticalZoom = readParameterValue(processor, PluginProcessor::specVerticalZoomParameterId, 1.0f) >= 0.5f;
+    const auto showHorizontalReadouts = readParameterValue(processor, PluginProcessor::specHorizontalReadoutsParameterId, 1.0f) >= 0.5f;
+    const auto showVerticalReadouts = readParameterValue(processor, PluginProcessor::specVerticalReadoutsParameterId, 1.0f) >= 0.5f;
+    const auto showCursorHorizontal = readParameterValue(processor, PluginProcessor::specCursorReadoutParameterId, 1.0f) >= 0.5f;
+    const auto showCursorNotes = readParameterValue(processor, PluginProcessor::specCursorNotesParameterId, 1.0f) >= 0.5f;
+    const auto showCursorVertical = readParameterValue(processor, PluginProcessor::specCursorVerticalReadoutParameterId, 1.0f) >= 0.5f;
     const auto monitorMode = readSpecMonitorMode(processor);
     const auto modeIndex = ana::spec::monitorModeIndex(monitorMode);
     for (size_t index = 0; index < monitorButtons.size(); ++index)
@@ -819,8 +736,8 @@ void OfflineSpecView::refreshControls()
         monitorButtons[index]->setToggleState(static_cast<int>(index) == modeIndex, juce::dontSendNotification);
     }
     frequencyRangeSlider.setVisible(showHorizontalZoom && freqMode);
-    mapTimeRangeSlider.setVisible(showHorizontalZoom && offlineMap);
-    magnitudeRangeSlider.setVisible(showVerticalZoom && (freqMode || mapMode));
+    mapTimeRangeSlider.setVisible(showHorizontalZoom && mapMode);
+    verticalRangeSlider.setVisible(showVerticalZoom && (freqMode || mapMode));
 
     frequencyLowControl.setVisible((freqMode && showHorizontalReadouts)
         || (mapMode && showVerticalReadouts));
@@ -828,8 +745,8 @@ void OfflineSpecView::refreshControls()
         || (mapMode && showVerticalReadouts));
     rangeLowControl.setVisible(freqMode && showVerticalReadouts);
     rangeHighControl.setVisible(freqMode && showVerticalReadouts);
-    mapTimeStartReadoutLabel.setVisible(offlineMap && showHorizontalReadouts);
-    mapTimeEndReadoutLabel.setVisible(offlineMap && showHorizontalReadouts);
+    mapTimeStartReadoutLabel.setVisible(mapMode && showHorizontalReadouts);
+    mapTimeEndReadoutLabel.setVisible(mapMode && showHorizontalReadouts);
     cursorReadoutLabel.setVisible((freqMode || mapMode) && showCursorHorizontal);
     cursorNoteReadoutLabel.setVisible(showCursorNotes);
     cursorVerticalReadoutLabel.setVisible((freqMode || mapMode) && showCursorVertical);
@@ -839,12 +756,16 @@ void OfflineSpecView::refreshControls()
 
 void OfflineSpecView::setViewMode(const ViewMode nextViewMode)
 {
+    setName(nextViewMode == ViewMode::map ? "spec-map-graph" : "spec-freq-graph");
     if (viewMode == nextViewMode)
         return;
 
     viewMode = nextViewMode;
     processor.setSpecMapView(viewMode == ViewMode::map);
     cursorInside = false;
+    // The pointer is still on MAP/FREQ, so no plot mouseMove arrives yet.
+    // Discard readouts from the previous coordinate system immediately.
+    clearCursorReadouts(cursorReadoutLabel, cursorNoteReadoutLabel, cursorVerticalReadoutLabel);
     if (viewMode == ViewMode::map)
     {
         if (processor.getAnalyzerPageState() == ana::AnalyzerPage::spec)
@@ -905,7 +826,7 @@ void OfflineSpecView::rebuildOfflineSpectrogramImage()
     const auto highRange = displayRange.high;
     const auto slope = displayRange.slope;
     const auto highQuality = readParameterValue(
-        processor, PluginProcessor::specHighQualityRenderingParameterId, 1.0f) >= 0.5f;
+        processor, PluginProcessor::specMapHighQualityRenderingParameterId, 1.0f) >= 0.5f;
     const auto frequencyScale = readSpecFrequencyScale(processor);
     const auto colourMap = readSpecColourMap(processor);
     renderedMapRangeLow = lowRange;
@@ -970,6 +891,8 @@ void OfflineSpecView::rebuildOfflineSpectrogramImage()
                 - (static_cast<float>(localY) + 0.5f) / static_cast<float>(paneHeight);
             const auto centreFrequency = ana::frequency_scale::frequencyAt(
                 frequencyScale, lowFrequency, highFrequency, centreNormalised);
+            if (centreFrequency > static_cast<float>(map.sampleRate * 0.5))
+                continue;
             for (int x = 0; x < width; ++x)
             {
                 auto value = mapAt(channel, row, static_cast<size_t>(x));
@@ -1026,7 +949,7 @@ void OfflineSpecView::rebuildOfflineSpectrogramImage()
             ana::frequency_scale::minimumHz,
             ana::frequency_scale::maximumHz,
             frequency);
-        const auto normalised = ana::spectrogram_frequency::normalisedForFrequency(
+        const auto normalised = ana::map_frequency_scale::normalisedForFrequency(
             ana::frequency_scale::minimumHz,
             ana::frequency_scale::maximumHz,
             clampedFrequency);
@@ -1260,6 +1183,8 @@ void OfflineSpecView::rebuildOfflineSpectrogramImage()
         for (int y = 0; y < height; ++y)
         {
             const auto yi = static_cast<size_t>(y);
+            if (frequencyForY[yi].centreFrequency > static_cast<float>(map.sampleRate * 0.5))
+                continue;
             const auto channel = useSecondChannelForY[yi] ? secondIndex : firstIndex;
             auto value = sampleHighQuality(channel, frequencyForY[yi], time);
             if (! useSplitView && useSecondSpectrum)
@@ -1346,12 +1271,12 @@ void OfflineSpecView::syncRangeSliders()
             frequencyScale,
             ana::frequency_scale::minimumHz,
             ana::frequency_scale::maximumHz, highFrequency);
-        magnitudeRangeSlider.setRange(1.0f - upper, 1.0f - lower);
+        verticalRangeSlider.setRange(1.0f - upper, 1.0f - lower);
     }
     else
     {
         constexpr auto magnitudeSpan = ana::spec::maximumDisplayDecibels - ana::spec::minimumDisplayDecibels;
-        magnitudeRangeSlider.setRange((ana::spec::maximumDisplayDecibels - std::max(lowRange, highRange)) / magnitudeSpan,
+        verticalRangeSlider.setRange((ana::spec::maximumDisplayDecibels - std::max(lowRange, highRange)) / magnitudeSpan,
                                       (ana::spec::maximumDisplayDecibels - std::min(lowRange, highRange)) / magnitudeSpan);
     }
     if (processor.isCleanView())
@@ -1360,15 +1285,9 @@ void OfflineSpecView::syncRangeSliders()
 
 void OfflineSpecView::updateFrequencyRangeFromSlider()
 {
-    const auto frequencyScale = readSpecFrequencyScale(processor);
-    const auto lowFrequency = ana::frequency_scale::frequencyAt(
-        frequencyScale, ana::frequency_scale::minimumHz,
-        ana::frequency_scale::maximumHz, frequencyRangeSlider.getRangeStart());
-    const auto highFrequency = ana::frequency_scale::frequencyAt(
-        frequencyScale, ana::frequency_scale::minimumHz,
-        ana::frequency_scale::maximumHz, frequencyRangeSlider.getRangeEnd());
-    frequencyLowControl.getSlider().setValue(lowFrequency, juce::sendNotificationSync);
-    frequencyHighControl.getSlider().setValue(highFrequency, juce::sendNotificationSync);
+    ana::spec::display::applyFrequencySliderToRange(
+        readSpecFrequencyScale(processor), frequencyRangeSlider,
+        frequencyLowControl, frequencyHighControl);
     repaint();
 }
 
@@ -1376,26 +1295,17 @@ void OfflineSpecView::updateVerticalRangeFromSlider()
 {
     if (viewMode == ViewMode::map)
     {
-        const auto frequencyScale = readSpecFrequencyScale(processor);
-        const auto highFrequency = ana::frequency_scale::frequencyAt(
-            frequencyScale, ana::frequency_scale::minimumHz,
-            ana::frequency_scale::maximumHz, 1.0f - magnitudeRangeSlider.getRangeStart());
-        const auto lowFrequency = ana::frequency_scale::frequencyAt(
-            frequencyScale, ana::frequency_scale::minimumHz,
-            ana::frequency_scale::maximumHz, 1.0f - magnitudeRangeSlider.getRangeEnd());
-        frequencyLowControl.getSlider().setValue(lowFrequency, juce::sendNotificationSync);
-        frequencyHighControl.getSlider().setValue(highFrequency, juce::sendNotificationSync);
+        ana::spec::display::applyVerticalSliderToFrequencyRange(
+            readSpecFrequencyScale(processor), verticalRangeSlider,
+            frequencyLowControl, frequencyHighControl);
 
         scheduleMapImageRebuild();
         repaint();
         return;
     }
 
-    constexpr auto span = ana::spec::maximumDisplayDecibels - ana::spec::minimumDisplayDecibels;
-    const auto highRange = ana::spec::maximumDisplayDecibels - magnitudeRangeSlider.getRangeStart() * span;
-    const auto lowRange = ana::spec::maximumDisplayDecibels - magnitudeRangeSlider.getRangeEnd() * span;
-    rangeLowControl.getSlider().setValue(lowRange, juce::sendNotificationSync);
-    rangeHighControl.getSlider().setValue(highRange, juce::sendNotificationSync);
+    ana::spec::display::applyVerticalSliderToLevelRange(
+        verticalRangeSlider, rangeLowControl, rangeHighControl);
 
     repaint();
 }

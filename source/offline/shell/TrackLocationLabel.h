@@ -16,11 +16,39 @@ public:
 
     const juce::String& getText() const noexcept { return text; }
 
+    static juce::String formatName(const juce::String& name)
+    {
+        auto uppercase = name.toUpperCase();
+        // towupper (used by JUCE) may leave Cyrillic unchanged in the host's
+        // C locale. Handle the common Cyrillic alphabet independently of it.
+        juce::String result;
+        for (const auto character : uppercase)
+        {
+            auto upper = character;
+            if (character >= 0x0430 && character <= 0x044f)
+                upper = character - 0x20;
+            else if (character >= 0x0450 && character <= 0x045f)
+                upper = character - 0x50;
+            else if (((character >= 0x0461 && character <= 0x0481)
+                      || (character >= 0x048b && character <= 0x04bf)
+                      || (character >= 0x04d1 && character <= 0x052f))
+                     && (character & 1) != 0)
+                upper = character - 1;
+            else if (character >= 0x04c2 && character <= 0x04ce && (character & 1) == 0)
+                upper = character - 1;
+            else if (character == 0x04cf)
+                upper = 0x04c0;
+            result += juce::String::charToString(upper);
+        }
+        return result;
+    }
+
     void setText(const juce::String& newText)
     {
-        if (text == newText)
+        const auto uppercase = formatName(newText);
+        if (text == uppercase)
             return;
-        text = newText;
+        text = uppercase;
         textWidth = juce::GlyphArrangement::getStringWidthInt(ana::ui::makeFont(), text);
         resetScroll();
         updateTimer();
@@ -29,6 +57,7 @@ public:
 
     void paint(juce::Graphics& graphics) override
     {
+        graphics.fillAll(ana::ui::dark);
         graphics.setColour(ana::ui::light);
         graphics.drawRect(getLocalBounds(), ana::ui::borderWidth);
         const juce::Graphics::ScopedSaveState savedState(graphics);

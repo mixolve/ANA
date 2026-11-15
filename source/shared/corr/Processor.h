@@ -41,6 +41,7 @@ public:
                       Mode mode) noexcept;
     void processOfflineBlock(const juce::AudioBuffer<float>& buffer, int fftSize,
                              float fftOverlap, Mode mode) noexcept;
+    void resetOfflineStream() noexcept;
     void beginOfflineMinimumPass() noexcept;
     void copyCorr(Mode mode, DisplayType type,
                          std::vector<float>& destination, int& fftSize) const;
@@ -48,6 +49,13 @@ public:
     uint64_t getRevision() const noexcept;
 
 private:
+    template <typename ModeBins>
+    static void fillModeBins(ModeBins& values, const float value) noexcept
+    {
+        for (auto& mode : values)
+            mode.fill(value);
+    }
+
     struct MinimumWindowState
     {
         std::array<double, maximumBinCount> numeratorWindowSum {};

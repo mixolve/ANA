@@ -16,21 +16,26 @@ struct ScopSettingsSection
 {
     explicit ScopSettingsSection(PluginProcessor& processor);
 
+    ParameterControl overallMonitorControl;
+    ParameterControl crossoverCountControl;
     ParameterControl styleControl;
     ParameterControl opacityControl;
+    ParameterControl slopeControl;
     ParameterControl timeControl;
     ParameterControl timeNoteControl;
-    ParameterControl timeBaseControl;
+    ControlButton timeBaseButton { "N" };
     ControlButton addCrossoverButton { "ADD" };
     ControlButton removeCrossoverButton { "DEL" };
     ControlButton equalHeightButton { "EQUAL-HEIGHT" };
     ControlButton horizontalZoomButton { "ZOOM-HORIZ" };
     ControlButton verticalZoomButton { "ZOOM-VERT" };
-    ControlButton horizontalReadoutsButton { "RO-HORIZ" };
-    ControlButton verticalReadoutsButton { "RO-VERT" };
-    ControlButton monitorControlsButton { "MONITOR" };
+    ControlButton horizontalReadoutsButton { "READOUT\nHORIZ" };
+    ControlButton verticalReadoutsButton { "READOUT\nVERT" };
+    ControlButton monitorControlsButton { "BAND\nMONITOR" };
     ControlButton toolsButton { "TOOLS" };
-    ControlButton leftToRightButton { "LEFT-TO-RIGHT" };
+    ControlButton linkedNormalizeButton { "NORM\nALL" };
+    ControlButton leftToRightButton { "L TO R" };
+    std::unique_ptr<SubmoduleButtonAttachment> equalHeightAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> horizontalZoomAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> verticalZoomAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> horizontalReadoutsAttachment;
@@ -43,14 +48,17 @@ struct ScopSettingsSection
 
 struct SpecSettingsSection
 {
-    explicit SpecSettingsSection(PluginProcessor& processor);
+    explicit SpecSettingsSection(PluginProcessor& processor, bool map = false);
+    bool isMap = false;
 
+    // Both FREQ and MAP use the existing seven-choice monitor-mode parameter.
+    ParameterControl monitorModeControl;
     ParameterControl fftSizeControl;
     ParameterControl fftOverlapControl;
     ParameterControl mapTimeOverlapControl;
     ParameterControl mapTimeControl;
     ParameterControl mapTimeNoteControl;
-    ParameterControl mapTimeBaseControl;
+    ControlButton mapTimeBaseButton { "N" };
     ParameterControl averageTimeControl;
     ParameterControl smoothingControl;
     ParameterControl frequencyScaleControl;
@@ -66,16 +74,16 @@ struct SpecSettingsSection
     ControlButton filledDisplayButton { "FILLED-DISPLAY" };
     ControlButton secondGraphButton { "2ND-GRAPH" };
     ControlButton antiAliasButton { "ANTI-ALIAS" };
-    ControlButton highQualityRenderingButton { "HIGH-QUALITY RENDERING" };
-    ControlButton mapLeftToRightButton { "LEFT-TO-RIGHT" };
-    ControlButton horizontalReadoutsButton { "RO-HORIZ" };
-    ControlButton verticalReadoutsButton { "RO-VERT" };
-    ControlButton clearOnPlayButton { "CLEAR-ON-PLAY" };
-    ControlButton resetClickButton { "RESET-CLICK" };
-    ControlButton cursorButton { "CUR-HORIZ" };
-    ControlButton cursorNotesButton { "CUR-NOTES" };
-    ControlButton cursorVerticalButton { "CUR-VERT" };
-    ControlButton monitorControlsButton { "MONITOR" };
+    ControlButton highQualityRenderingButton { "HQR" };
+    ControlButton mapLeftToRightButton { "L TO R" };
+    ControlButton horizontalReadoutsButton { "READOUT\nHORIZ" };
+    ControlButton verticalReadoutsButton { "READOUT\nVERT" };
+    ControlButton clearOnPlayButton { "CLEAR\nON PLAY" };
+    ControlButton resetClickButton { "RESET CLICK" };
+    ControlButton cursorButton { "CURSOR\nHORIZ" };
+    ControlButton cursorNotesButton { "CURSOR\nNOTE" };
+    ControlButton cursorVerticalButton { "CURSOR\nVERT" };
+    ControlButton splitViewButton { "SPLIT" };
     ControlButton horizontalZoomButton { "ZOOM-HORIZ" };
     ControlButton verticalZoomButton { "ZOOM-VERT" };
     std::unique_ptr<SubmoduleButtonAttachment> filledDisplayAttachment;
@@ -90,14 +98,15 @@ struct SpecSettingsSection
     std::unique_ptr<SubmoduleButtonAttachment> cursorAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> cursorNotesAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> cursorVerticalAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> monitorControlsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> splitViewAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> horizontalZoomAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> verticalZoomAttachment;
 };
 
 struct CorrSettingsSection
 {
-    explicit CorrSettingsSection(PluginProcessor& processor);
+    explicit CorrSettingsSection(PluginProcessor& processor, int mode = 0);
+    int submoduleMode = 0;
 
     ParameterControl fftSizeControl;
     ParameterControl fftOverlapControl;
@@ -111,13 +120,13 @@ struct CorrSettingsSection
     ParameterControl graphOpacityControl;
     ControlButton filledDisplayButton { "FILLED-DISPLAY" };
     ControlButton secondGraphButton { "2ND-GRAPH" };
-    ControlButton clearOnPlayButton { "CLEAR-ON-PLAY" };
-    ControlButton resetClickButton { "RESET-CLICK" };
-    ControlButton horizontalReadoutsButton { "RO-HORIZ" };
-    ControlButton verticalReadoutsButton { "RO-VERT" };
-    ControlButton cursorButton { "CUR-HORIZ" };
-    ControlButton cursorNotesButton { "CUR-NOTES" };
-    ControlButton cursorVerticalButton { "CUR-VERT" };
+    ControlButton clearOnPlayButton { "CLEAR\nON PLAY" };
+    ControlButton resetClickButton { "RESET CLICK" };
+    ControlButton horizontalReadoutsButton { "READOUT\nHORIZ" };
+    ControlButton verticalReadoutsButton { "READOUT\nVERT" };
+    ControlButton cursorButton { "CURSOR\nHORIZ" };
+    ControlButton cursorNotesButton { "CURSOR\nNOTE" };
+    ControlButton cursorVerticalButton { "CURSOR\nVERT" };
     ControlButton horizontalZoomButton { "ZOOM-HORIZ" };
     ControlButton verticalZoomButton { "ZOOM-VERT" };
     std::unique_ptr<SubmoduleButtonAttachment> filledDisplayAttachment;
@@ -137,47 +146,22 @@ struct LvlsSettingsSection
 {
     explicit LvlsSettingsSection(PluginProcessor& processor);
 
-    ParameterControl widthControl;
     ParameterControl peakRangeHighControl;
     ParameterControl peakRangeLowControl;
     ParameterControl rmsWindowControl;
     ParameterControl peakHoldControl;
+    ParameterControl readoutIntervalControl;
     ParameterControl loudnessRangeHighControl;
     ParameterControl loudnessRangeLowControl;
-    ParameterControl loudnessWidthControl;
-    ParameterControl historyRangeHighControl;
-    ParameterControl historyRangeLowControl;
-    ControlButton loudnessClearOnPlayButton { "CLEAR-ON-PLAY" };
-    ControlButton loudnessResetClickButton { "RESET-CLICK" };
-    ControlButton historyClearOnPlayButton { "CLEAR-ON-PLAY" };
-    ControlButton historyResetClickButton { "RESET-CLICK" };
-    std::unique_ptr<SubmoduleButtonAttachment> loudnessClearOnPlayAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> loudnessResetClickAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyClearOnPlayAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyResetClickAttachment;
-    ControlButton centerSectionsButton { "CENTER-PARTS" };
-    ControlButton clearOnPlayButton { "CLEAR-ON-PLAY" };
-    ControlButton resetClickButton { "RESET-CLICK" };
+    ControlButton clearOnPlayButton { "CLEAR\nON PLAY" };
+    ControlButton resetClickButton { "RESET CLICK" };
     ControlButton peakRmsVisibleButton { "PEAK/RMS" };
     ControlButton loudnessVisibleButton { "LOUDNESS" };
-    ControlButton historyVisibleButton { "HISTORY" };
-    ControlButton historyMomentaryButton { "M" };
-    ControlButton historyShortTermButton { "S" };
-    ControlButton historyIntegratedButton { "I" };
-    ControlButton historyHorizontalZoomButton { "ZOOM-HORIZ" };
-    ControlButton historyVerticalZoomButton { "ZOOM-VERT" };
-    ControlButton historyHorizontalReadoutsButton { "RO-HORIZ" };
-    ControlButton historyVerticalReadoutsButton { "RO-VERT" };
+    ControlButton metricsVisibleButton { "OTHERS" };
     std::unique_ptr<SubmoduleButtonAttachment> clearOnPlayAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> resetClickAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> peakRmsVisibleAttachment;
     std::unique_ptr<SubmoduleButtonAttachment> loudnessVisibleAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyVisibleAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyMomentaryAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyShortTermAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyIntegratedAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyHorizontalZoomAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyVerticalZoomAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyHorizontalReadoutsAttachment;
-    std::unique_ptr<SubmoduleButtonAttachment> historyVerticalReadoutsAttachment;
+    std::unique_ptr<SubmoduleButtonAttachment> metricsVisibleAttachment;
+
 };

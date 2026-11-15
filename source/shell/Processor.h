@@ -2,7 +2,7 @@
 
 #include "shared/scop/Crossover.h"
 #include "shared/scop/Settings.h"
-#include "shared/shell/Page.h"
+#include "shared/shell/AnalyzerPage.h"
 #include "offline/shell/AnalysisResult.h"
 #include "offline/shell/SourceChoice.h"
 #include "shared/spec/MonitorMode.h"
@@ -21,20 +21,37 @@
 
 #include "realtime/scop/Processor.h"
 
+class HostSlots;
 class OscController;
 struct OscSettings;
 
 class PluginProcessor final : public juce::AudioProcessor,
                                 private juce::VST3ClientExtensions
                               , public juce::AudioProcessorARAExtension
+                              , private juce::ValueTree::Listener
+                              , private juce::AsyncUpdater
+                              , private juce::AudioProcessorParameter::Listener
 {
 public:
+    static constexpr const char* scopEqualHeightParameterId="scop/equal-height";
+    static constexpr const char* scopOverallFullParameterId="scop/overall-full";
+    static constexpr const char* scopClearParameterId="scop/clear";
+    void requestScopClear();
+    uint64_t getScopClearRevision() const { return scopClearRevision.load(std::memory_order_acquire); }
+    static constexpr const char* dockCountParameterId="unit/main/dock-count";
+    int getCollapsedDockCount() const;
     static constexpr const char* analysisModeParameterId = "mode";
+    HostSlots& getHostSlots() { return *hostSlots; }
+    static constexpr const char* offlineMonitorParameterId = "unit/main/monitor";
+    static constexpr const char* offlineKeepTakeParameterId = "unit/main/kst";
+    static constexpr const char* offlineRefreshParameterId = "unit/main/refr";
+    void requestOfflineRefresh();
+    static constexpr const char* compensationParameterId = "unit/compensation";
     static constexpr const char* scopLeftToRightParameterId = "scop/left-to-right";
     static constexpr const char* specResetClickParameterId = "spec/freq/reset-click";
     static constexpr const char* specSplitViewParameterId = "spec/freq/split-view";
     static constexpr const char* corrResetClickParameterId = "corr/phase/reset-click";
-    static constexpr const char* lvlsResetClickParameterId = "lvls/peak-rms/reset-click";
+    static constexpr const char* lvlsResetClickParameterId = "lvls/reset-click";
     static constexpr const char* oscEnabledStateKey = "ana.osc.enabled";
     static constexpr const char* oscInputPortStateKey = "ana.osc.inputPort";
     static constexpr const char* oscOutputHostStateKey = "ana.osc.outputHost";
@@ -43,26 +60,26 @@ public:
     bool isOfflineMode() const noexcept;
     void setOfflineMode(bool offline);
     static constexpr const char* moduleParameterId = "module";
+    // Seven-choice UI selector; the existing module/view parameters remain authoritative.
+    static constexpr const char* displayChoiceParameterId = "unit/display";
     static constexpr const char* cleanViewParameterId = "clean-view";
+    static constexpr const char* screensaverParameterId = "screensaver";
     static constexpr const char* specViewParameterId = "spec/view";
     static constexpr const char* lvlsLoudnessWidthParameterId = "lvls/loudness/width";
-    static constexpr const char* lvlsLoudnessClearOnPlayParameterId = "lvls/loudness/clear-on-play";
-    static constexpr const char* lvlsLoudnessResetClickParameterId = "lvls/loudness/reset-click";
-    static constexpr const char* lvlsHistoryClearOnPlayParameterId = "lvls/history/clear-on-play";
-    static constexpr const char* lvlsHistoryResetClickParameterId = "lvls/history/reset-click";
-    static constexpr const char* lvlsHistoryRangeLowParameterId = "lvls/history/range-low";
-    static constexpr const char* lvlsHistoryRangeHighParameterId = "lvls/history/range-high";
     static constexpr const char* scopTimeParameterId = "scop/time";
     static constexpr const char* scopTimeBaseParameterId = "scop/time-base";
     static constexpr const char* scopNoteLengthParameterId = "scop/note-length";
     static constexpr const char* scopStyleParameterId = "scop/style";
     static constexpr const char* scopOpacityParameterId = "scop/opacity";
+    static constexpr const char* scopSlopeParameterId = "scop/slope";
     static constexpr const char* scopHorizontalZoomControlsParameterId = "scop/zoom-horiz";
     static constexpr const char* scopVerticalZoomControlsParameterId = "scop/zoom-vert";
     static constexpr const char* scopVerticalReadoutsParameterId = "scop/ro-vert";
     static constexpr const char* scopHorizontalReadoutsParameterId = "scop/ro-horiz";
     static constexpr const char* scopMonitorControlsParameterId = "scop/monitor";
+    static constexpr const char* scopOverallMonitorParameterId = "scop/overall-monitor";
     static constexpr const char* scopToolsParameterId = "scop/tools";
+    static constexpr const char* scopLinkedNormalizeParameterId = "scop/normalize-all";
     static constexpr const char* specFftSizeParameterId = "spec/freq/fft-size";
     static constexpr const char* specFftOverlapParameterId = "spec/freq/fft-overlap";
     static constexpr const char* specMapTimeOverlapParameterId = "spec/map/time-overlap";
@@ -83,7 +100,7 @@ public:
     static constexpr const char* specSecondGraphColourParameterId = "spec/freq/graph-2-color";
     static constexpr const char* specGraphOpacityParameterId = "spec/freq/graph-opacity";
     static constexpr const char* specAntiAliasParameterId = "spec/freq/anti-alias";
-    static constexpr const char* specHighQualityRenderingParameterId = "spec/map/hi-quality";
+    static constexpr const char* specMapHighQualityRenderingParameterId = "spec/map/hi-quality";
     static constexpr const char* specMapLeftToRightParameterId = "spec/map/left-to-right";
     static constexpr const char* specSlopeParameterId = "spec/freq/slope";
     static constexpr const char* specLowParameterId = "spec/freq/low";
@@ -93,9 +110,9 @@ public:
     static constexpr const char* specHorizontalReadoutsParameterId = "spec/freq/ro-horiz";
     static constexpr const char* specVerticalReadoutsParameterId = "spec/freq/ro-vert";
     static constexpr const char* specClearOnPlayParameterId = "spec/freq/clear-on-play";
-    static constexpr const char* specCursorReadoutParameterId = "spec/freq/cur-horiz";
+    static constexpr const char* specCursorReadoutParameterId = "spec/freq/cur-hzr";
     static constexpr const char* specCursorVerticalReadoutParameterId = "spec/freq/cur-vert";
-    static constexpr const char* specCursorNotesParameterId = "spec/freq/cur-notes";
+    static constexpr const char* specCursorNotesParameterId = "spec/freq/cur-note";
     static constexpr const char* specMonitorControlsParameterId = "spec/freq/monitor";
     static constexpr const char* specHorizontalZoomParameterId = "spec/freq/zoom-horiz";
     static constexpr const char* specVerticalZoomParameterId = "spec/freq/zoom-vert";
@@ -115,8 +132,8 @@ public:
     static constexpr const char* corrClearOnPlayParameterId = "corr/phase/clear-on-play";
     static constexpr const char* corrHorizontalReadoutsParameterId = "corr/phase/ro-horiz";
     static constexpr const char* corrVerticalReadoutsParameterId = "corr/phase/ro-vert";
-    static constexpr const char* corrCursorNotesParameterId = "corr/phase/cur-notes";
-    static constexpr const char* corrCursorReadoutParameterId = "corr/phase/cur-horiz";
+    static constexpr const char* corrCursorNotesParameterId = "corr/phase/cur-note";
+    static constexpr const char* corrCursorReadoutParameterId = "corr/phase/cur-hzr";
     static constexpr const char* corrCursorVerticalReadoutParameterId = "corr/phase/cur-vert";
     static constexpr const char* corrHorizontalZoomParameterId = "corr/phase/zoom-horiz";
     static constexpr const char* corrVerticalZoomParameterId = "corr/phase/zoom-vert";
@@ -125,31 +142,20 @@ public:
     static constexpr const char* corrHighParameterId = "corr/phase/high";
     static constexpr const char* corrRangeLowParameterId = "corr/phase/range-low";
     static constexpr const char* corrRangeHighParameterId = "corr/phase/range-high";
-    static constexpr const char* lvlsWidthParameterId = "lvls/peak-rms/width";
+    static constexpr const char* lvlsPeakRmsWidthParameterId = "lvls/peak-rms/width";
     static constexpr const char* lvlsPeakRangeHighParameterId = "lvls/peak-rms/range-high";
     static constexpr const char* lvlsPeakRangeLowParameterId = "lvls/peak-rms/range-low";
     static constexpr const char* lvlsRmsWindowMsParameterId = "lvls/peak-rms/rms-window";
+    static constexpr const char* lvlsReadoutIntervalMsParameterId = "lvls/readout-interval";
     static constexpr const char* lvlsPeakHoldMsParameterId = "lvls/peak-rms/peak-hold";
     static constexpr const char* lvlsLoudnessRangeHighParameterId = "lvls/loudness/range-high";
     static constexpr const char* lvlsLoudnessRangeLowParameterId = "lvls/loudness/range-low";
-    static constexpr const char* lvlsClearOnPlayParameterId = "lvls/peak-rms/clear-on-play";
+    static constexpr const char* lvlsClearOnPlayParameterId = "lvls/clear-on-play";
     static constexpr const char* lvlsPeakRmsVisibleParameterId = "lvls/peak-rms/visible";
     static constexpr const char* lvlsLoudnessVisibleParameterId = "lvls/loudness/visible";
-    static constexpr const char* lvlsHistoryVisibleParameterId = "lvls/history/visible";
-    static constexpr const char* lvlsHistoryMomentaryVisibleParameterId = "lvls/history/momentary-visible";
-    static constexpr const char* lvlsHistoryShortTermVisibleParameterId = "lvls/history/short-term-visible";
-    static constexpr const char* lvlsHistoryIntegratedVisibleParameterId = "lvls/history/integrated-visible";
-    static constexpr const char* lvlsHistoryHorizontalZoomParameterId = "lvls/history/zoom-horiz";
-    static constexpr const char* lvlsHistoryVerticalZoomParameterId = "lvls/history/zoom-vert";
-    static constexpr const char* lvlsHistoryHorizontalReadoutsParameterId = "lvls/history/ro-horiz";
-    static constexpr const char* lvlsHistoryVerticalReadoutsParameterId = "lvls/history/ro-vert";
+    static constexpr const char* lvlsMetricsVisibleParameterId = "lvls/metrics/visible";
     static constexpr const char* lvlsPeakModeParameterId = "lvls/peak-rms/mode";
     static constexpr const char* lvlsMidSideModeParameterId = "lvls/peak-rms/ms-mode";
-    static constexpr const char* lvlsHistorySoloParameterId = "lvls/history/solo";
-    static constexpr const char* lvlsHistoryHorizontalStartParameterId = "lvls/history/horizontal-start";
-    static constexpr const char* lvlsHistoryHorizontalEndParameterId = "lvls/history/horizontal-end";
-    static constexpr const char* lvlsHistoryVerticalStartParameterId = "lvls/history/vertical-start";
-    static constexpr const char* lvlsHistoryVerticalEndParameterId = "lvls/history/vertical-end";
     static constexpr const char* crossoverCountParameterId = "scop/cross-count";
     static constexpr const char* editorWidthStateKey = "ana.editor.width";
     static constexpr const char* editorHeightStateKey = "ana.editor.height";
@@ -220,6 +226,12 @@ public:
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
+    uint64_t getStateRevision() const noexcept { return stateRevision.load(std::memory_order_acquire); }
+    bool registerDockScreenset(const char* id, ReaperHostBridge::ScreensetCallback callback,
+                               void* context) const
+    { return reaperHostBridge.registerScreensetWindow(id, callback, context); }
+    void unregisterDockScreenset(void* context) const
+    { reaperHostBridge.unregisterScreensetWindow(context); }
 
     ana::spec::SpecProcessor& getSpecProcessor() noexcept { return specProcessor; }
     const ana::spec::SpecProcessor& getSpecProcessor() const noexcept { return specProcessor; }
@@ -233,17 +245,17 @@ public:
     {
         if (section < 0 || section == 0) lvlsProcessor.requestClear();
         if (section < 0 || section == 1) lvlsLoudnessProcessor.requestClear();
-        if (section < 0 || section == 2) lvlsHistoryProcessor.requestClear();
+        if (section < 0 || section == 2) lvlsMetricsProcessor.requestClear();
     }
     void setLvlsFrozen(bool frozen) noexcept
     {
         lvlsProcessor.setFrozen(frozen);
         lvlsLoudnessProcessor.setFrozen(frozen);
-        lvlsHistoryProcessor.setFrozen(frozen);
+        lvlsMetricsProcessor.setFrozen(frozen);
     }
     ana::MultibandScop& getMultibandScop() noexcept { return multibandScop; }
     ana::lvls::LvlsProcessor& getLvlsLoudnessProcessor() noexcept { return lvlsLoudnessProcessor; }
-    ana::lvls::LvlsProcessor& getLvlsHistoryProcessor() noexcept { return lvlsHistoryProcessor; }
+    ana::lvls::LvlsProcessor& getLvlsMetricsProcessor() noexcept { return lvlsMetricsProcessor; }
     OscSettings getOscSettings() const;
     bool setOscSettings(const OscSettings&);
     bool isOscInputPortBusy() const;
@@ -285,17 +297,26 @@ public:
     bool areScopToolsVisible() const noexcept;
     size_t getCrossoverCount() const noexcept;
     ana::ScopChannelMode getScopChannelMode(size_t bandIndex) const noexcept;
+    ana::ScopChannelMode getScopOverallMonitorMode() const noexcept;
     float getScopVerticalZoomDecibels(size_t bandIndex) const noexcept;
     bool isScopBandNormalized(size_t bandIndex) const noexcept;
+    bool isScopLinkedNormalized() const noexcept;
     ana::dsp::LinkwitzRileyCrossover::CrossoverFrequencies getCrossoverFrequencies() const noexcept;
     juce::Point<int> getLastEditorSize() const noexcept;
     std::array<float, 3> getLvlsSectionWeights() const noexcept;
+    bool areLvlsPartsCentered() const noexcept;
+    bool areScopBandsEqualHeight() const noexcept;
+    void setScopBandsEqualHeight(bool enabled);
+    void setLvlsPartsCentered(bool enabled);
     std::array<float, ana::dsp::LinkwitzRileyCrossover::numBands> getScopBandHeightWeights() const noexcept;
     int getScopSingleViewBand() const noexcept;
     bool isScopFullSourceView() const noexcept;
     ana::AnalyzerPage getAnalyzerPageState() const noexcept;
     bool isSpecMapView() const noexcept;
     bool isCleanView() const noexcept;
+    bool isScreensaverEnabled() const noexcept;
+    // Unknown until the audio thread receives a valid host transport position.
+    int getHostTransportState() const noexcept { return hostTransportState.load(std::memory_order_relaxed); }
     const char* resolveParameterId(const char* id) const noexcept;
     std::atomic<float>* getRawParameterValue(const char* id) const noexcept;
     juce::RangedAudioParameter* getActiveParameter(const char* id) const noexcept;
@@ -314,8 +335,16 @@ public:
     void setScopChannelMode(size_t bandIndex, ana::ScopChannelMode mode);
     void setScopVerticalZoomDecibels(size_t bandIndex, float decibels);
     void setScopBandNormalized(size_t bandIndex, bool shouldNormalize);
+    void setScopLinkedNormalized(bool shouldNormalize);
 
 private:
+    void valueTreePropertyChanged(juce::ValueTree&, const juce::Identifier&) override;
+    void handleAsyncUpdate() override;
+    void notifyHostOfStateChange();
+    void parameterValueChanged(int, float) override;
+    void parameterGestureChanged(int index, bool active) override;
+    void resetRealtimeAnalysis();
+    bool usesHostFileAnalysis() const noexcept;
     bool isParameterEnabled(const char* parameterId) const noexcept;
     void syncOfflineAnalysisSources(bool force = false);
     void constrainCorrRangeForMode(int mode);
@@ -324,15 +353,30 @@ private:
     void setIHostApplication(Steinberg::FUnknown* hostApplication) override;
 
     juce::AudioProcessorValueTreeState parameters;
+    std::atomic<bool> restoringState { false };
+    std::atomic<uint64_t> stateRevision { 0 };
+    juce::CriticalSection stateSerializationLock;
     ana::spec::SpecProcessor specProcessor;
     ana::corr::CorrProcessor corrProcessor;
     ana::lvls::LvlsProcessor lvlsProcessor;
     ana::MultibandScop multibandScop;
     ana::lvls::LvlsProcessor lvlsLoudnessProcessor;
-    ana::lvls::LvlsProcessor lvlsHistoryProcessor;
+    ana::lvls::LvlsProcessor lvlsMetricsProcessor;
     std::unique_ptr<OscController> oscController;
+    std::unique_ptr<HostSlots> hostSlots;
+    std::array<int,3> offlineControlIndices {} ;
+    std::atomic<unsigned> pendingOfflineControls { 0 };
+    int animationParameterFirst=-1, animationParameterLast=-1;
+    std::atomic<bool> pendingAnimationSync {false};
+    std::array<int,3> scopActionIndices {};
+    std::atomic<unsigned> pendingScopActions {0};
+    std::atomic<uint64_t> scopClearRevision {0};
+    int displayChoiceIndex=-1;
+    std::atomic<int> pendingDisplaySelection { -1 };
     bool hostWasPlaying = false;
+    std::atomic<int> hostTransportState { -1 };
     bool processingOffline = false;
+    juce::AudioBuffer<float> analysisScratch;
     std::atomic<double> hostTempoBpm { 120.0 };
     std::atomic<int> lastEditorWidth { 0 };
     std::atomic<int> lastEditorHeight { 0 };
@@ -352,6 +396,6 @@ private:
     ReaperHostBridge reaperHostBridge;
     // Analysis follows selection independently of the instance's audio playback.
     ReaperHostBridge monitorHostBridge;
-    // Monitoring FX may have REAPER access but no ARA document/renderer roles.
+    // REAPER file analysis outlives transient ARA editor/renderer attachments.
     ana::offline::Worker hostAnalysisWorker;
 };

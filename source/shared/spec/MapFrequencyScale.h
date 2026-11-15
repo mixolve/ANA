@@ -2,7 +2,7 @@
 
 #include "FrequencyScale.h"
 
-namespace ana::spectrogram_frequency
+namespace ana::map_frequency_scale
 {
 inline float frequencyAt(const float lowFrequency,
                          const float highFrequency,

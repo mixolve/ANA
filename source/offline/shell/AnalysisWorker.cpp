@@ -1,6 +1,5 @@
 #include "AnalysisWorker.h"
 
-#include <algorithm>
 #include <utility>
 
 namespace ana::offline
@@ -25,7 +24,7 @@ void Worker::stop()
 
     signalThreadShouldExit();
     notify();
-    stopThread(5000);
+    stopThread(-1);
 }
 
 void Worker::request(AnalysisRequest request, const bool forceRefresh)
@@ -36,8 +35,33 @@ void Worker::request(AnalysisRequest request, const bool forceRefresh)
 
     if (! forceRefresh
         && latestSettings.revision != 0
-        && latestSettings.hasSameSettings(request))
+        && latestSettings.hasSameSettings(request)
+        && (progress.load(std::memory_order_relaxed) != -1
+            || juce::Time::getMillisecondCounterHiRes() < retryNotBeforeMilliseconds))
         return;
+
+    // Returning to an already analysed page is a view change, not a media edit.
+    // A matching cached result must not schedule a new background scan.
+    if (forceRefresh)
+        completedCache.clear();
+    else
+        for (auto it = completedCache.begin(); it != completedCache.end(); ++it)
+            if (it->settings.hasSameSettings(request))
+            {
+                request.revision = latestRevision.fetch_add(1, std::memory_order_relaxed) + 1;
+                latestSettings = std::move(request);
+                analysis = it->result;
+                pendingRequest.reset();
+                progress.store(100, std::memory_order_release);
+                // Most recently used result stays in cache when more pages are visited.
+                if (it + 1 != completedCache.end())
+                {
+                    auto entry = std::move(*it);
+                    completedCache.erase(it);
+                    completedCache.push_back(std::move(entry));
+                }
+                return;
+            }
 
     request.revision = latestRevision.fetch_add(1, std::memory_order_relaxed) + 1;
     latestSettings = std::move(request);
@@ -62,12 +86,8 @@ void Worker::rescheduleLatest(const uint64_t regionGeneration)
     if (stopped.load(std::memory_order_acquire) || latestSettings.revision == 0)
         return;
 
-    const auto hostCatalogOwnsTopology = latestSettings.useHostTakeChoices || std::any_of(
-        latestSettings.sourceChoices.begin(), latestSettings.sourceChoices.end(),
-        [] (const auto& choice) { return choice.hostEnumerated; });
-
     // Host-enumerated source state is authoritative; transient ARA region churn must not rebuild on focus changes.
-    if (hostCatalogOwnsTopology)
+    if (latestSettings.hasHostSourceChoices())
         return;
 
     latestSettings.regionGeneration = regionGeneration;
@@ -120,13 +140,31 @@ void Worker::run()
             ? buildAnalysis(*requestToBuild, shouldCancel, onProgress)
             : nullptr;
 
-        if (builtAnalysis != nullptr)
+        const juce::ScopedLock scopedLock(stateLock);
+        if (revision == latestRevision.load(std::memory_order_relaxed))
         {
-            const juce::ScopedLock scopedLock(stateLock);
-            if (revision == latestRevision.load(std::memory_order_relaxed))
+            if (builtAnalysis != nullptr)
             {
                 analysis = std::move(builtAnalysis);
+                // Cache completed pages separately: SCOP / SPEC FREQ / SPEC MAP /
+                // CORR / LVLS. Settings and source identity are checked on reuse.
+                for (auto it = completedCache.begin(); it != completedCache.end(); ++it)
+                    if (it->settings.hasSameSettings(*requestToBuild))
+                    {
+                        completedCache.erase(it);
+                        break;
+                    }
+                completedCache.push_back({ *requestToBuild, analysis });
+                if (completedCache.size() > maximumCachedAnalyses)
+                    completedCache.erase(completedCache.begin());
                 progress.store(100, std::memory_order_release);
+            }
+            else
+            {
+                // Hosts can temporarily close their audio sources while inactive.
+                // Retain the completed result and let an unchanged request retry.
+                retryNotBeforeMilliseconds = juce::Time::getMillisecondCounterHiRes() + 1000.0;
+                progress.store(-1, std::memory_order_release);
             }
         }
     }

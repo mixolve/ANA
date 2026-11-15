@@ -28,5 +28,5 @@ void PluginProcessor::setOfflineMode(const bool offline)
         forceOfflineRefresh();
     else
         cancelOfflineAnalysis();
-    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withNonParameterStateChanged(true));
+    notifyHostOfStateChange();
 }

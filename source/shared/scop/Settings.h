@@ -11,10 +11,11 @@ enum class ScopChannelMode
     mid,
     side,
     lr,
-    ms
+    ms,
+    st // Append to preserve the stored indices of existing channel modes.
 };
 
-inline constexpr size_t scopChannelModeCount = static_cast<size_t>(ScopChannelMode::ms) + 1;
+inline constexpr size_t scopChannelModeCount = static_cast<size_t>(ScopChannelMode::st) + 1;
 }
 
 namespace ana::scop
@@ -30,12 +31,18 @@ inline constexpr float maximumOpacityPercent = 100.0f;
 inline constexpr float defaultOpacityPercent = 100.0f;
 inline constexpr float opacityStepPercent = 1.0f;
 
+// Flat tilt compensation is applied to the SCOP analysis copy before crossover.
+inline constexpr float minimumSlopeDecibelsPerOctave = -12.0f;
+inline constexpr float maximumSlopeDecibelsPerOctave = 12.0f;
+inline constexpr float defaultSlopeDecibelsPerOctave = 0.0f;
+inline constexpr float slopeStepDecibelsPerOctave = 0.01f;
+
 inline constexpr float minimumVerticalZoomDecibels = -48.0f;
 inline constexpr float maximumVerticalZoomDecibels = 96.0f;
 inline constexpr float defaultVerticalZoomDecibels = 0.0f;
 inline constexpr float verticalZoomStepDecibels = 0.1f;
 
-inline constexpr auto defaultChannelMode = ScopChannelMode::mid;
+inline constexpr auto defaultChannelMode = ScopChannelMode::st;
 inline constexpr bool defaultFilledStyle = true;
 inline constexpr bool defaultZoomControlsVisible = true;
 inline constexpr bool defaultMonitorControlsVisible = true;
