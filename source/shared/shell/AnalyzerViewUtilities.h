@@ -13,7 +13,6 @@
 
 namespace ana::ui::analyzer_detail
 {
-// Slider sizing follows the SCOP band layout so view zoom lanes stay aligned.
 inline constexpr int bandRangeSliderHeight = ana::scop::bandRangeSliderHeight;
 inline constexpr int bandZoomSliderWidth = bandRangeSliderHeight;
 inline int topRightOverlayWidth(const juce::Component& component)
@@ -37,9 +36,6 @@ inline int topLeftOverlayBottom(const juce::Component& component)
     return controlHeight;
 }
 
-// Position cursor labels in the window header rather than along the bottom axis.
-// The first row excludes the UPDATE/TAKE overlays and the upper axis readout.
-// At narrow sizes, labels wrap into the next row at the top of the plot.
 struct CursorTopReadout
 {
     juce::Component* component = nullptr;

@@ -1,9 +1,8 @@
-// Radiant native renderers, ported from AVA. See resources/licenses.md.
 #include "Artwork.h"
 #include "shared/shell/Theme.h"
 
-#include "BurningFilmRender.h"
-#include "BurningFilmPreview.h"
+#include "FrameRendering.h"
+#include "Preview.h"
 #include "ColourFilter.h"
 #include <juce_opengl/juce_opengl.h>
 
@@ -57,7 +56,7 @@ void AnimationArtwork::paint(juce::Graphics& g)
     const auto& current = source != this && !source->isShowing() ? *animation : *source->animation;
     const auto& animationSettings = *current.settings;
     g.fillAll(ana::ui::background);
-    const auto& modeSettings = animationSettings.current();
+    const auto& modeSettings = animationSettings.burningFilm;
     const auto* geometrySource = source;
     // Both the strip and its preview use the main editor's width, not preview width.
     const auto editorWidth = geometrySource->getParentComponent() != nullptr
@@ -123,7 +122,7 @@ void AnimationArtwork::mouseDown(const juce::MouseEvent& event)
     if (cropDragActive)
     {
         const auto& current = *animationSource->animation;
-        const auto& modeSettings = current.settings->current();
+        const auto& modeSettings = current.settings->burningFilm;
         cropDragStartY = event.position.y;
         cropDragStartPosition = modeSettings.cropY.load();
         setMouseCursor(juce::MouseCursor::DraggingHandCursor);
@@ -138,7 +137,7 @@ juce::Rectangle<float> AnimationArtwork::getCropBounds() const
         return {};
     const auto& current=*animationSource->animation;
     const auto& animationSettings=*current.settings;
-    const auto& modeSettings=animationSettings.current();
+    const auto& modeSettings=animationSettings.burningFilm;
     const auto height=juce::jmin(static_cast<float>(getHeight()),
         static_cast<float>(animationSource->getHeight())*static_cast<float>(getWidth())
             /static_cast<float>(animationSource->getWidth()));
@@ -156,7 +155,7 @@ void AnimationArtwork::mouseDrag(const juce::MouseEvent& event)
         const auto travel=static_cast<float>(getHeight())-getCropBounds().getHeight();
         if (travel<=0.f) return;
         auto& current=*animationSource->animation;
-        auto& modeSettings=current.settings->current();
+        auto& modeSettings=current.settings->burningFilm;
         const auto position=juce::jlimit(0.f,1.f,cropDragStartPosition+(event.position.y-cropDragStartY)/travel);
         modeSettings.cropY.store(position);
         if (onCropChanged) onCropChanged(position);

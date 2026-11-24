@@ -18,10 +18,20 @@ int lvlsScaleLabelWidth() noexcept { return ana::ui::textControlWidth(3); }
 int lvlsReadoutWidth() noexcept { return ana::ui::textControlWidth(7); }
 int metricReadoutWidth() noexcept { return ana::ui::textControlWidth(7); }
 int metricLabelWidth(const char* label) noexcept { return ana::ui::textControlWidth(label); }
-constexpr std::array<const char*, 6> metricNames { "TP", "LRA", "PLRD", "RLRD", "PMSD", "RMSD" };
+constexpr std::array<const char*, 10> metricNames {
+    "TP", "LRA", "HW+", "HW-", "PEAK-LR-DIFF", "RMS-LR-DIFF",
+    "PEAK-MS-DIFF", "RMS-MS-DIFF", "", "RMS-HW-DIFF"
+};
+int metricsLabelWidth() noexcept
+{
+    int width = 0;
+    for (const auto* name : metricNames)
+        width = std::max(width, metricLabelWidth(name));
+    return width;
+}
 int metricsMinimumWidth() noexcept
 {
-    const auto cellWidth = metricLabelWidth("PLRD") + ana::ui::gap.pixels()
+    const auto cellWidth = metricsLabelWidth() + ana::ui::gap.pixels()
         + metricReadoutWidth();
     return cellWidth * 2 + ana::ui::gap.pixels();
 }
@@ -45,7 +55,7 @@ LvlsMetricsLayout makeLvlsMetricsLayout(juce::Rectangle<int> bounds,juce::Rectan
         return layout;
     layout.header = bounds.removeFromTop(std::min(ana::ui::controlHeight, bounds.getHeight())).getIntersection(headerBounds);
     ana::ui::gap.removeFromTop(bounds);
-    const auto labelWidth = metricLabelWidth("PLRD");
+    const auto labelWidth = metricsLabelWidth();
     const auto readoutWidth = metricReadoutWidth();
     const auto cellWidth = std::max(0,std::min(labelWidth+ana::ui::gap.pixels()+readoutWidth,
         (layout.header.getWidth()-ana::ui::gap.pixels())/2));
@@ -53,21 +63,22 @@ LvlsMetricsLayout makeLvlsMetricsLayout(juce::Rectangle<int> bounds,juce::Rectan
     bounds.setX(layout.header.getX()+(layout.header.getWidth()-gridWidth)/2);
     bounds.setWidth(gridWidth);
     const auto gap = ana::ui::gap.pixels();
-    // Fixed two-column layout: TP/LRA, PLRD/RLRD, PMSD/RMSD.
     constexpr int columns = 2;
-    const auto rowCount = static_cast<int>((layout.cells.size() + columns - 1) / columns);
-    const auto rowGap = rowCount > 1 ? std::min(gap, std::max(0,
-        (bounds.getHeight() - rowCount * ana::ui::controlHeight) / (rowCount - 1))) : 0;
+    const auto rowGap = gap;
     for (size_t index = 0; index < layout.cells.size(); ++index)
     {
         const auto rowIndex = static_cast<int>(index) / columns;
         const auto columnIndex = static_cast<int>(index) % columns;
+        if (juce::String(metricNames[index]).isEmpty())
+            continue;
+        const auto rowOffset = rowIndex * (ana::ui::controlHeight + rowGap)
+            + (rowIndex > 1 ? gap : 0);
         auto cellBounds = juce::Rectangle<int> {
             bounds.getX() + columnIndex * (cellWidth + gap),
-            bounds.getY() + rowIndex * (ana::ui::controlHeight + rowGap),
+            bounds.getY() + rowOffset,
             std::max(0, std::min(cellWidth, bounds.getWidth() - columnIndex * (cellWidth + gap))),
             std::max(0, std::min(ana::ui::controlHeight,
-                     bounds.getHeight() - rowIndex * (ana::ui::controlHeight + rowGap)))
+                     bounds.getHeight() - rowOffset))
         };
         if (cellBounds.getWidth() <= 0 || cellBounds.getHeight() <= 0)
             continue;
@@ -417,12 +428,14 @@ void LvlsView::paint(juce::Graphics& graphics)
         graphics.setColour(ana::ui::light); graphics.drawRect(metrics.header, 1.0f);
         graphics.setColour(ana::ui::white);
         graphics.drawText("OTHERS", metrics.header, juce::Justification::centred, true);
-        const std::array<juce::String, 6> readouts {
+        const std::array<juce::String, metricNames.size()> readouts {
             metricsTruePeak <= -119.95f ? juce::String("-inf")
                 : formatReadoutLevel(metricsTruePeak),
             formatReadoutLevel(loudnessRange),
+            halfWaveReadouts[0], halfWaveReadouts[1],
             metricsDifferenceReadouts[0], metricsDifferenceReadouts[2],
-            metricsDifferenceReadouts[1], metricsDifferenceReadouts[3]
+            metricsDifferenceReadouts[1], metricsDifferenceReadouts[3],
+            "", halfWaveRmsDifferenceReadout
         };
         for (size_t index = 0; index < metrics.cells.size(); ++index)
         {
@@ -750,7 +763,7 @@ void LvlsView::mouseDrag(const juce::MouseEvent& event)
     const auto right = static_cast<size_t>(draggedRightPart);
     const auto pairWidth = dragStartWidths[left] + dragStartWidths[right];
     if (pairWidth < minimumPartWidths[left] + minimumPartWidths[right])
-        return; // no adjustable slack; do not allow a transient under-minimum OTHERS
+        return;
     const auto minimumLeft = std::min(minimumPartWidths[left], pairWidth);
     const auto maximumLeft = std::max(minimumLeft, pairWidth - minimumPartWidths[right]);
     widths[left] = juce::jlimit(minimumLeft, maximumLeft,
@@ -861,9 +874,22 @@ void LvlsView::timerCallback()
 
     if (offlineMode)
     {
-        // Offline numbers remain immediate and retain the existing maxima semantics.
+        // Static item results: true peak / whole-duration RMS, M/S window
+        // maxima and final gated I. No trailing block or running I maximum.
         readoutPeakValues = peak;
+        readoutPeakValues.peakDecibels = peak.peakMaximumDecibels;
+        readoutPeakValues.peakHoldDecibels = peak.peakMaximumDecibels;
+        readoutPeakValues.rmsDecibels = peak.wholeRmsDecibels;
+        readoutPeakValues.rmsMaximumDecibels = peak.wholeRmsDecibels;
+        peakValues = peak.peakMaximumDecibels;
+        peakHoldValues = peak.peakMaximumDecibels;
+        rmsValues = peak.wholeRmsDecibels;
         readoutLoudnessValues = values;
+        readoutLoudnessValues.momentaryLufs = values.momentaryMaximumLufs;
+        readoutLoudnessValues.shortTermLufs = values.shortTermMaximumLufs;
+        readoutLoudnessValues.integratedMaximumLufs = values.integratedLufs;
+        momentaryLufs = values.momentaryMaximumLufs;
+        shortTermLufs = values.shortTermMaximumLufs;
         readoutMetricsValues = metrics;
         readoutWindowStarted = false;
     }
@@ -880,7 +906,6 @@ void LvlsView::timerCallback()
         }
         if (intervalMs == 0)
         {
-            // LIVE mode preserves the original continuously changing readouts.
             readoutPeakValues = peak;
             readoutLoudnessValues = values;
             readoutMetricsValues = metrics;
@@ -940,7 +965,7 @@ void LvlsView::timerCallback()
                                readoutMetricsValues.peakMaximumDecibels[1]);
     const auto& metricPeaks = displayedOffline ? readoutMetricsValues.peakMaximumDecibels
                                                 : readoutMetricsValues.peakDecibels;
-    const auto& metricRms = displayedOffline ? readoutMetricsValues.rmsMaximumDecibels
+    const auto& metricRms = displayedOffline ? readoutMetricsValues.wholeRmsDecibels
                                               : readoutMetricsValues.rmsDecibels;
     metricsDifferenceReadouts = {
         formatLevelDifference(metricPeaks[0], metricPeaks[1]),
@@ -948,6 +973,14 @@ void LvlsView::timerCallback()
         formatLevelDifference(metricRms[0], metricRms[1]),
         formatLevelDifference(metricRms[2], metricRms[3])
     };
+    const auto positiveHalf = readoutMetricsValues.positiveHalfWavePercent;
+    halfWaveReadouts = positiveHalf >= 0.0f
+        ? std::array<juce::String, 2> {
+            juce::String::formatted("%06.2f", positiveHalf),
+            juce::String::formatted("%06.2f", 100.0f - positiveHalf) }
+        : std::array<juce::String, 2> { "---", "---" };
+    halfWaveRmsDifferenceReadout = positiveHalf < 0.0f ? juce::String("---")
+        : formatReadoutLevel(readoutMetricsValues.halfWaveRmsDifference);
     momentaryMaximumLufs = readoutLoudnessValues.momentaryMaximumLufs;
     shortTermMaximumLufs = readoutLoudnessValues.shortTermMaximumLufs;
     integratedMaximumLufs = readoutLoudnessValues.integratedMaximumLufs;

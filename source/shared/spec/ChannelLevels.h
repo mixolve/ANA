@@ -21,7 +21,6 @@ struct StereoSpectrumLevels
     float midDecibels = 0.0f;
     float sideDecibels = 0.0f;
 
-    // Keep the SPEC channel order in one place for FREQ and MAP consumers.
     std::array<float, spec::channelCount> decibelValues() const noexcept
     {
         return { stereoDecibels, leftDecibels, rightDecibels, midDecibels, sideDecibels };

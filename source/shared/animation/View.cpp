@@ -1,9 +1,6 @@
-#include "shared/shell/InlineResetPrompt.h"
 #include "View.h"
 #include "shared/shell/Theme.h"
 #include "shared/shell/NumericValueBox.h"
-#include <cstdlib>
-#include <cmath>
 
 AnimationBackdrop::AnimationBackdrop()
 {
@@ -12,10 +9,10 @@ AnimationBackdrop::AnimationBackdrop()
 }
 void AnimationBackdrop::paint(juce::Graphics& g) { g.fillAll(ana::ui::background); }
 
-AnimationOverlay::AnimationOverlay(juce::ValueTree& stateIn, std::shared_ptr<AnimationSettings> settingsIn)
-    : state(stateIn), settings(std::move(settingsIn))
+AnimationOverlay::AnimationOverlay(juce::AudioProcessorValueTreeState& parametersIn, std::shared_ptr<AnimationSettings> settingsIn)
+    : settings(std::move(settingsIn))
 {
-    loadAnimationSettings(*settings, state);
+    loadAnimationSettings(*settings, parametersIn);
     setOpaque(false);
     artwork.setAnimationSettings(settings);
     artwork.setGpuRenderingEnabled(true);
@@ -26,7 +23,6 @@ AnimationOverlay::AnimationOverlay(juce::ValueTree& stateIn, std::shared_ptr<Ani
 AnimationOverlay::~AnimationOverlay()
 {
     artwork.removeMouseListener(this);
-    stopTimer();
     context.detach();
 }
 void AnimationOverlay::setActive(const bool active)
@@ -34,22 +30,16 @@ void AnimationOverlay::setActive(const bool active)
     if (active)
     {
         setVisible(true);
-        startTimerHz(30);
         context.setComponentPaintingEnabled(true);
         context.attachTo(*this);
     }
     else
     {
-        stopTimer();
-        context.detach();
+            context.detach();
         setVisible(false);
         if (auto* parent = getParentComponent()) parent->repaint(getBounds());
         if (auto* peer = getPeer()) peer->performAnyPendingRepaintsNow();
     }
-}
-void AnimationOverlay::timerCallback()
-{
-    loadAnimationSettings(*settings, state);
 }
 void AnimationOverlay::resized()
 {
@@ -65,15 +55,13 @@ void AnimationOverlay::mouseDown(const juce::MouseEvent& event)
         if (onClose) onClose();
 }
 
-struct AnimationSettingsPanel::Impl final : juce::Component, private juce::Timer
+struct AnimationSettingsPanel::Impl final : juce::Component
 {
-    Impl(AnimationSettingsPanel& ownerIn,juce::AudioProcessorValueTreeState& parameters,
-         std::shared_ptr<AnimationSettings> settingsIn)
-        : owner(ownerIn),state(parameters.state),settings(std::move(settingsIn))
+    Impl(AnimationSettingsPanel& ownerIn, juce::AudioProcessorValueTreeState& parameters)
+        : owner(ownerIn)
     {
         for(const auto& def:animationParameterDefinitions())
         {
-            if(def.mode==2 || def.property=="animation-mode") continue;
             auto control=std::make_unique<ParameterControl>(parameters,def.property,def.title,[def](double value)
             {
                 if(def.boolean) return juce::String(value>=.5?"ON":"OFF");
@@ -89,17 +77,6 @@ struct AnimationSettingsPanel::Impl final : juce::Component, private juce::Timer
             addAndMakeVisible(*control);
             controls.push_back(std::move(control));
         }
-        refresh(); startTimerHz(30);
-    }
-    void refresh()
-    {
-        loadAnimationSettings(*settings,state);
-        const auto mode=settings->mode.load();
-        if(mode==displayedMode) return;
-        displayedMode=mode;
-        for(auto& control:controls) control->setVisible(true);
-        resized();
-        if(owner.onPreferredHeightChanged) owner.onPreferredHeightChanged();
     }
     void paint(juce::Graphics& g) override { g.fillAll(ana::ui::square::panelBackground); }
     int gridHeight() const
@@ -117,16 +94,11 @@ struct AnimationSettingsPanel::Impl final : juce::Component, private juce::Timer
             if(control->isVisible()) { control->setBounds(index%columns*(size+spacing),index/columns*(size+spacing),size,size); ++index; }
             else control->setBounds({});
     }
-    void timerCallback() override { if(isShowing()) refresh(); }
     AnimationSettingsPanel& owner;
-    juce::ValueTree& state;
-    std::shared_ptr<AnimationSettings> settings;
     std::vector<std::unique_ptr<ParameterControl>> controls;
-    int displayedMode=-1;
 };
-AnimationSettingsPanel::AnimationSettingsPanel(juce::AudioProcessorValueTreeState& parameters,
-    std::shared_ptr<AnimationSettings> settings)
-    : impl(std::make_unique<Impl>(*this,parameters,std::move(settings)))
+AnimationSettingsPanel::AnimationSettingsPanel(juce::AudioProcessorValueTreeState& parameters)
+    : impl(std::make_unique<Impl>(*this, parameters))
 {
     getProperties().set("emptyEditorBackground",true);
     impl->getProperties().set("emptyEditorBackground",true);

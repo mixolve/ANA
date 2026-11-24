@@ -3,8 +3,6 @@
 #include "Theme.h"
 #include "SquareControl.h"
 
-// AVA's two-cell slot rows: 80px slot number and the remaining five columns
-// for the target. Both surfaces share clear, copy and drag/drop behaviour.
 class SlotsPanel final : public juce::Component, private juce::Timer
 {
 public:
@@ -26,8 +24,6 @@ private:
         juce::MouseCursor getMouseCursor() override { return owner.source>=0?juce::MouseCursor(juce::MouseCursor::DraggingHandCursor):juce::MouseCursor(juce::MouseCursor::NormalCursor); }
         void paint(juce::Graphics& g) override
         {
-            // AVA BoxTextButton::paintButton + GlobalControls slot fields:
-            // dark outer body, 1px light frame and a 4px-inset text surface.
             const auto target=owner.slots.targetId(index);
             const bool moving=owner.source==index || owner.destination==index;
             const bool enabled=target.isNotEmpty() || owner.source>=0;

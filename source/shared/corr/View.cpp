@@ -1,8 +1,8 @@
 #include "View.h"
-#include "shared/spec/CursorNote.h"
-#include "shared/shell/CleanView.h"
+#include "shared/spec/NoteNames.h"
+#include "shared/shell/PlotVisibility.h"
 #include "shared/corr/Settings.h"
-#include "shared/spec/SpectrumProcessing.h"
+#include "shared/spec/AveragingAndSmoothing.h"
 #include "shared/spec/Smoothing.h"
 #include "shared/shell/AnalyzerViewUtilities.h"
 #include "shared/shell/GraphColours.h"
@@ -281,7 +281,6 @@ void CorrView::resized()
                                    frequencyReadoutWidth, ana::ui::controlHeight);
     rangeLowControl.setBounds(graphRight - coefficientReadoutWidth, readoutY,
                               coefficientReadoutWidth, ana::ui::controlHeight);
-    // The same top-of-window cursor layout is shared by all CORR modes.
     const auto cursorNoteWidth = ana::ui::textControlWidth(4)
         - 2 * (ana::ui::textPadding - 4);
     ana::ui::analyzer_detail::layoutCursorReadoutsAtTop(topArea, plotBounds, {

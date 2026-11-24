@@ -2,7 +2,7 @@
 
 #include "shared/spec/View.h"
 #include "shared/shell/SvgExport.h"
-#include "shared/shell/SvgExportLayout.h"
+#include "shared/shell/ViewportOverflow.h"
 #include "shared/corr/View.h"
 #include "shared/shell/Controls.h"
 #include "shared/shell/ParameterControl.h"
@@ -125,9 +125,8 @@ private:
 
     ControlButton locationButton { "MONITOR" };
     ControlButton takeButton { "TAKE" };
-    ControlButton keepSecondTakeButton { "KST" };
+    ControlButton keepSecondTakeButton { "KEEP\nSECOND" };
     ControlButton refreshButton { "REFRESH" };
-    LongPressGesture refreshPress;
     std::vector<ana::offline::SourceChoice> offlineSourceChoices;
     bool displayedOffline = false;
     bool displayedModeAvailable = false;

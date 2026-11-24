@@ -252,12 +252,12 @@ void PluginProcessor::setOfflineMonitorLocation(const bool requestedMonitor)
     }
     monitorHostBridge.setEnabled(monitor);
     forceOfflineRefresh();
-    parameters.state.setProperty(offlineLocationStateKey, monitor ? 1 : 0, nullptr);
 }
 
-bool PluginProcessor::isOfflineAutomaticRefresh() const noexcept
+bool PluginProcessor::shouldAutomaticallyRefreshOfflineSources() const noexcept
 {
-    return offlineAutomaticRefresh.load(std::memory_order_acquire);
+    // MONITOR follows host selection even if automatic TRACK refresh is disabled.
+    return isOfflineMonitorLocation() || offlineAutomaticRefresh.load(std::memory_order_acquire);
 }
 
 void PluginProcessor::setOfflineAutomaticRefresh(const bool automatic)
@@ -273,7 +273,7 @@ void PluginProcessor::syncOfflineAnalysisSources(const bool force)
 {
     {
         const juce::ScopedLock scopedLock(offlineSelectionLock);
-        if (! force && ! isOfflineAutomaticRefresh() && offlineAnalysisSourcesInitialised)
+        if (! force && ! shouldAutomaticallyRefreshOfflineSources() && offlineAnalysisSourcesInitialised)
             return;
     }
     const auto& bridge = isOfflineMonitorLocation() ? monitorHostBridge : reaperHostBridge;
@@ -308,9 +308,6 @@ void PluginProcessor::refreshOfflineSelection(const std::vector<ana::offline::So
     const auto& bridge = isOfflineMonitorLocation() ? monitorHostBridge : reaperHostBridge;
     if (bridge.isAvailable() && ! bridge.hasTakeCatalogue()) return;
 
-    // Sources are chosen automatically: the instance's parent track in TRACK,
-    // or REAPER's selected items/track in MONITOR. Keep TRACK's saved TAKE
-    // independent of MONITOR's KST state when switching locations.
     if (getSelectedOfflineSourceId().isNotEmpty())
         setSelectedOfflineSourceId({});
 }
@@ -327,7 +324,6 @@ void PluginProcessor::setOfflineKeepSecondTake(const bool keep)
     if (!juce::approximatelyEqual(parameter->getValue(), normalized)) parameter->setValueNotifyingHost(normalized);
     if (offlineKeepSecondTake.exchange(keep, std::memory_order_acq_rel) == keep)
         return;
-    parameters.state.setProperty(offlineKeepSecondTakeStateKey, keep, nullptr);
     if (isOfflineMonitorLocation())
         forceOfflineRefresh();
 }
@@ -381,4 +377,39 @@ void PluginProcessor::requestOfflineRefresh()
     parameter->beginChangeGesture();
     parameter->setValueNotifyingHost(1.0f);
     parameter->endChangeGesture();
+    // A second explicit request must still execute if the momentary parameter
+    // is already high while its previous request is being dispatched.
+    pendingOfflineControls.fetch_or(4u, std::memory_order_release);
+    triggerAsyncUpdate();
+}
+
+bool PluginProcessor::isOfflineAvailable() const noexcept
+{
+    // An ARA binding confirms host support. REAPER additionally exposes offline
+    // analysis through its project bridge, including the Monitoring FX chain.
+    return isBoundToARA() || isOfflineLocationAvailable();
+}
+
+bool PluginProcessor::isOfflineMode() const noexcept
+{
+    const auto* mode = parameters.getRawParameterValue(analysisModeParameterId);
+    return isOfflineAvailable() && mode != nullptr && mode->load(std::memory_order_relaxed) >= 0.5f;
+}
+
+void PluginProcessor::setOfflineMode(const bool offline)
+{
+    auto* mode = parameters.getParameter(analysisModeParameterId);
+    if (mode == nullptr)
+        return;
+    const auto value = offline && isOfflineAvailable() ? 1.0f : 0.0f;
+    if (juce::approximatelyEqual(mode->getValue(), value))
+        return;
+    mode->beginChangeGesture();
+    mode->setValueNotifyingHost(value);
+    mode->endChangeGesture();
+    if (isOfflineMode())
+        forceOfflineRefresh();
+    else
+        cancelOfflineAnalysis();
+    notifyHostOfStateChange();
 }

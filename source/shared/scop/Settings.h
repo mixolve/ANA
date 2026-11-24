@@ -12,7 +12,7 @@ enum class ScopChannelMode
     side,
     lr,
     ms,
-    st // Append to preserve the stored indices of existing channel modes.
+    st // Host parameter values use these ordinals; do not reorder.
 };
 
 inline constexpr size_t scopChannelModeCount = static_cast<size_t>(ScopChannelMode::st) + 1;

@@ -1,5 +1,5 @@
 #pragma once
-#include "BurningFilmRender.h"
+#include "FrameRendering.h"
 #include <optional>
 
 // A fixed, offscreen GL surface produces preview images without painting or

@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cmath>
 
-// A framed, transparent track-name viewport with scrolling for long names.
 class TrackLocationLabel final : public juce::Component,
                                  public juce::SettableTooltipClient,
                                  private juce::Timer

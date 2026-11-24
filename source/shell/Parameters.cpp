@@ -3,12 +3,12 @@
 #include "Processor.h"
 #include "shared/shell/GraphColours.h"
 #include "shared/shell/AnalyzerViewUtilities.h"
-#include "shared/spec/SpectrumProcessing.h"
+#include "shared/spec/AveragingAndSmoothing.h"
 #include "shared/spec/FrequencyScale.h"
 #include "shared/scop/Settings.h"
 #include "shared/spec/Settings.h"
 #include "shared/corr/Settings.h"
-#include "shared/scop/TimeScale.h"
+#include "shared/scop/NoteLengths.h"
 #include "shared/shell/SubmoduleParameters.h"
 
 #include <algorithm>
@@ -593,13 +593,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
                 })));
     }
 
-    // Append the new mode without reordering existing parameters for host compatibility.
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID { scopLinkedNormalizeParameterId, 1 },
         ana::submodules::parameterName(scopLinkedNormalizeParameterId), false,
         juce::AudioParameterBoolAttributes().withAutomatable(false).withMeta(true)));
 
-    // Append after all existing parameters, including NALL, for host compatibility.
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { scopSlopeParameterId, 1 },
         ana::submodules::parameterName(scopSlopeParameterId),
@@ -609,7 +607,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
         ana::scop::defaultSlopeDecibelsPerOctave,
         juce::AudioParameterFloatAttributes().withAutomatable(false).withMeta(true)));
 
-    // Append the seven-way Settings selector: no existing host parameter IDs move.
     layout.add(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID { displayChoiceParameterId, 1 },
         ana::submodules::parameterName(displayChoiceParameterId),
@@ -617,7 +614,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
                             "CORR FREQ", "LVLS", "SCOP" }, 0,
         juce::AudioParameterChoiceAttributes().withAutomatable(false).withMeta(true)));
 
-    // Preserve all existing host parameter indices.
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { compensationParameterId, 1 },
         ana::submodules::parameterName(compensationParameterId),
@@ -627,9 +623,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
         layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { HostSlots::id(slot),1 },juce::String::formatted("%02d-",slot+1)+HostSlots::letter(slot),juce::NormalisableRange<float>(0.0f,1.0f),0.0f));
     for (const auto* id : { offlineMonitorParameterId, offlineKeepTakeParameterId, offlineRefreshParameterId })
         layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { id, 1 },
-            ana::submodules::parameterName(id), false));
-    // One host-assignable gain for each of the first 64 snapshot slots.
-    // These IDs are appended to preserve existing parameter indices and slot IDs.
+            juce::String(id) == offlineKeepTakeParameterId ? "UNIT / MAIN / KEEP SECOND"
+                                                        : ana::submodules::parameterName(id), false));
+    // Snapshot gains have fixed host IDs; append without shifting existing indices.
     for (int index = 0; index < 64; ++index)
         layout.add(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID { "snapshot_gain_" + juce::String(index + 1), 1 },

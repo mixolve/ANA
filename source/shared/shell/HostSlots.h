@@ -6,8 +6,7 @@
 #include <functional>
 #include <set>
 
-// ANA has stable APVTS targets (including explicit submodule and band IDs).
-// As in AVA, audio-thread callbacks only try the lock and defer on contention.
+// Audio callbacks try the lock and defer work when it is held.
 class HostSlots
 {
 public:
@@ -112,7 +111,7 @@ private:
     std::array<std::atomic<int>,count> targetIndices;
     std::array<std::atomic<unsigned>,count> gestures;
     std::array<bool,count> slotGesture {},sourceGesture {};
-    bool validTarget(const juce::String& target) const { return target.isNotEmpty() && target!="animation-mode" && !target.startsWith("animation-topographic-") && !target.startsWith("host_slot_") && state.getParameter(target)!=nullptr; }
+    bool validTarget(const juce::String& target) const { return target.isNotEmpty() && !target.startsWith("host_slot_") && state.getParameter(target)!=nullptr; }
     void endGestures(int slot)
     {
         const auto index=size_t(slot); const juce::ScopedValueSetter<bool> syncingGuard(syncing,true);

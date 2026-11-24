@@ -9,12 +9,8 @@ inline constexpr int minimumTrackNameWidth = 40;
 
 inline int minimumMainEditorWidth() noexcept
 {
-    // The main window has no navigation or realtime/offline buttons.
-    // Only the auxiliary actions, location and track labels take header width.
     constexpr int navWidth = 0;
-    // All formerly symbolic header buttons now have textual preferred widths;
-    // calculate the minimum using the same controls/gaps as PluginEditor::resized().
-    // TAKE (TRACK) and KST (MONITOR) occupy the same position.
+    // Measure actual control widths to match the editor; TAKE and KST share a slot.
     const auto offlineActionsWidth = textControlWidth("inf")
         + textControlWidth("osc") + textControlWidth("sett")
         + textControlWidth("snapsh") + textControlWidth(2)
@@ -27,7 +23,7 @@ inline int minimumMainEditorWidth() noexcept
         + gap.pixels() + textControlWidth(3)
         + gap.pixels() + minimumTrackNameWidth
         + gap.pixels() + offlineActionsWidth
-        + textControlWidth("OF") + gap.pixels() // SCOP full-source action
+        + textControlWidth("OF") + gap.pixels()
         + locationWidth + 1; // keep track name visible without a threshold match
 
     const auto realtimeActionsWidth = textControlWidth("inf")

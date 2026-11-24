@@ -1,7 +1,7 @@
 #pragma once
 
 #include "shared/scop/BandView.h"
-#include "shared/scop/AnalysisTypes.h"
+#include "shared/scop/ChannelData.h"
 #include "Processor.h"
 #include "shared/scop/History.h"
 

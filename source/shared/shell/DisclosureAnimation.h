@@ -5,7 +5,6 @@
 #include <cmath>
 #include <functional>
 
-// Shared timing for expanding controls, filter sections and choice lists.
 class DisclosureAnimation final : private juce::Timer
 {
 public:

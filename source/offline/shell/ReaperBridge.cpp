@@ -175,7 +175,6 @@ void ReaperHostBridge::setHostApplication(Steinberg::FUnknown* newHostApplicatio
         const juce::ScopedLock scopedLock(hostLock);
         auto* currentHost = static_cast<IReaperHostApplication*>(hostApplication);
 
-        // Repeated host attachment may return the same referenced REAPER interface; preserve cached source state.
         if (nextHost == currentHost)
         {
             if (nextHost != nullptr)
@@ -263,12 +262,13 @@ void ReaperHostBridge::refresh()
 void ReaperHostBridge::updateCatalogue(const bool forceScan)
 {
 #if JucePlugin_Build_VST3
-    if (! enabled.load(std::memory_order_acquire) || ! juce::Process::isForegroundProcess())
+    if (! enabled.load(std::memory_order_acquire)
+        || (! forceScan && ! juce::Process::isForegroundProcess()))
         return;
     // Retained MONITOR/TRACK settings are not permission to scan host media
-    // in realtime. Check before any host API or pending ARA matching retry.
+    // in realtime. Explicit refresh bypasses these polling restrictions.
     // Keep the catalogue cached so switching back to offline remains stable.
-    if (shouldScan != nullptr && ! shouldScan())
+    if (! forceScan && shouldScan != nullptr && ! shouldScan())
         return;
     const auto projectState = getProjectStateChangeCount();
 

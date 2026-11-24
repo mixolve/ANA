@@ -108,7 +108,6 @@ AboutPopup::AboutPopup(std::function<void()> closeCallback)
         addAndMakeVisible(*label);
         if (trimmed.containsChar('@'))
         {
-            // Clicking the feedback line copies the address it contains.
             juce::String address;
             for (const auto& token : juce::StringArray::fromTokens(trimmed, " \t", ""))
             {
@@ -197,8 +196,6 @@ juce::URL AboutPopup::createLocalDocumentUrl(const char* const fileName,
     documentFile.setReadOnly(false);
     if (data == nullptr || dataSize == 0)
     {
-        // JUCE replaceWithData with 0 bytes deletes the target instead of
-        // writing; an empty document must still open as an empty file.
         if (! documentFile.create().wasOk())
             return {};
     }

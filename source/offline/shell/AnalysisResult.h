@@ -1,6 +1,6 @@
 #pragma once
 
-#include "shared/scop/AnalysisTypes.h"
+#include "shared/scop/ChannelData.h"
 #include "shared/scop/Crossover.h"
 #include "shared/spec/Channels.h"
 #include "StereoFftStream.h"

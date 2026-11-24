@@ -1,6 +1,6 @@
 #include "View.h"
 #include "shared/shell/AnalyzerViewUtilities.h"
-#include "shared/shell/CleanView.h"
+#include "shared/shell/PlotVisibility.h"
 #include "shell/Processor.h"
 #include "shared/shell/Theme.h"
 #include "shared/scop/Layout.h"

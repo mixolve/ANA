@@ -1,5 +1,5 @@
 #include "Processor.h"
-#include "shared/spec/SpectrumProcessing.h"
+#include "shared/spec/AveragingAndSmoothing.h"
 
 #include <cmath>
 
@@ -90,7 +90,16 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     {
         const auto count = juce::jmin(analysisScratch.getNumSamples(), buffer.getNumSamples() - offset);
         for (int channel = 0; channel < channels; ++channel)
-            analysisScratch.copyFromWithRamp(channel, 0, buffer.getReadPointer(channel, offset), count, analysisGain, analysisGain);
+        {
+            analysisScratch.copyFromWithRamp(channel, 0, buffer.getReadPointer(channel, offset), count,
+                                             analysisGain, analysisGain);
+            // Analysis must not poison its FFT/filter history when another plug-in
+            // produces NaN/Inf. The host's original audio buffer stays untouched.
+            auto* samples = analysisScratch.getWritePointer(channel);
+            for (int sample = 0; sample < count; ++sample)
+                if (! std::isfinite(samples[sample]))
+                    samples[sample] = 0.0f;
+        }
         juce::AudioBuffer<float> analysisBuffer(analysisScratch.getArrayOfWritePointers(), channels, count);
         const auto chunkTransportStarted = transportStarted && offset == 0;
         switch (page)

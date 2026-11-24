@@ -8,7 +8,7 @@ inline constexpr float defaultRmsWindowMilliseconds = 300.0f;
 inline constexpr float rmsWindowStepMilliseconds = 10.0f;
 
 // Readout sample/hold interval: independent of the measurement RMS window.
-// Zero preserves the previous live numeric readout behaviour.
+// Zero disables holding and keeps numeric readouts live.
 inline constexpr float minimumReadoutIntervalMilliseconds = 0.0f;
 inline constexpr float maximumReadoutIntervalMilliseconds = 3000.0f;
 inline constexpr float defaultReadoutIntervalMilliseconds = 1000.0f;

@@ -1,6 +1,6 @@
 #include "Display.h"
 #include "shared/spec/Smoothing.h"
-#include "shared/spec/SpectrumProcessing.h"
+#include "shared/spec/AveragingAndSmoothing.h"
 
 namespace ana::spec::display
 {

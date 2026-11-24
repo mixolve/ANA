@@ -1,7 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
 
-// Shared active and hover colours for interactive controls.
 struct ControlAppearance
 {
     ControlAppearance(bool activeIn=false,float hoverIn=0.0f,bool editingIn=false)

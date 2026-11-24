@@ -54,7 +54,6 @@ inline SnapPosition snapPosition(const SnapBounds moving,
 struct ResizeEdges { bool left = false, top = false, right = false, bottom = false; };
 struct ResizeLimits { int minWidth, minHeight, maxWidth, maxHeight; };
 
-// Only the grabbed edges move. The opposite edges remain fixed.
 inline SnapBounds snapResize(const SnapBounds moving, const std::vector<SnapTarget>& targets,
                              const ResizeEdges edges, const ResizeLimits limits,
                              const int threshold = 8)

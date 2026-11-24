@@ -63,12 +63,6 @@ bool SnapshotStore::synchroniseState()
     return true;
 }
 
-bool SnapshotStore::isValidState(const juce::var& stored)
-{
-    SnapshotStore loaded;
-    return loaded.loadState(stored);
-}
-
 bool SnapshotStore::loadState(const juce::var& stored)
 {
     SnapshotStore loaded;

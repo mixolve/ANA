@@ -64,6 +64,8 @@ private:
     bool readoutWindowHasAudio = false;
     float metricsTruePeak = ana::lvls::LvlsProcessor::minimumDecibels;
     std::array<juce::String, 4> metricsDifferenceReadouts { "---", "---", "---", "---" };
+    std::array<juce::String, 2> halfWaveReadouts { "---", "---" };
+    juce::String halfWaveRmsDifferenceReadout { "---" };
     uint64_t displayedRevision = 0;
     bool displayedOffline = false;
     std::array<float, 3> partWeights { 1.0f, 1.0f, 1.0f };

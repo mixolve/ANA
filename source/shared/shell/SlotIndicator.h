@@ -18,8 +18,6 @@ public:
     void copyBindingFrom(const SlotIndicator& other) { bind(other.slots,other.target); }
     void layout(juce::Rectangle<int> bounds,bool show)
     {
-        // AVA ParameterField::getBottomSideZone: one SL fills the whole
-        // bottom strip, inside the same 4px inset as the potentiometer rail.
         auto strip=bounds.reduced(4);
         strip.setTop(juce::jmax(strip.getY(),bounds.getBottom()-16));
         setBounds(strip); setVisible(show); toFront(false);
@@ -77,8 +75,7 @@ private:
     std::function<juce::String()> target;
     bool pressed=false,marking=false;
     double hoverAt=0;
-    // A slot's paint depends on its assignment and hover, not the clock.
-    // Poll assignment changes conservatively and invalidate only on a change.
+    // Assignment and hover changes invalidate the slot; the timer need not repaint unconditionally.
     juce::String lastTarget;
     bool lastAssigned=false,lastHover=false,fastHoverTimer=false;
     static bool drawEmbeddedButtonText(juce::Graphics& g,const juce::String& text,juce::Rectangle<int> bounds, juce::Colour colour)

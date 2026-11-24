@@ -1,5 +1,5 @@
 #pragma once
-#include "BurningFilmShader.h"
+#include "FragmentShader.h"
 #include "ColourFilter.h"
 #include <juce_opengl/juce_opengl.h>
 

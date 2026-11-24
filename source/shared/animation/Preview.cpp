@@ -1,4 +1,4 @@
-#include "BurningFilmPreview.h"
+#include "Preview.h"
 #include <cstring>
 
 BurningFilmPreview::BurningFilmPreview()

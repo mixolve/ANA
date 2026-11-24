@@ -1,5 +1,5 @@
 #include "shared/spec/Processor.h"
-#include "shared/spec/SpectrumProcessing.h"
+#include "shared/spec/AveragingAndSmoothing.h"
 #include "shared/spec/ChannelLevels.h"
 
 #include <algorithm>

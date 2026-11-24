@@ -3,8 +3,6 @@
 #include "Theme.h"
 #include "WindowGeometry.h"
 
-// Invisible window-move target. The reserved slot and the empty spaces in the
-// editor's control rows can both start the same gesture.
 class WindowDragHandle final : public juce::Component
 {
 public:
@@ -19,7 +17,6 @@ public:
 
     ~WindowDragHandle() override { finishDrag(); }
 
-    // Intentionally no paint: the whole move slot remains completely blank.
     void paint(juce::Graphics&) override {}
 
     void beginDragAt(const juce::Point<int> screenPosition)

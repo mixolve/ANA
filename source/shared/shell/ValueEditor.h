@@ -17,13 +17,11 @@ public:
     }
 
     void setNumericControl(juce::Slider* control,
-                           std::function<double(const juce::String&)> parser = {},
                            std::function<juce::String()> formatter = {})
     {
         if (target != nullptr) target->removeListener(this);
         target = control;
         if (target != nullptr) target->addListener(this);
-        juce::ignoreUnused(parser);
         formatText = std::move(formatter);
     }
 

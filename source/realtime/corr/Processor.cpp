@@ -1,6 +1,6 @@
 #include "shared/corr/Processor.h"
 #include "shared/corr/Settings.h"
-#include "shared/spec/SpectrumProcessing.h"
+#include "shared/spec/AveragingAndSmoothing.h"
 
 #include <algorithm>
 #include <cmath>

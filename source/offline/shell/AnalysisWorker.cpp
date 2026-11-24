@@ -53,7 +53,6 @@ void Worker::request(AnalysisRequest request, const bool forceRefresh)
                 analysis = it->result;
                 pendingRequest.reset();
                 progress.store(100, std::memory_order_release);
-                // Most recently used result stays in cache when more pages are visited.
                 if (it + 1 != completedCache.end())
                 {
                     auto entry = std::move(*it);
@@ -146,8 +145,7 @@ void Worker::run()
             if (builtAnalysis != nullptr)
             {
                 analysis = std::move(builtAnalysis);
-                // Cache completed pages separately: SCOP / SPEC FREQ / SPEC MAP /
-                // CORR / LVLS. Settings and source identity are checked on reuse.
+                // Reuse completed pages only when source identity and analysis settings match.
                 for (auto it = completedCache.begin(); it != completedCache.end(); ++it)
                     if (it->settings.hasSameSettings(*requestToBuild))
                     {

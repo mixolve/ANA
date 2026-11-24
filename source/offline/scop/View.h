@@ -2,7 +2,7 @@
 
 #include "shared/scop/BandView.h"
 #include "offline/shell/AnalysisResult.h"
-#include "shared/scop/AnalysisTypes.h"
+#include "shared/scop/ChannelData.h"
 #include "shared/scop/Crossover.h"
 #include "shared/scop/Settings.h"
 

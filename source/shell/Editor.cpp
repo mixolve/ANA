@@ -5,10 +5,11 @@
 #include "shared/shell/InlineResetPrompt.h"
 #include "shared/shell/EdgeResizeHandle.h"
 #include "Editor.h"
+#include "EditorSizeLimits.h"
 #include "Processor.h"
 #include "shared/shell/Theme.h"
 #include "shared/shell/SvgExport.h"
-#include "shared/shell/EditorLayout.h"
+#include "shared/shell/EditorMinimumWidth.h"
 #include "shared/shell/AuxiliaryWindowFocus.h"
 #include "shared/shell/GraphColours.h"
 #include "shared/shell/EdgeResizeContent.h"
@@ -26,15 +27,13 @@
 #include <set>
 #include <utility>
 
+using ana::editor_detail::minimumEditorHeight;
+using ana::editor_detail::minimumEditorWidth;
+
 namespace
 {
-// Other pages keep the original compact minimum. SCOP reserves control space
-// only for its currently displayed bands (see minimumHeightForCurrentPage).
-constexpr int minimumEditorHeight = ana::scop::minimumEditorHeightForBands(
-    ana::scop::minimumRealtimeBandHeight);
-constexpr int maximumEditorSize = 32768;
+// SCOP reserves minimum height for visible bands; other pages use compact bounds.
 constexpr int defaultEditorHeight = minimumEditorHeight;
-constexpr int editorResizeHandleThickness = ana::ui::resizeHandleThickness;
 constexpr int settingsWindowWidth = ana::ui::square::windowWidth;
 constexpr int maximumSettingsWindowHeight = 1200;
 constexpr int snapshotFileMagic = 0x414e4153; // "ANAS"
@@ -42,11 +41,6 @@ constexpr int snapshotFileVersion = 3;
 constexpr int maximumSnapshotNameLength = 256;
 constexpr const char* snapshotFileExtension = ".anasnapshot";
 constexpr const char* snapshotFileWildcard = "*.anasnapshot";
-
-int minimumEditorWidth() noexcept
-{
-    return ana::ui::minimumMainEditorWidth();
-}
 
 const auto& snapshotColourOptions = ana::ui::graphColourOptions;
 
@@ -315,8 +309,6 @@ public:
         colourControl.setDiscreteChoiceCount(static_cast<int>(snapshotColourOptions.size()));
         colourControl.displayTextProvider = [this]
         { return juce::String(snapshotColourOptions[static_cast<size_t>(colourIndex)].name); };
-        // Colour is a normal discrete control: click to advance, Shift+click
-        // to go back; drag uses the standard square-control discrete gesture.
         colourControl.onChoiceClicked = [this](int direction)
         {
             if (!isAvailable()) return;
@@ -491,8 +483,8 @@ public:
         label.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
         label.setBorderSize(juce::BorderSize<int>(0, ana::ui::gap.pixels(), 0, ana::ui::gap.pixels()));
         label.setDrawBackground(true);
-        label.setHoverEnabled(false); // Selected and idle tiles have stable colours; no hover flash.
-        label.setEditable(false, false, false); // Editing is started only by RENAME.
+        label.setHoverEnabled(false);
+        label.setEditable(false, false, false);
         label.setInterceptsMouseClicks(false, true); // Route clicks and wheel to the tile.
         label.setTooltip("CLICK TO SELECT");
         label.onTextChange = [this]
@@ -931,7 +923,6 @@ public:
         setTitleBarHeight(0);
         setDropShadowEnabled(false);
         setResizable(false, false);
-        // Minimum Settings window is square; only its height may grow.
         setResizeLimits(settingsWindowWidth, settingsWindowWidth,
                         settingsWindowWidth, maximumSettingsWindowHeight);
 
@@ -1179,21 +1170,8 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
              &locationButton, &updateButton })
         addChildComponent(*component);
     updateButton.setVisible(true);
-    refreshButton.addMouseListener(this, false);
-    refreshPress.onArmed = [this]
-    {
-        if (!audioProcessor.isOfflineMode()) return;
-        audioProcessor.setOfflineAutomaticRefresh(! audioProcessor.isOfflineAutomaticRefresh());
-        refreshButton.setToggleState(audioProcessor.isOfflineAutomaticRefresh(),
-                                     juce::dontSendNotification);
-        refreshOfflineSelectionButtons();
-    };
     refreshButton.onClick = [this]
     {
-        const auto release = refreshPress.release();
-        if (release == LongPressGesture::ReleaseResult::longPress
-            || release == LongPressGesture::ReleaseResult::cancelled)
-            return;
         audioProcessor.requestOfflineRefresh();
         refreshOfflineSelectionButtons();
         updateButton.setButtonText("00");
@@ -1208,7 +1186,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
         audioProcessor.setOfflineMonitorLocation(! audioProcessor.isOfflineMonitorLocation());
         parameter->endChangeGesture();
         refreshOfflineSelectionButtons();
-        resized(); // mode-specific TAKE/KST slot changes immediately
+        resized();
         scopDisplay.refreshWaveform();
     };
     locationButton.setClickingTogglesState(true);
@@ -1237,13 +1215,11 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
         if (settingsComponent.onTextEditingChanged)
             settingsComponent.onTextEditingChanged(editing);
     };
-    animationSettingsPanel=std::make_unique<AnimationSettingsPanel>(audioProcessor.getParameters(),animationSettings);
+    animationSettingsPanel=std::make_unique<AnimationSettingsPanel>(audioProcessor.getParameters());
     animationSettingsPanel->setName("unit.animation");
     animationSettingsPanel->onTextEditingChanged=[this](bool editing) { if (settingsComponent.onTextEditingChanged) settingsComponent.onTextEditingChanged(editing); };
-    animationSettingsPanel->onPreferredHeightChanged=[this] { settingsComponent.resized(); };
     settingsComponent.attachAnimationContent(*animationSettingsPanel);
     takeButton.onClick = [this] { showOfflineTakePrompt(); };
-    keepSecondTakeButton.setTooltip("KEEP SECOND TAKE");
     keepSecondTakeButton.onClick = [this]
     {
         if (!audioProcessor.isOfflineMode()) return;
@@ -1420,7 +1396,6 @@ PluginEditor::~PluginEditor()
     settingsWindow.reset();
     settingsComponent.detachSnapshotsContent();
     snapshotsContent.reset();
-    animationSettingsPanel->onPreferredHeightChanged=nullptr;
     animationSettingsPanel->onTextEditingChanged=nullptr;
     settingsComponent.detachAnimationContent();
     animationSettingsPanel.reset();
@@ -1429,7 +1404,6 @@ PluginEditor::~PluginEditor()
     updateButton.removeMouseListener(this);
     aboutButton.removeMouseListener(this);
     setConstrainer(nullptr);
-    refreshButton.removeMouseListener(this);
     if (displayedStateRevision == audioProcessor.getStateRevision() && getWidth() > 0 && getHeight() > 0)
         audioProcessor.setLastEditorSize(getWidth(), getHeight());
 }
@@ -1443,7 +1417,6 @@ void PluginEditor::registerDockScreenset()
     {
         if (dockScreensetId == key)
             return;
-        // The host has restored a different project/FX instance state.
         unregisterDockScreenset();
     }
     if (id.isEmpty() || registeredAnaDockIds.contains(key))
@@ -1750,7 +1723,7 @@ void PluginEditor::ensureAnimationComponents()
     {
         animationBackdrop = std::make_unique<AnimationBackdrop>();
         addChildComponent(*animationBackdrop);
-        animationOverlay = std::make_unique<AnimationOverlay>(audioProcessor.getParameters().state, animationSettings);
+        animationOverlay = std::make_unique<AnimationOverlay>(audioProcessor.getParameters(), animationSettings);
         animationOverlay->onSettingsRequested = [this] { showAnimationSettings(); };
         animationOverlay->onClose = [this] { showAnimation(false); };
         addChildComponent(*animationOverlay);
@@ -1826,7 +1799,7 @@ void PluginEditor::timerCallback()
     const auto stateChanged = displayedStateRevision != audioProcessor.getStateRevision();
     if (stateChanged) restoreProcessorState();
     else syncDisplayedEditorSize();
-    loadAnimationSettings(*animationSettings, audioProcessor.getParameters().state);
+    loadAnimationSettings(*animationSettings, audioProcessor.getParameters());
     const auto animationActive = audioProcessor.isScreensaverEnabled();
     if (automaticPauseAnimation && !animationActive)
     {
@@ -1879,7 +1852,7 @@ void PluginEditor::timerCallback()
     if (offline || showingAnalyzerSettings)
     {
         refreshOfflineSelectionButtons();
-        refreshButton.setToggleState(audioProcessor.isOfflineAutomaticRefresh(), juce::dontSendNotification);
+        refreshButton.setToggleState(false, juce::dontSendNotification);
     }
     if (offline) refreshOfflineUpdateStatus();
     else updateButton.setButtonText("UD");
@@ -1949,125 +1922,11 @@ void PluginEditor::timerCallback()
     }
 }
 
-void PluginEditor::paintOverChildren(juce::Graphics& g)
-{
-    NumericValueBox::paintRangeIndicators(g,*this);
-    g.setColour(ana::ui::background);
-    g.drawRect(getLocalBounds(),2);
-}
-
-void PluginEditor::paint(juce::Graphics& graphics)
-{
-    graphics.fillAll(ana::ui::windowBackground);
-}
-
-void PluginEditor::resized()
-{
-    if (deferOfflineScopMinimum && !svgLayoutActive && !restoringEditorState
-        && getHeight() != heightAtScopSwitch)
-    {
-        // This is the first actual change of HEIGHT after selecting Offline
-        // SCOP (width-only changes leave the deferred minimum untouched).
-        deferOfflineScopMinimum = false;
-        updateResizeLimits();
-        const auto required = minimumHeightForCurrentPage();
-        if (getHeight() < required)
-        {
-            setSize(getWidth(), required);
-            return;
-        }
-    }
-    if (!svgLayoutActive && !restoringEditorState
-        && displayedStateRevision == audioProcessor.getStateRevision()
-        && getWidth() > 0 && getHeight() > 0)
-    {
-        audioProcessor.setLastEditorSize(getWidth(), getHeight());
-        pendingEditorSize = { getWidth(), getHeight() };
-        editorSizeSaveDeadlineMilliseconds = juce::Time::getMillisecondCounterHiRes() + 250.0;
-        editorSizeSavePending = true;
-    }
-
-    const auto layoutBounds = svgLayoutActive ? svgLayoutBounds : getLocalBounds();
-    auto area = layoutBounds.reduced(ana::ui::gap.pixels());
-    const bool showTake=audioProcessor.isOfflineMode() && !audioProcessor.isOfflineMonitorLocation();
-    const int updateWidth=ana::ui::controlHeight;
-    const int overlayWidth=showTake?takeButton.getPreferredWidth()+ana::ui::gap.pixels():0;
-    for(auto* view:std::array<juce::Component*,4>{ &scopDisplay,&specDisplay,&corrDisplay,&lvlsDisplay })
-    {
-        view->getProperties().set("topRightOverlayWidth",overlayWidth);
-        view->getProperties().set("topLeftOverlayWidth",updateWidth+2*ana::ui::gap.pixels());
-        view->getProperties().set("topLeftOverlayBottom",2*ana::ui::gap.pixels()+updateWidth-(view==&scopDisplay?0:ana::ui::gap.pixels()));
-    }
-    for(auto* control:std::array<juce::Component*,3>{ &clearButton,&freezeButton,&fullSourceButton })
-    { control->setVisible(false); control->setBounds({}); }
-    updateButton.setVisible(true);
-    updateButton.setBounds(layoutBounds.getX()+2*ana::ui::gap.pixels(),layoutBounds.getY()+2*ana::ui::gap.pixels(),updateWidth,updateWidth);
-    takeButton.setVisible(showTake);
-    takeButton.setBounds(showTake?juce::Rectangle<int>(area.getRight()-ana::scop::bandZoomSliderWidth-ana::ui::gap.pixels()-takeButton.getPreferredWidth(),updateButton.getY(),takeButton.getPreferredWidth(),ana::ui::controlHeight):juce::Rectangle<int>());
-    auto scopBounds = area;
-    scopBounds.setTop(scopBounds.getY() - ana::ui::gap.pixels());
-    scopBounds.setBottom(getHeight());
-    scopDisplay.setBounds(scopBounds);
-    specDisplay.setBounds(area);
-    corrDisplay.setBounds(area);
-    lvlsDisplay.setBounds(area);
-    scopDisplay.resized(); specDisplay.resized(); corrDisplay.resized(); lvlsDisplay.resized();
-    updateButton.toFront(false); takeButton.toFront(false);
-
-    if (cornerResizer != nullptr)
-    {
-        cornerResizer->setBounds(getWidth() - editorResizeHandleThickness, getHeight() - editorResizeHandleThickness,
-                                editorResizeHandleThickness, editorResizeHandleThickness);
-        cornerResizer->toFront(false);
-    }
-    if (leftEdgeResizer != nullptr)
-    {
-        leftEdgeResizer->setBounds(0, 0, editorResizeHandleThickness, getHeight());
-        leftEdgeResizer->toFront(false);
-    }
-    if (topEdgeResizer != nullptr)
-    {
-        topEdgeResizer->setBounds(0, 0, getWidth(), editorResizeHandleThickness);
-        topEdgeResizer->toFront(false);
-    }
-    if (rightEdgeResizer != nullptr)
-    {
-        rightEdgeResizer->setBounds(getWidth() - editorResizeHandleThickness, 0,
-                                    editorResizeHandleThickness, getHeight());
-        rightEdgeResizer->toFront(false);
-    }
-    if (bottomEdgeResizer != nullptr)
-    {
-        bottomEdgeResizer->setBounds(0, getHeight() - editorResizeHandleThickness,
-                                     getWidth(), editorResizeHandleThickness);
-        bottomEdgeResizer->toFront(false);
-        if (cornerResizer != nullptr) cornerResizer->toFront(false);
-    }
-
-    if (choicePrompt != nullptr)
-    {
-        choicePrompt->setBounds(layoutBounds);
-        choicePrompt->toFront(true);
-    }
-    if (animationOverlay != nullptr && !animationOverlay->isVisible()) animationOverlay->setBounds(layoutBounds.reduced(2));
-    if (animationOverlay != nullptr && animationOverlay->isVisible())
-    {
-        animationBackdrop->setBounds(layoutBounds.reduced(2));
-        animationBackdrop->toFront(false);
-        animationOverlay->setBounds(layoutBounds.reduced(2));
-        animationOverlay->toFront(false);
-        for (auto* edge : { leftEdgeResizer.get(), topEdgeResizer.get(),
-                            rightEdgeResizer.get(), bottomEdgeResizer.get(),
-                            cornerResizer.get() })
-            if (edge != nullptr) edge->toFront(false);
-    }
-}
-
 void PluginEditor::showOfflineTakePrompt()
 {
     refreshOfflineSelectionButtons();
     if (audioProcessor.isOfflineMonitorLocation())
-        return; // MONITOR has KST, never the manual TAKE menu
+        return;
     juce::StringArray names;
     std::vector<int> choiceNumbers;
     const auto selectedSourceId = audioProcessor.getSelectedOfflineSourceId();
@@ -2157,68 +2016,6 @@ bool PluginEditor::isSvgExportGesture(const juce::ModifierKeys& modifiers)
         ;
 }
 
-int PluginEditor::requiredHeightForCurrentPage() const noexcept
-{
-    if (activePage != ana::AnalyzerPage::scop || audioProcessor.isCleanView())
-        return minimumEditorHeight;
-    const size_t bandCount = (audioProcessor.isScopFullSourceView()
-        || audioProcessor.getScopSingleViewBand() >= 0)
-        ? 1u : audioProcessor.getCrossoverCount() + 1u;
-    const auto bandHeight = audioProcessor.isOfflineMode()
-        ? ana::scop::minimumBandHeightForControls(true,true)
-        : ana::scop::minimumRealtimeBandHeight;
-    return juce::jmax(minimumEditorHeight,
-        ana::scop::minimumEditorHeightForBands(bandHeight, bandCount));
-}
-
-int PluginEditor::minimumHeightForCurrentPage() const noexcept
-{
-    return deferOfflineScopMinimum ? minimumEditorHeight : requiredHeightForCurrentPage();
-}
-
-void PluginEditor::updateResizeLimits()
-{
-    auto* constrainer = getConstrainer();
-    if (constrainer == nullptr) return;
-    const auto minHeight = minimumHeightForCurrentPage();
-    const auto maximumWidth = squareResizeMode ? juce::jmax(minimumEditorWidth(), 1000) : maximumEditorSize;
-    const auto maximumHeight = squareResizeMode ? juce::jmax(minHeight, 1000) : maximumEditorSize;
-    constrainer->setFixedAspectRatio(0.0);
-    constrainer->setSizeLimits(minimumEditorWidth(), minHeight, maximumWidth, maximumHeight);
-    constrainer->setFixedAspectRatio(squareResizeMode ? 1.0 : 0.0);
-}
-
-void PluginEditor::toggleSquareResizeMode()
-{
-    if (getConstrainer() == nullptr) return;
-    squareResizeMode = !squareResizeMode;
-    audioProcessor.getParameters().state.setProperty("ui.square-resize", squareResizeMode, nullptr);
-    updateResizeLimits();
-    setSize(juce::jlimit(minimumEditorWidth(), getConstrainer()->getMaximumWidth(), getWidth()),
-            juce::jlimit(minimumHeightForCurrentPage(), getConstrainer()->getMaximumHeight(), getHeight()));
-    resized();
-}
-
-void PluginEditor::restoreProcessorState()
-{
-    const juce::ScopedValueSetter<bool> restoreGuard(restoringEditorState, true);
-    displayedStateRevision = audioProcessor.getStateRevision();
-    editorSizeSavePending = false;
-    squareResizeMode = static_cast<bool>(audioProcessor.getParameters().state.getProperty("ui.square-resize", false));
-    updateResizeLimits();
-    const auto size = audioProcessor.getLastEditorSize();
-    if (size.x > 0 && size.y > 0)
-        setSize(juce::jlimit(minimumEditorWidth(), getConstrainer()->getMaximumWidth(), size.x),
-                juce::jlimit(minimumHeightForCurrentPage(), getConstrainer()->getMaximumHeight(), size.y));
-    specDisplay.refreshSnapshots(true);
-    specDisplay.refreshMode();
-    corrDisplay.refreshMode();
-    scopDisplay.refreshMode();
-    settingsComponent.refreshExternalState();
-    resized();
-    repaint();
-}
-
 bool PluginEditor::keyPressed(const juce::KeyPress& key)
 {
     if (isSvgExportGesture(key.getModifiers()) && (key.isKeyCode('R') || key.isKeyCode('r')))
@@ -2239,8 +2036,6 @@ void PluginEditor::mouseDown(const juce::MouseEvent& event)
 {
     if (event.originalComponent == &aboutButton && event.mods.isPopupMenu())
         showAnimation(true);
-    else if (event.originalComponent == &refreshButton && refreshButton.isInteractionEnabled() && event.mods.isLeftButtonDown())
-        refreshPress.begin();
     else if(event.originalComponent==&updateButton && event.mods.isLeftButtonDown())
     {
         udDragPressed=true; udDragMoved=false;
@@ -2252,12 +2047,7 @@ void PluginEditor::mouseDown(const juce::MouseEvent& event)
 
 void PluginEditor::mouseDrag(const juce::MouseEvent& event)
 {
-    if (event.originalComponent == &refreshButton)
-    {
-        if (event.getDistanceFromDragStart() >= 5)
-            refreshPress.markDragged();
-    }
-    else if(event.originalComponent==&updateButton && udDragPressed)
+    if(event.originalComponent==&updateButton && udDragPressed)
     {
         if(!udDragMoved && event.getDistanceFromDragStart()>=4)
         { udDragMoved=true; windowDragHandle.beginDragAt(udDragStart); }
@@ -2306,6 +2096,5 @@ void PluginEditor::refreshOfflineActionControls()
     keepSecondTakeButton.setToggleState(audioProcessor.isOfflineKeepSecondTake(), juce::dontSendNotification);
     keepSecondTakeButton.setInteractionEnabled(audioProcessor.isOfflineMode() && audioProcessor.isOfflineSourceAvailable() && monitorLocation);
     refreshButton.setInteractionEnabled(audioProcessor.isOfflineMode());
-    keepSecondTakeButton.setTooltip("MONITOR: USE TAKE 2 WHERE PRESENT, OTHERWISE TAKE 1");
-    refreshButton.setToggleState(audioProcessor.isOfflineAutomaticRefresh(), juce::dontSendNotification);
+    refreshButton.setToggleState(false, juce::dontSendNotification);
 }

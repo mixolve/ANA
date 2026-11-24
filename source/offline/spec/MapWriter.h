@@ -75,8 +75,9 @@ struct SpectrogramMapWriter
         auto& bucket = *bucketPtr;
         ++bucket.frameCount;
 
-        // Match REALTIME SPEC channel definitions; MAP uses real-FFT magnitude scaled by 1/N.
-        std::vector<ChannelValues> binLevels(binCount);
+        // Reuse the scratch buffer: offline MAP processes thousands of FFT frames.
+        // Match REALTIME SPEC channel definitions (magnitude scaled by 1/N).
+        binLevels.resize(binCount);
         for (size_t bin = 0; bin < binCount; ++bin)
         {
             const auto levels = fft::calculateStereoSpectrumLevels(
@@ -170,6 +171,7 @@ struct SpectrogramMapWriter
     offline::SpectrogramMap& map;
     size_t bucketCount = 0;
     std::vector<std::unique_ptr<Bucket>> buckets;
+    std::vector<ChannelValues> binLevels;
 };
 
 }

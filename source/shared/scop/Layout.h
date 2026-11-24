@@ -23,9 +23,6 @@ inline constexpr int minimumRealtimeBandHeight = ana::ui::controlHeight
     + 2 * ana::ui::gap.pixels();
 inline constexpr int minimumOfflineBandHeight = ana::ui::controlHeight
     + 3 * ana::ui::gap.pixels() + bandRangeSliderHeight;
-// The top actions need one 24px row. Reserve a second row for the horizontal
-// readouts and a separate row for the horizontal range only if enabled.
-// The gaps are between the relevant rows, not permanently held when hidden.
 constexpr int minimumBandHeightForControls(const bool horizontalZoom,
                                             const bool horizontalReadouts) noexcept
 {

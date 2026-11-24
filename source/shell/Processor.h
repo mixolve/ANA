@@ -161,11 +161,8 @@ public:
     static constexpr const char* editorHeightStateKey = "ana.editor.height";
     static constexpr const char* offlineSourceStateKey = "ana.offline.source";
     static constexpr const char* offlineTakeNumberStateKey = "ana.offline.takeNumber";
-    static constexpr const char* offlineLocationStateKey = "ana.offline.location";
     static constexpr const char* offlineAutomaticRefreshStateKey = "ana.offline.autoRefresh";
-    static constexpr const char* offlineKeepSecondTakeStateKey = "ana.offline.keepSecondTake";
     static constexpr const char* scopSingleViewStateKey = "ana.scop.singleView";
-    static constexpr const char* scopFullSourceStateKey = "ana.scop.fullSource";
     inline static constexpr std::array<const char*, 3> lvlsSectionWeightStateKeys {
         "ana.lvls.section1", "ana.lvls.section2", "ana.lvls.section3"
     };
@@ -278,7 +275,7 @@ public:
     juce::String getOfflineTrackName() const;
     void setOfflineMonitorLocation(bool monitor);
     void refreshOfflineSelection(const std::vector<ana::offline::SourceChoice>& choices);
-    bool isOfflineAutomaticRefresh() const noexcept;
+    bool shouldAutomaticallyRefreshOfflineSources() const noexcept;
     void setOfflineAutomaticRefresh(bool automatic);
     void forceOfflineRefresh();
     bool isOfflineKeepSecondTake() const noexcept;
@@ -366,12 +363,13 @@ private:
     std::unique_ptr<HostSlots> hostSlots;
     std::array<int,3> offlineControlIndices {} ;
     std::atomic<unsigned> pendingOfflineControls { 0 };
-    int animationParameterFirst=-1, animationParameterLast=-1;
-    std::atomic<bool> pendingAnimationSync {false};
     std::array<int,3> scopActionIndices {};
     std::atomic<unsigned> pendingScopActions {0};
     std::atomic<uint64_t> scopClearRevision {0};
     int displayChoiceIndex=-1;
+    int corrModeIndex=-1;
+    int moduleIndex=-1;
+    std::atomic<bool> pendingCorrModeUpdate { false };
     std::atomic<int> pendingDisplaySelection { -1 };
     bool hostWasPlaying = false;
     std::atomic<int> hostTransportState { -1 };

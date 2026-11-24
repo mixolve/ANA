@@ -34,7 +34,6 @@ inline juce::Rectangle<int> textBounds(juce::Rectangle<int> bounds, bool hasRail
     return text;
 }
 
-// AVA's square captions split compound names into two balanced lines.
 inline bool drawCaption(juce::Graphics& g, const juce::String& source, juce::Rectangle<int> bounds)
 {
     const juce::Graphics::ScopedSaveState saved(g);
@@ -115,7 +114,7 @@ inline void paintRail(juce::Graphics& g, juce::Rectangle<int> bounds, double pos
     g.fillRect(marker(bounds, position));
 }
 
-// The same axis-lock, 2x rail travel and Shift fine adjustment used by AVA.
+// Lock to one drag axis; Shift fine-adjusts using the same travel scale.
 class Drag final
 {
 public:

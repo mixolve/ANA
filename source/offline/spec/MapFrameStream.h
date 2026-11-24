@@ -2,6 +2,8 @@
 
 #include "shared/shell/StereoFftStream.h"
 
+#include <cmath>
+
 namespace ana::offline
 {
 // Each caller starts a fresh stream for an item. Zero-pad its tail to measure
@@ -35,6 +37,13 @@ bool readSpectrogramFrames(juce::AudioFormatReader& reader,
             if (! reader.read(&buffer, 0, readSamples, position, true, true))
                 return false;
             buffer.applyGain(0, readSamples, gain);
+            for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+            {
+                auto* data = buffer.getWritePointer(channel);
+                for (int sample = 0; sample < readSamples; ++sample)
+                    if (! std::isfinite(data[sample]))
+                        data[sample] = 0.0f;
+            }
         }
         juce::AudioBuffer<float> block(
             buffer.getArrayOfWritePointers(), buffer.getNumChannels(), blockSamples);

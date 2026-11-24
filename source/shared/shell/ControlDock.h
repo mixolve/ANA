@@ -3,7 +3,6 @@
 #include "Processor.h"
 #include <map>
 
-// AVA dock controls: sort at the top, collapse in the middle, orientation below.
 class AnaDockToggle final : public juce::Button
 {
 public:
@@ -66,7 +65,6 @@ public:
         ? dockBounds.getRight() + gap
         : layoutWidth - gap - toggleSize;
     viewport.setBounds(rotate(dockBounds));
-    // Only three service controls: SORT, COLLAPSE, ORIENTATION.
     sort.setBounds(rotate({rightButtonsX, dockBounds.getY(), toggleSize, toggleSize}));
     collapse.setBounds(rotate({rightButtonsX, dockBounds.getCentreY() - toggleSize,
                                toggleSize, 2 * toggleSize}));
@@ -93,12 +91,47 @@ private:
     struct Overlay : juce::Component
     {
         ControlDock* owner=nullptr;
-        void mouseDown(const juce::MouseEvent& e) override { if(e.mods.isLeftButtonDown()) { owner->drag(e,0); beginDragAutoRepeat(40); } }
-        void mouseDrag(const juce::MouseEvent& e) override { if(e.getDistanceFromDragStart()>=4) owner->drag(e,1); }
-        void mouseUp(const juce::MouseEvent& e) override { beginDragAutoRepeat(0); owner->drag(e,2); }
+        juce::String removalKey;
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            if(e.mods.isCtrlDown() && !e.mods.isShiftDown() && !e.mods.isAltDown() && !e.mods.isCommandDown())
+            { removalKey=owner->keyAt(e.position); return; }
+            removalKey.clear();
+            if(e.mods.isLeftButtonDown()) { owner->drag(e,0); beginDragAutoRepeat(40); }
+        }
+        void mouseDrag(const juce::MouseEvent& e) override
+        { if(removalKey.isEmpty() && e.getDistanceFromDragStart()>=4) owner->drag(e,1); }
+        void mouseUp(const juce::MouseEvent& e) override
+        {
+            beginDragAutoRepeat(0);
+            if(removalKey.isNotEmpty())
+            {
+                const auto key=std::exchange(removalKey,juce::String{});
+                if(!e.mouseWasDraggedSinceMouseDown() && owner->keyAt(e.position)==key) owner->unpin(key);
+                return;
+            }
+            owner->drag(e,2);
+        }
         void mouseWheelMove(const juce::MouseEvent&,const juce::MouseWheelDetails& w) override { owner->scroll(w); }
     } overlay;
     juce::ValueTree& state() { return processor.getParameters().state; }
+    void unpin(const juce::String& key)
+    {
+        state().removeProperty(juce::Identifier(key),nullptr);
+        auto order=juce::StringArray::fromTokens(state().getProperty("ana.dock.order").toString(),"|","");
+        order.removeString(key);
+        state().setProperty("ana.dock.order",order.joinIntoString("|"),nullptr);
+        for(auto& item:items) if(item.key==key && item.source) item.source->repaint();
+        // The timer rebuilds copies after mouseUp returns, not inside its callback.
+    }
+    juce::String keyAt(juce::Point<float> point) const
+    {
+        if(!overlay.getLocalBounds().toFloat().contains(point)) return {};
+        const int axis=int(vertical()?point.y:point.x)
+            +(vertical()?viewport.getViewPositionY():viewport.getViewPositionX());
+        const auto index=static_cast<size_t>(axis/88);
+        return axis>=0 && axis%88<80 && index<items.size()?items[index].key:juce::String{};
+    }
     void scroll(const juce::MouseWheelDetails& w)
     {
         const int delta=juce::roundToInt((std::abs(w.deltaX)>std::abs(w.deltaY)?w.deltaX:w.deltaY)*-(w.isSmooth?140.f:70.f));
@@ -155,14 +188,14 @@ private:
                 if(auto* p=dynamic_cast<ParameterControl*>(source))
                 {
                     auto c=p->createDockCopy();
-                    c->setMarking({}, {});
+                    c->setMarking({}, [this,key] { unpin(key); });
                     c->setSlotIndicatorVisible(false);
                     copy=std::move(c);
                 }
                 else if(auto* n=dynamic_cast<NumericValueBox*>(source))
                 {
                     auto c=n->createDockCopy();
-                    c->onMark=nullptr;
+                    c->onMark=[this,key] { unpin(key); };
                     c->isMarked=nullptr;
                     c->setSlotIndicatorVisible(false);
                     copy=std::move(c);
@@ -170,6 +203,7 @@ private:
                 else if(auto* b=dynamic_cast<ControlButton*>(source))
                 {
                     auto c=std::make_unique<ControlButton>(b->getButtonText()); c->setSquareStyle(true); c->valueTextProvider=b->valueTextProvider; c->setSlotIndicatorVisible(false);
+                    c->onMark=[this,key] { unpin(key); };
                     c->onClick=[safe=juce::Component::SafePointer<ControlButton>(b)] { if(safe && safe->isInteractionEnabled()) { if(safe->getClickingTogglesState()) safe->setToggleState(!safe->getToggleState(),juce::dontSendNotification); if(safe->onClick) safe->onClick(); } }; copy=std::move(c);
                 }
                 if(copy) { content.addAndMakeVisible(*copy); items.push_back({key,source,std::move(copy)}); }

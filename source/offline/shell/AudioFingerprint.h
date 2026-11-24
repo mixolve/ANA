@@ -21,8 +21,9 @@ inline uint64_t addChannelCount(uint64_t hash, const int channelCount) noexcept
 template <typename Sample>
 uint64_t addSample(uint64_t hash, const Sample sample) noexcept
 {
+    const auto value = static_cast<double>(sample);
     const auto quantized = static_cast<uint32_t>(std::llround(
-        std::clamp(static_cast<double>(sample), -1.0, 1.0) * 8388607.0));
+        (std::isfinite(value) ? std::clamp(value, -1.0, 1.0) : 0.0) * 8388607.0));
     hash ^= quantized;
     return hash * prime;
 }

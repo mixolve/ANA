@@ -1,9 +1,9 @@
 #pragma once
 
-#include "shared/scop/AnalysisTypes.h"
+#include "shared/scop/ChannelData.h"
 #include "shared/scop/Display.h"
 #include "shared/scop/Layout.h"
-#include "shared/shell/CleanView.h"
+#include "shared/shell/PlotVisibility.h"
 #include "shared/shell/Controls.h"
 #include "shared/shell/AnalyzerViewUtilities.h"
 #include "shared/shell/Theme.h"
@@ -19,8 +19,6 @@
 
 namespace ana::scop
 {
-/** Shared band controls, geometry and interaction for the realtime and offline
-    SCOP views. Subclasses provide only the source-specific data and extras. */
 class BandView : public juce::Component
 {
 public:
@@ -366,8 +364,6 @@ protected:
             normalizeButton.setEnabled(isBandNormalizationEnabled(bandIndex));
             normalizeButton.setToggleState(normalized, juce::dontSendNotification);
 
-            // Reserve the height occupied by tools (including wrapped rows).
-            // Bottom readouts must not overlap these controls.
             refreshBandExtras(bandIndex, laneBounds, isVisibleBand, zoomAvailable,
                               showVerticalZoomSlider, controlY + buttonHeight);
 

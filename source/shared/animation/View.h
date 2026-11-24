@@ -14,10 +14,10 @@ public:
     void paint(juce::Graphics&) override;
 };
 
-class AnimationOverlay final : public juce::Component, private juce::Timer
+class AnimationOverlay final : public juce::Component
 {
 public:
-    AnimationOverlay(juce::ValueTree& state, std::shared_ptr<AnimationSettings> settings);
+    AnimationOverlay(juce::AudioProcessorValueTreeState& parameters, std::shared_ptr<AnimationSettings> settings);
     ~AnimationOverlay() override;
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -26,8 +26,6 @@ public:
     AnimationArtwork& getArtwork() noexcept { return artwork; }
     std::function<void()> onClose, onSettingsRequested;
 private:
-    void timerCallback() override;
-    juce::ValueTree& state;
     std::shared_ptr<AnimationSettings> settings;
     AnimationArtwork artwork;
     AnimationOpenGLContext context;
@@ -36,7 +34,7 @@ private:
 class AnimationSettingsPanel final : public juce::Component
 {
 public:
-    AnimationSettingsPanel(juce::AudioProcessorValueTreeState& parameters, std::shared_ptr<AnimationSettings> settings);
+    AnimationSettingsPanel(juce::AudioProcessorValueTreeState& parameters);
     ~AnimationSettingsPanel() override;
     void paintOverChildren(juce::Graphics& g) override;
     void resized() override;
@@ -46,7 +44,6 @@ public:
     int preferredEmbeddedHeight(int width) const;
     std::vector<ParameterControl*> parameterControls() const;
     std::function<void(ParameterControl&)> onChoiceRequested, onResetRequested;
-    std::function<void()> onPreferredHeightChanged;
     std::function<void()> onClose;
     std::function<void(bool)> onTextEditingChanged;
 private:

@@ -22,12 +22,15 @@ public:
     {
         constexpr ProcessingOptions(bool peakRmsIn = true,
                                     bool loudnessIn = true,
-                                    bool metricsIn = true) noexcept
-            : peakRms(peakRmsIn), loudness(loudnessIn), metrics(metricsIn) {}
+                                    bool metricsIn = true,
+                                    bool wholeDurationIn = false) noexcept
+            : peakRms(peakRmsIn), loudness(loudnessIn), metrics(metricsIn),
+              wholeDuration(wholeDurationIn) {}
 
         bool peakRms;
         bool loudness;
         bool metrics;
+        bool wholeDuration;
     };
 
     struct Values
@@ -37,6 +40,10 @@ public:
         std::array<float, 4> peakMaximumDecibels { minimumDecibels, minimumDecibels, minimumDecibels, minimumDecibels };
         std::array<float, 4> peakHoldDecibels { minimumDecibels, minimumDecibels, minimumDecibels, minimumDecibels };
         std::array<float, 4> rmsMaximumDecibels { minimumDecibels, minimumDecibels, minimumDecibels, minimumDecibels };
+        std::array<float, 4> wholeRmsDecibels { minimumDecibels, minimumDecibels, minimumDecibels, minimumDecibels };
+        // Negative means no measured energy; the negative half is 100 minus this value.
+        float positiveHalfWavePercent = -1.0f;
+        float halfWaveRmsDifference = 0.0f;
         float momentaryLufs = minimumDecibels;
         float shortTermLufs = minimumDecibels;
         float integratedLufs = minimumDecibels;
@@ -114,6 +121,12 @@ private:
         std::atomic<float> { minimumDecibels }, std::atomic<float> { minimumDecibels },
         std::atomic<float> { minimumDecibels }, std::atomic<float> { minimumDecibels }
     };
+    std::array<std::atomic<float>, 4> publishedWholeRmsDecibels {
+        std::atomic<float> { minimumDecibels }, std::atomic<float> { minimumDecibels },
+        std::atomic<float> { minimumDecibels }, std::atomic<float> { minimumDecibels }
+    };
+    std::atomic<float> publishedPositiveHalfWavePercent { -1.0f };
+    std::atomic<float> publishedHalfWaveRmsDifference { 0.0f };
     std::atomic<float> publishedMomentaryLufs { minimumDecibels };
     std::atomic<float> publishedShortTermLufs { minimumDecibels };
     std::atomic<float> publishedIntegratedLufs { minimumDecibels };
@@ -132,6 +145,14 @@ private:
     double sampleRate = 0.0;
     std::array<std::vector<float>, 4> rmsPowerHistory;
     std::vector<float> loudnessPowerHistory;
+    std::vector<double> positiveHalfWavePowerHistory;
+    std::vector<double> negativeHalfWavePowerHistory;
+    double positiveHalfWavePowerSum = 0.0;
+    double negativeHalfWavePowerSum = 0.0;
+    double wholePositiveHalfWavePowerSum = 0.0;
+    double wholeNegativeHalfWavePowerSum = 0.0;
+    std::array<double, 4> wholeRmsPowerSums {};
+    uint64_t wholeRmsSampleCount = 0;
     std::array<double, 4> rmsPowerSums {};
     std::array<float, 4> peakGains {};
     std::array<float, 4> peakHoldGains {};

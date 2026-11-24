@@ -1,6 +1,5 @@
 #include "SourceCatalog.h"
 #include "AudioFingerprint.h"
-#include "SourceAudioReader.h"
 
 
 #include <algorithm>
@@ -14,6 +13,15 @@ namespace ana::offline
 {
 namespace
 {
+inline std::unique_ptr<juce::AudioFormatReader> createSourceFileReader(const juce::String& path)
+{
+    if (! juce::File::isAbsolutePath(path))
+        return {};
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    return std::unique_ptr<juce::AudioFormatReader>(formats.createReaderFor(juce::File(path)));
+}
+
 juce::String normalizePersistentId(const juce::String& value)
 {
     juce::String normalized;
@@ -41,8 +49,13 @@ std::optional<uint64_t> getAudioContentFingerprint(juce::ARAAudioSource& source)
             static_cast<juce::int64>(std::llround(position * static_cast<double>(sourceSampleCount))),
             0,
             std::max<juce::int64>(0, sourceSampleCount - audio_fingerprint::samplesPerSegment));
+        // Short ARA sources cannot satisfy a full fingerprint segment. Keep
+        // the zero padding, but never ask the host reader to read past EOF.
+        const auto readableSamples = static_cast<int>(std::min<juce::int64>(
+            audio_fingerprint::samplesPerSegment, sourceSampleCount - start));
         buffer.clear();
-        if (! reader.read(&buffer, 0, audio_fingerprint::samplesPerSegment, start, true, true))
+        if (readableSamples <= 0
+            || ! reader.read(&buffer, 0, readableSamples, start, true, true))
             return {};
 
         hash = audio_fingerprint::addSegment(

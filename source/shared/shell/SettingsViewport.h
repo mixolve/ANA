@@ -2,7 +2,7 @@
 
 #include "SquareControl.h"
 
-// AVA wheel sensitivity, fractional trackpad movement and opaque scrollbar fades.
+// Accumulate smooth-wheel movement before rounding to viewport pixels.
 class SettingsViewport final : public juce::Viewport, private juce::Timer
 {
 public:

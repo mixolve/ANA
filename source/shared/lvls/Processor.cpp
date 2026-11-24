@@ -85,6 +85,8 @@ void LvlsProcessor::prepare(const double newSampleRate, const int maximumBlockSa
     for (auto& history : rmsPowerHistory)
         history.assign(maximumRmsWindowSamples, 0.0f);
     loudnessPowerHistory.assign(maximumRmsWindowSamples, 0.0f);
+    positiveHalfWavePowerHistory.assign(maximumRmsWindowSamples, 0.0);
+    negativeHalfWavePowerHistory.assign(maximumRmsWindowSamples, 0.0);
     momentaryWindowSamples = static_cast<size_t>(std::max(1.0, std::round(sampleRate * 0.4)));
     shortTermWindowSamples = static_cast<size_t>(std::max(1.0, std::round(sampleRate * 3.0)));
     const auto oversamplingStages = sampleRate < 96000.0 ? size_t { 2 }
@@ -108,6 +110,18 @@ void LvlsProcessor::reset() noexcept
         truePeakOversampler->reset();
     for (auto& value : publishedPeakDecibels)
         value.store(LvlsProcessor::minimumDecibels, std::memory_order_relaxed);
+    publishedPositiveHalfWavePercent.store(-1.0f, std::memory_order_relaxed);
+    publishedHalfWaveRmsDifference.store(0.0f, std::memory_order_relaxed);
+    for (auto& value : publishedWholeRmsDecibels)
+        value.store(LvlsProcessor::minimumDecibels, std::memory_order_relaxed);
+    wholeRmsPowerSums.fill(0.0);
+    wholeRmsSampleCount = 0;
+    wholePositiveHalfWavePowerSum = 0.0;
+    wholeNegativeHalfWavePowerSum = 0.0;
+    negativeHalfWavePowerSum = 0.0;
+    std::fill(negativeHalfWavePowerHistory.begin(), negativeHalfWavePowerHistory.end(), 0.0);
+    positiveHalfWavePowerSum = 0.0;
+    std::fill(positiveHalfWavePowerHistory.begin(), positiveHalfWavePowerHistory.end(), 0.0);
     for (auto& value : publishedRmsDecibels)
         value.store(LvlsProcessor::minimumDecibels, std::memory_order_relaxed);
     for (auto& value : publishedPeakMaximumDecibels)
@@ -182,7 +196,8 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
         return;
 
     const auto processLoudnessSignal = options.loudness || options.metrics;
-    if (! options.peakRms && ! processLoudnessSignal)
+    const auto processRmsSignal = options.peakRms || options.metrics || options.wholeDuration;
+    if (! processRmsSignal && ! processLoudnessSignal)
         return;
 
     if (holdOnTransportStop)
@@ -231,18 +246,27 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
 
             inputOffset += chunkSamples;
         }
+
+        // The analyser exposes stereo L/R meters for mono input as well.
+        // RMS already mirrors the mono channel; mirror its true peak too.
+        if (channelCount == 1)
+            blockPeaks[1] = blockPeaks[0];
     }
     const auto maximumRmsWindowSamples = rmsPowerHistory[0].size();
     const auto requestedRmsWindowSamples = static_cast<size_t>(juce::jlimit(
         1, static_cast<int>(maximumRmsWindowSamples),
         juce::roundToInt(sampleRate * juce::jlimit(minimumRmsWindowMilliseconds, maximumRmsWindowMilliseconds,
                                           rmsWindowMilliseconds) * 0.001f)));
-    if (options.peakRms && requestedRmsWindowSamples != rmsWindowSamples)
+    if (processRmsSignal && requestedRmsWindowSamples != rmsWindowSamples)
     {
         for (auto& history : rmsPowerHistory)
             std::fill(history.begin(), history.end(), 0.0f);
         rmsPowerSums.fill(0.0);
         rmsPowerWriteCount = 0;
+        positiveHalfWavePowerSum = 0.0;
+        negativeHalfWavePowerSum = 0.0;
+        std::fill(negativeHalfWavePowerHistory.begin(), negativeHalfWavePowerHistory.end(), 0.0);
+        std::fill(positiveHalfWavePowerHistory.begin(), positiveHalfWavePowerHistory.end(), 0.0);
         rmsWindowSamples = requestedRmsWindowSamples;
     }
 
@@ -256,7 +280,7 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
             midSideCompensationGain * (left + right),
             midSideCompensationGain * (left - right)
         };
-        if (options.peakRms)
+        if (processRmsSignal)
         {
             const auto historyIndex = rmsPowerWriteCount % maximumRmsWindowSamples;
             const auto hasFullRmsWindow = rmsPowerWriteCount >= rmsWindowSamples;
@@ -267,7 +291,32 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
                 const auto power = lvlsSamples[index] * lvlsSamples[index];
                 const auto expiredPower = hasFullRmsWindow ? rmsPowerHistory[index][expiredIndex] : 0.0f;
                 rmsPowerHistory[index][historyIndex] = power;
-                rmsPowerSums[index] += static_cast<double>(power - expiredPower);
+                rmsPowerSums[index] += static_cast<double>(power) - static_cast<double>(expiredPower);
+                if (options.wholeDuration)
+                    wholeRmsPowerSums[index] += static_cast<double>(lvlsSamples[index]) * lvlsSamples[index];
+            }
+            if (options.wholeDuration)
+                ++wholeRmsSampleCount;
+            if (options.metrics)
+            {
+                const auto positivePower = (left > 0.0f ? static_cast<double>(left) * left : 0.0)
+                    + (right > 0.0f ? static_cast<double>(right) * right : 0.0);
+                const auto negativePower = (left < 0.0f ? static_cast<double>(left) * left : 0.0)
+                    + (right < 0.0f ? static_cast<double>(right) * right : 0.0);
+                if (options.wholeDuration)
+                {
+                    wholePositiveHalfWavePowerSum += positivePower;
+                    wholeNegativeHalfWavePowerSum += negativePower;
+                }
+                else
+                {
+                    const auto expiredPositive = hasFullRmsWindow ? positiveHalfWavePowerHistory[expiredIndex] : 0.0;
+                    const auto expiredNegative = hasFullRmsWindow ? negativeHalfWavePowerHistory[expiredIndex] : 0.0;
+                    positiveHalfWavePowerHistory[historyIndex] = positivePower;
+                    negativeHalfWavePowerHistory[historyIndex] = negativePower;
+                    positiveHalfWavePowerSum += positivePower - expiredPositive;
+                    negativeHalfWavePowerSum += negativePower - expiredNegative;
+                }
             }
         }
         if (processLoudnessSignal)
@@ -302,7 +351,7 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
                 publishLoudnessFrame(options.loudness, options.metrics);
             }
         }
-        if (options.peakRms)
+        if (processRmsSignal)
             ++rmsPowerWriteCount;
     }
     if (processLoudnessSignal)
@@ -363,6 +412,30 @@ void LvlsProcessor::processBlock(const juce::AudioBuffer<float>& buffer,
                 std::memory_order_release);
         }
     }
+    if (options.wholeDuration && wholeRmsSampleCount > 0)
+        for (size_t channel = 0; channel < wholeRmsPowerSums.size(); ++channel)
+        {
+            const auto power = wholeRmsPowerSums[channel] / static_cast<double>(wholeRmsSampleCount);
+            const auto level = power > 0.0
+                ? static_cast<float>(10.0 * std::log10(power)) + aes17RmsReferenceOffset
+                : minimumDecibels;
+            publishedWholeRmsDecibels[channel].store(std::max(minimumDecibels, level), std::memory_order_release);
+        }
+    if (options.metrics)
+    {
+        const auto positive = std::max(0.0, options.wholeDuration
+            ? wholePositiveHalfWavePowerSum : positiveHalfWavePowerSum);
+        const auto negative = std::max(0.0, options.wholeDuration
+            ? wholeNegativeHalfWavePowerSum : negativeHalfWavePowerSum);
+        const auto total = positive + negative;
+        // Signed difference in percentage points, HW+ minus HW-.
+        const auto difference = total > 0.0
+            ? static_cast<float>(100.0 * (positive - negative) / total) : 0.0f;
+        publishedHalfWaveRmsDifference.store(difference, std::memory_order_release);
+        publishedPositiveHalfWavePercent.store(total > 0.0
+            ? static_cast<float>(std::clamp(100.0 * positive / total, 0.0, 100.0)) : -1.0f,
+            std::memory_order_release);
+    }
     if (options.loudness)
     {
         const auto momentaryLufs = lufsFromPower(momentaryLufsPower);
@@ -402,7 +475,10 @@ LvlsProcessor::Values LvlsProcessor::getValues() const noexcept
         values.peakMaximumDecibels[index] = publishedPeakMaximumDecibels[index].load(std::memory_order_acquire);
         values.peakHoldDecibels[index] = publishedPeakHoldDecibels[index].load(std::memory_order_acquire);
         values.rmsMaximumDecibels[index] = publishedRmsMaximumDecibels[index].load(std::memory_order_acquire);
+        values.wholeRmsDecibels[index] = publishedWholeRmsDecibels[index].load(std::memory_order_acquire);
     }
+    values.positiveHalfWavePercent = publishedPositiveHalfWavePercent.load(std::memory_order_acquire);
+    values.halfWaveRmsDifference = publishedHalfWaveRmsDifference.load(std::memory_order_acquire);
     values.momentaryLufs = publishedMomentaryLufs.load(std::memory_order_acquire);
     values.shortTermLufs = publishedShortTermLufs.load(std::memory_order_acquire);
     values.integratedLufs = publishedIntegratedLufs.load(std::memory_order_acquire);

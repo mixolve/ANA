@@ -3,7 +3,7 @@
 #include "BandlimitedResampler.h"
 
 #include "shared/corr/Processor.h"
-#include "shared/scop/AnalysisTypes.h"
+#include "shared/scop/ChannelData.h"
 #include "shared/scop/SlopeCompensator.h"
 #include "shared/spec/Processor.h"
 #include "offline/spec/MapFrameStream.h"
@@ -80,10 +80,21 @@ bool readSourceBlocks(juce::AudioFormatReader& reader,
         else if (! reader.read(&buffer, 0, samples, start + position, true, true))
             return false;
         buffer.applyGain(0, samples, gain);
+        // Decoders and ARA sources may contain non-finite float samples.
+        // Keep a bad sample from contaminating the following DSP accumulators.
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+        {
+            auto* data = buffer.getWritePointer(channel);
+            for (int sample = 0; sample < samples; ++sample)
+                if (! std::isfinite(data[sample]))
+                    data[sample] = 0.0f;
+        }
         juce::AudioBuffer<float> block(buffer.getArrayOfWritePointers(), 2, samples);
-        const auto sourceOffset = resample
-            ? static_cast<juce::int64>(std::llround(static_cast<double>(position) * increment)) : position;
-        process(block, start + sourceOffset);
+        // Preserve the precise source-time coordinate of each resampled frame.
+        // Rounding the block origin and treating output samples as source samples
+        // drifts the SCOP envelope timeline when source rates differ.
+        process(block, static_cast<double>(start) + static_cast<double>(position) * increment,
+                increment);
         onProgress(static_cast<float>(position + samples) / static_cast<float>(sampleCount));
     }
     return true;
@@ -249,7 +260,12 @@ static void processLvlsBlock(offline::AnalysisResult& result,
         result.lvls->prepare(sampleRate);
     }
 
-    result.lvls->processBlock(buffer, config.rmsWindowMs, config.peakHoldMs, false, config.options);
+    // OTHERS needs peak/RMS even when the PEAK/RMS panel is hidden.
+    const lvls::LvlsProcessor::ProcessingOptions options {
+        config.options.peakRms || config.options.metrics,
+        config.options.loudness, config.options.metrics, true
+    };
+    result.lvls->processBlock(buffer, config.rmsWindowMs, config.peakHoldMs, false, options);
 }
 
 static void processBlock(
@@ -376,7 +392,7 @@ static bool analyseTakeSource(
     }
     const auto analysisRate = analysisSampleRate(result, sourceRate);
     return readSourceBlocks(reader, 0, sourceSampleCount, 1.0f, analysisRate,
-        [&] (juce::AudioBuffer<float>& buffer, const juce::int64 position)
+        [&] (juce::AudioBuffer<float>& buffer, const double position, const double sourceIncrement)
         {
             processBlock(result, buffer, analysisRate,
                          includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
@@ -386,7 +402,7 @@ static bool analyseTakeSource(
             const auto* right = buffer.getReadPointer(1);
             for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
             {
-                const auto time = static_cast<double>(position + sample) / static_cast<double>(sourceSampleCount);
+                const auto time = (position + sample * sourceIncrement) / static_cast<double>(sourceSampleCount);
                 const auto column = std::min(columnCount - 1,
                     static_cast<size_t>(time * static_cast<double>(columnCount)));
                 accumulateScopSample(result, crossover, slopeCompensator, column, left[sample], right[sample]);
@@ -491,7 +507,6 @@ static bool analyseHostTakeChoice(
     scop::SlopeCompensator slopeCompensator;
     if (includeScop)
     {
-        // Filtering follows readSourceBlocks' output rate (possibly resampled).
         crossover.prepare(analysisSampleRate(result, sourceRate));
         slopeCompensator.prepare(analysisSampleRate(result, sourceRate));
         slopeCompensator.setSlope(scopSlopeDbPerOctave);
@@ -501,7 +516,7 @@ static bool analyseHostTakeChoice(
     const auto sourceSamplesPerPlaybackSecond = choice.playRate * sourceRate;
     const auto analysisRate = analysisSampleRate(result, sourceRate);
     return readSourceBlocks(reader, sourceStart, sourceEnd, static_cast<float>(choice.gain), analysisRate,
-        [&] (juce::AudioBuffer<float>& buffer, const juce::int64 position)
+        [&] (juce::AudioBuffer<float>& buffer, const double position, const double sourceIncrement)
         {
             processBlock(result, buffer, analysisRate,
                          includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
@@ -512,7 +527,7 @@ static bool analyseHostTakeChoice(
             for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
             {
                 const auto playbackTime = choice.playbackStartSeconds
-                    + static_cast<double>(position + sample - requestedSourceStart) / sourceSamplesPerPlaybackSecond;
+                    + (position + sample * sourceIncrement - static_cast<double>(requestedSourceStart)) / sourceSamplesPerPlaybackSecond;
                 const auto time = result.durationSeconds > 0.0
                     ? (playbackTime - result.startTimeSeconds) / result.durationSeconds : 0.0;
                 const auto column = std::min(columnCount - 1,
@@ -843,7 +858,7 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
 
         const auto analysisRate = analysisSampleRate(*result, sourceRate);
         if (! readSourceBlocks(reader, sourceStart, sourceEnd, 1.0f, analysisRate,
-                [&] (juce::AudioBuffer<float>& buffer, const juce::int64 position)
+                [&] (juce::AudioBuffer<float>& buffer, const double position, const double sourceIncrement)
                 {
                     processBlock(*result, buffer, analysisRate,
                                  includeSpec && specMapWriter == nullptr, includeCorr, includeLvls, lvlsConfig);
@@ -854,7 +869,7 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
                     for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
                     {
                         const auto playbackTime = playbackStart
-                            + (static_cast<double>(position + sample - requestedSourceStart) / sourceLength) * playbackDuration;
+                            + ((position + sample * sourceIncrement - static_cast<double>(requestedSourceStart)) / sourceLength) * playbackDuration;
                         const auto time = result->durationSeconds > 0.0
                             ? (playbackTime - firstTime) / result->durationSeconds : 0.0;
                         const auto column = std::min(columnCount - 1,
@@ -912,7 +927,7 @@ std::shared_ptr<offline::AnalysisResult> analysePlaybackRegions(
             resetSegmentStreams(*result, false, true);
             const auto analysisRate = analysisSampleRate(*result, sourceRate);
             if (! readSourceBlocks(reader, sourceStart, sourceEnd, 1.0f, analysisRate,
-                    [&] (juce::AudioBuffer<float>& buffer, juce::int64)
+                    [&] (juce::AudioBuffer<float>& buffer, double, double)
                     {
                         processBlock(*result, buffer, analysisRate, false, true, false, lvlsConfig);
                     }, shouldCancel, [&] (const float progress)

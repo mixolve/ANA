@@ -202,9 +202,7 @@ public:
         editor->setIndicatorAnchor(this);
         editor->setSquareControl(isSquare());
         if(numeric) editor->setNumericControl(&target);
-        // Keep the live TextEditor (including its selection and caret) in the
-        // same coordinate system as input hit testing. The old cached raster
-        // applied a second Y translation to the entire rendered editor.
+        // Keep the live editor and its caret in the same coordinates as hit testing.
         if(isSquare())
         {
             editor->getProperties().set("squareValueEditor",true);

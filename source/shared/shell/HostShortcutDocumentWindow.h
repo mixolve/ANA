@@ -3,7 +3,7 @@
 #include "AuxiliaryWindowFocus.h"
 #include "AuxiliaryBackgroundDrag.h"
 #include "SvgExport.h"
-#include "SvgExportLayout.h"
+#include "ViewportOverflow.h"
 class HostShortcutDocumentWindow : public juce::DocumentWindow, public ana::svg_export::Layout, private juce::FocusChangeListener
 {
 public:

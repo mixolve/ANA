@@ -83,15 +83,14 @@ void main() {
   vec2 uv = vec2(canvasPosition.x, u_res.y - canvasPosition.y) / u_res;
   float t = u_time;
 
-  // Keep the original burn frontier in its developed stage indefinitely.
+  // Fixed threshold holds the burn front in its developed state.
   float cycleT = t;
   float burnThreshold = 0.50;
 
-  // Use aspect-corrected coordinates for the noise
   float aspect = u_res.x / u_res.y;
   vec2 noiseUV = uv * vec2(aspect, 1.0) * u_patternScale;
 
-  // The original domain warp evolves continuously, with no cycle jump/reset.
+  // Keep domain warp continuous rather than restarting the noise cycle.
   vec2 cycleOffset = vec2(0.0);
 
   float burnNoise = warpedNoise(noiseUV + cycleOffset, cycleT * u_burnSpeed * 0.3);
@@ -114,9 +113,9 @@ void main() {
   float scanline = sin(uv.y * u_res.y * 0.5) * 0.5 + 0.5;
   filmBase *= 0.95 + scanline * 0.05;
 
-  vec3 whiteHot = vec3(1.0, 0.88, 0.67);    // #ffe0aa
-  vec3 orangeGlow = vec3(1.0, 0.533, 0.2);   // #ff8833
-  vec3 amberEdge = vec3(0.784, 0.584, 0.424); // #c8956c
+  vec3 whiteHot = vec3(1.0, 0.88, 0.67);
+  vec3 orangeGlow = vec3(1.0, 0.533, 0.2);
+  vec3 amberEdge = vec3(0.784, 0.584, 0.424);
   vec3 deepAmber = vec3(0.5, 0.25, 0.08);
 
   vec3 edgeColor = mix(amberEdge, orangeGlow, smoothstep(0.0, 0.5, edgeMask));
@@ -131,7 +130,7 @@ void main() {
   float ember = emberNoise(noiseUV, t);
 
   vec3 emberDark = vec3(0.1, 0.02, 0.0);
-  vec3 emberRed = vec3(0.4, 0.04, 0.0);       // #660a00
+  vec3 emberRed = vec3(0.4, 0.04, 0.0);
   vec3 emberOrange = vec3(0.85, 0.35, 0.05);
   vec3 emberWhite = vec3(1.0, 0.7, 0.3);
 
@@ -203,7 +202,6 @@ void main() {
 
   col = pow(max(col, 0.0), vec3(0.95));
 
-  // Presentation filter; the original burn layers above are unchanged.
   col = clamp(col, 0.0, 1.0);
   col = vec3(dot(col, u_colourRow0), dot(col, u_colourRow1), dot(col, u_colourRow2));
   gl_FragColor = vec4(col * pixelAlpha, pixelAlpha);

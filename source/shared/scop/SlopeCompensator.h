@@ -140,7 +140,6 @@ public:
             auto sum = outputBlock[channel][inputIndex];
             if (activeKernel != nullptr)
             {
-                // The direct FIR head avoids block processing latency.
                 size_t historyIndex = inputIndex;
                 for (const auto tap : activeKernel->head)
                 {

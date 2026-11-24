@@ -32,8 +32,6 @@ public:
         component.repaint();
     }
 
-    // Allows controls with sub-regions (e.g. setting titles) to start the
-    // 50 ms dwell at the mouse event rather than waiting for a paint pass.
     void setHovered(const bool hovered)
     {
         if (! hovered)

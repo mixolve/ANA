@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Settings.h"
-#include "AnalysisTypes.h"
+#include "ChannelData.h"
 #include <JuceHeader.h>
 #include <array>
 #include <vector>

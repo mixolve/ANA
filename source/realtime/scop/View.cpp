@@ -1,5 +1,5 @@
 #include "View.h"
-#include "shared/shell/CleanView.h"
+#include "shared/shell/PlotVisibility.h"
 #include "Processor.h"
 #include "shell/Processor.h"
 #include "shared/shell/Theme.h"
@@ -32,7 +32,6 @@ bool RealtimeScopView::isBandNormalizationEnabled(const size_t bandIndex) const
 
 int RealtimeScopView::minimumBandHeight() const noexcept
 {
-    // Horizontal range and time readouts are Offline-only controls.
     return ana::scop::minimumRealtimeBandHeight;
 }
 

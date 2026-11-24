@@ -1,132 +1,12 @@
 #include "shared/shell/HostSlots.h"
 #include "Processor.h"
-#include "shared/spec/SpectrumProcessing.h"
-#include "shared/corr/Settings.h"
 #include "Editor.h"
 #include "OscController.h"
 #include "PlaybackRenderer.h"
 #include "offline/shell/Analyzer.h"
 
-#include <cmath>
-#include <cstdlib>
-#include <limits>
-#include <optional>
-#include "shared/spec/Snapshots.h"
-#include "shared/animation/State.h"
+#include <algorithm>
 
-namespace
-{
-std::optional<double> stateNumber(const juce::var& value)
-{
-    const auto text = value.toString().trim();
-    if (text.isEmpty()) return std::nullopt;
-    const auto* begin = text.toRawUTF8();
-    char* end = nullptr;
-    const auto number = std::strtod(begin, &end);
-    if (end == begin || *end != '\0' || ! std::isfinite(number)) return std::nullopt;
-    return number;
-}
-
-bool validStateNumber(const juce::var& value, double low, double high, bool integer = false)
-{
-    const auto number = stateNumber(value);
-    return number && *number >= low && *number <= high && (! integer || std::floor(*number) == *number);
-}
-
-// Validate each stored setting independently. Older versions of ANA had a
-// strict all-or-nothing validator, which rejected an entire host preset whenever
-// the parameter count changed after an update.
-bool validStateProperty(const juce::Identifier& key, const juce::var& value)
-{
-    if (const auto valid = validateAnimationProperty(key, value); valid.has_value() && ! *valid)
-        return false;
-    for (const auto* boolean : { PluginProcessor::offlineAutomaticRefreshStateKey,
-                                PluginProcessor::offlineKeepSecondTakeStateKey,
-                                PluginProcessor::oscEnabledStateKey,
-                                PluginProcessor::scopFullSourceStateKey,
-                                "ui.scop.equal-height", "ui.lvls.parts-centered", "ui.square-resize" })
-        if (key == juce::Identifier(boolean) && ! validStateNumber(value, 0, 1, true)) return false;
-    if (key == juce::Identifier(PluginProcessor::offlineLocationStateKey)
-        && ! validStateNumber(value, 0, 1, true)) return false;
-    if (key == juce::Identifier(PluginProcessor::offlineTakeNumberStateKey)
-        && ! validStateNumber(value, 1, std::numeric_limits<int>::max(), true)) return false;
-    if ((key == juce::Identifier(PluginProcessor::editorWidthStateKey)
-         || key == juce::Identifier(PluginProcessor::editorHeightStateKey))
-        && ! validStateNumber(value, 1, 32768, true)) return false;
-    if ((key == juce::Identifier(PluginProcessor::oscInputPortStateKey)
-         || key == juce::Identifier(PluginProcessor::oscOutputPortStateKey))
-        && ! validStateNumber(value, 1, 65535, true)) return false;
-    if (key == juce::Identifier(PluginProcessor::oscOutputHostStateKey)
-        && (value.toString().trim().isEmpty() || value.toString().length() > 253)) return false;
-    if (key == juce::Identifier(PluginProcessor::offlineSourceStateKey) && ! value.isString()) return false;
-    if (key == juce::Identifier(PluginProcessor::scopSingleViewStateKey)
-        && ! validStateNumber(value, -1, ana::dsp::LinkwitzRileyCrossover::numBands - 1, true)) return false;
-    for (const auto* weight : PluginProcessor::lvlsSectionWeightStateKeys)
-        if (key == juce::Identifier(weight)
-            && ! validStateNumber(value, std::numeric_limits<float>::denorm_min(),
-                                  std::numeric_limits<float>::max())) return false;
-    for (const auto* weight : PluginProcessor::scopBandHeightStateKeys)
-        if (key == juce::Identifier(weight)
-            && ! validStateNumber(value, std::numeric_limits<float>::denorm_min(),
-                                  std::numeric_limits<float>::max())) return false;
-    if (key == juce::Identifier("ana.spec.snapshots") && ! ana::spec::SnapshotStore::isValidState(value))
-        return false;
-    return true;
-}
-
-juce::ValueTree compatibleProcessorState(const juce::ValueTree& saved,
-                                         juce::AudioProcessorValueTreeState& parameters)
-{
-    if (! saved.isValid() || saved.getType() != parameters.state.getType())
-        return {};
-
-    // Start from the current schema: missing parameters retain their current
-    // values, removed parameters are ignored, and valid saved parameters survive.
-    auto restored = parameters.copyState();
-    // A preset without slot mappings must not inherit the current project's assignments.
-    for(int slot=0;slot<HostSlots::count;++slot) restored.removeProperty(HostSlots::key(slot),nullptr);
-    for (const auto child : saved)
-    {
-        if (! child.hasType("PARAM") || ! child.hasProperty("id")
-            || ! child.hasProperty("value"))
-            continue;
-        const auto id = child.getProperty("id").toString();
-        const auto* parameter = parameters.getParameter(id);
-        const auto value = stateNumber(child.getProperty("value"));
-        if (parameter == nullptr || ! value || id == PluginProcessor::cleanViewParameterId)
-            continue;
-
-        const auto& range = parameter->getNormalisableRange();
-        const auto clamped = juce::jlimit(range.start, range.end, static_cast<float>(*value));
-        const auto normalized = range.snapToLegalValue(clamped);
-        if (! std::isfinite(normalized))
-            continue;
-        auto target = restored.getChildWithProperty("id", id);
-        if (target.isValid())
-            target.setProperty("value", normalized, nullptr);
-    }
-
-    // Ignore CLEAN VIEW in old host projects and force it OFF on restore.
-    if (auto clean = restored.getChildWithProperty("id", PluginProcessor::cleanViewParameterId); clean.isValid())
-        clean.setProperty("value", 0.0f, nullptr);
-    const auto hasSizePair = saved.hasProperty(PluginProcessor::editorWidthStateKey)
-        && saved.hasProperty(PluginProcessor::editorHeightStateKey);
-    for (int index = 0; index < saved.getNumProperties(); ++index)
-    {
-        const auto key = saved.getPropertyName(index);
-        if (! hasSizePair && (key == juce::Identifier(PluginProcessor::editorWidthStateKey)
-                              || key == juce::Identifier(PluginProcessor::editorHeightStateKey)))
-            continue;
-        const auto value = saved.getProperty(key);
-        if (validStateProperty(key, value))
-            restored.setProperty(key, value, nullptr);
-    }
-    if(!saved.getChildWithProperty("id",PluginProcessor::dockCountParameterId).isValid())
-        if(auto dock=restored.getChildWithProperty("id",PluginProcessor::dockCountParameterId);dock.isValid()) dock.setProperty("value",6.0f,nullptr);
-    if(!saved.hasProperty("ui.lvls.parts-centered")) restored.setProperty("ui.lvls.parts-centered",true,nullptr);
-    return restored;
-}
-}
 
 PluginProcessor::PluginProcessor()
     : AudioProcessor(BusesProperties()
@@ -167,10 +47,10 @@ PluginProcessor::PluginProcessor()
     offlineControlIndices = { parameters.getParameter(offlineMonitorParameterId)->getParameterIndex(),
         parameters.getParameter(offlineKeepTakeParameterId)->getParameterIndex(),
         parameters.getParameter(offlineRefreshParameterId)->getParameterIndex() };
-    animationParameterFirst=parameters.getParameter(animationParameterDefinitions().front().property)->getParameterIndex();
-    animationParameterLast=parameters.getParameter(animationParameterDefinitions().back().property)->getParameterIndex();
     scopActionIndices={parameters.getParameter(scopEqualHeightParameterId)->getParameterIndex(),parameters.getParameter(scopOverallFullParameterId)->getParameterIndex(),parameters.getParameter(scopClearParameterId)->getParameterIndex()};
     displayChoiceIndex=parameters.getParameter(displayChoiceParameterId)->getParameterIndex();
+    corrModeIndex=parameters.getParameter(corrModeParameterId)->getParameterIndex();
+    moduleIndex=parameters.getParameter(moduleParameterId)->getParameterIndex();
     hostSlots=std::make_unique<HostSlots>(parameters,[this] { triggerAsyncUpdate(); });
     parameters.state.addListener(this);
     for (auto* parameter : juce::AudioProcessor::getParameters())
@@ -195,15 +75,6 @@ void PluginProcessor::valueTreePropertyChanged(juce::ValueTree& tree,const juce:
     if(tree!=parameters.state) return;
     if(!restoringState.load())
     {
-        syncAnimationPropertyToParameter(parameters,property);
-        const char* action=property==juce::Identifier("ui.scop.equal-height")?scopEqualHeightParameterId
-            :property==juce::Identifier(scopFullSourceStateKey)?scopOverallFullParameterId:nullptr;
-        if(action!=nullptr)
-        {
-            auto* parameter=parameters.getParameter(action);
-            const auto value=bool(parameters.state[property])?1.0f:0.0f;
-            if(!juce::approximatelyEqual(parameter->getValue(),value)) parameter->setValueNotifyingHost(value);
-        }
         if(hostSlots) hostSlots->propertyChanged(property);
     }
     notifyHostOfStateChange();
@@ -211,8 +82,20 @@ void PluginProcessor::valueTreePropertyChanged(juce::ValueTree& tree,const juce:
 
 void PluginProcessor::parameterValueChanged(int index, float value)
 {
-    if(!restoringState.load(std::memory_order_acquire) && index>=animationParameterFirst && index<=animationParameterLast) pendingAnimationSync.store(true);
-    if(!restoringState.load(std::memory_order_acquire) && index==displayChoiceIndex) pendingDisplaySelection.store(juce::roundToInt(value*6.0f));
+    if (! restoringState.load(std::memory_order_acquire))
+    {
+        if (index == displayChoiceIndex)
+            pendingDisplaySelection.store(juce::roundToInt(value * 6.0f));
+        if (index == corrModeIndex)
+        {
+            // Host automation bypasses setCorrMode(): reset immediately, but
+            // defer parameter range adjustment to the message thread.
+            corrProcessor.requestClear();
+            pendingCorrModeUpdate.store(true, std::memory_order_release);
+        }
+        if (index == moduleIndex && juce::roundToInt(value * 3.0f) == 0)
+            specProcessor.requestRealtimeReset();
+    }
     if (!restoringState.load(std::memory_order_acquire))
         for (size_t i=0; i<offlineControlIndices.size(); ++i)
             if (index==offlineControlIndices[i]) pendingOfflineControls.fetch_or(1u << i);
@@ -237,7 +120,11 @@ void PluginProcessor::handleAsyncUpdate()
     if (restoringState.load(std::memory_order_acquire))
         return;
     if(hostSlots) hostSlots->sync();
-    if(pendingAnimationSync.exchange(false)) syncAnimationParametersToProperties(parameters);
+    if (pendingCorrModeUpdate.exchange(false, std::memory_order_acq_rel))
+    {
+        if (const auto* mode = parameters.getRawParameterValue(corrModeParameterId))
+            constrainCorrRangeForMode(juce::roundToInt(mode->load(std::memory_order_relaxed)));
+    }
     const auto scopActions=pendingScopActions.exchange(0);
     if(scopActions&1u) setScopBandsEqualHeight(parameters.getParameter(scopEqualHeightParameterId)->getValue()>=0.5f);
     if(scopActions&2u) setScopFullSourceView(parameters.getParameter(scopOverallFullParameterId)->getValue()>=0.5f);
@@ -397,9 +284,8 @@ void PluginProcessor::getStateInformation(juce::MemoryBlock& destination)
     // CLEAN VIEW is session-only: never save a state that can hide the controls on reopen.
     if (auto clean = state.getChildWithProperty("id", cleanViewParameterId); clean.isValid())
         clean.setProperty("value", 0.0f, nullptr);
-    state.setProperty(offlineLocationStateKey, offlineMonitorLocation.load(std::memory_order_acquire) ? 1 : 0, nullptr);
-    state.setProperty(offlineAutomaticRefreshStateKey, isOfflineAutomaticRefresh(), nullptr);
-    state.setProperty(offlineKeepSecondTakeStateKey, isOfflineKeepSecondTake(), nullptr);
+    state.setProperty(offlineAutomaticRefreshStateKey,
+                      offlineAutomaticRefresh.load(std::memory_order_acquire), nullptr);
     {
         const juce::ScopedLock scopedLock(offlineSelectionLock);
         state.setProperty(offlineSourceStateKey, selectedOfflineSourceId, nullptr);
@@ -427,8 +313,7 @@ void PluginProcessor::setStateInformation(const void* data, const int sizeInByte
             if (! uiLock.lockWasGained()) return;
             const juce::ScopedLock stateLock(stateSerializationLock);
             const auto savedState = juce::ValueTree::fromXml(*state);
-            auto restoredState = compatibleProcessorState(savedState, parameters);
-            if (! restoredState.isValid()) return;
+            if (! savedState.isValid()) return;
             // Loading a saved state must not mark the project as edited. The
             // listener belongs to the APVTS handle, so reconnect it after restore.
             const auto previousRestoring = restoringState.exchange(true, std::memory_order_acq_rel);
@@ -437,20 +322,11 @@ void PluginProcessor::setStateInformation(const void* data, const int sizeInByte
                 parameters.state.addListener(this);
                 restoringState.store(previousRestoring, std::memory_order_release);
             } };
-            cancelPendingUpdate(); pendingDisplaySelection.store(-1); pendingOfflineControls.store(0); pendingAnimationSync.store(false); pendingScopActions.store(0);
+            cancelPendingUpdate(); pendingDisplaySelection.store(-1); pendingOfflineControls.store(0); pendingScopActions.store(0); pendingCorrModeUpdate.store(false);
             parameters.state.removeListener(this);
-            parameters.replaceState(restoredState);
-            restoreAnimationParameters(parameters,savedState);
-            const auto restoreAction=[&](const char* id,const char* property)
-            {
-                auto* parameter=parameters.getParameter(id);
-                const auto value=savedState.getChildWithProperty("id",id).isValid()?parameter->getValue()>=0.5f:bool(savedState.getProperty(property,false));
-                parameter->setValueNotifyingHost(value?1.0f:0.0f);
-                parameters.state.setProperty(property,value,nullptr);
-            };
-            restoreAction(scopEqualHeightParameterId,"ui.scop.equal-height");
-            restoreAction(scopOverallFullParameterId,scopFullSourceStateKey);
+            parameters.replaceState(savedState);
             parameters.getParameter(scopClearParameterId)->setValueNotifyingHost(0.0f);
+            parameters.getParameter(cleanViewParameterId)->setValueNotifyingHost(0.0f);
             if (const auto* mode = getRawParameterValue(corrModeParameterId))
                 constrainCorrRangeForMode(juce::roundToInt(mode->load(std::memory_order_relaxed)));
 
@@ -461,14 +337,10 @@ void PluginProcessor::setStateInformation(const void* data, const int sizeInByte
                 selectedOfflineTakeNumber = juce::jlimit(1, 2, static_cast<int>(parameters.state.getProperty(
                     offlineTakeNumberStateKey, 1)));
             }
-            const auto monitor = savedState.getChildWithProperty("id", offlineMonitorParameterId).isValid()
-                ? parameters.getParameter(offlineMonitorParameterId)->getValue() >= 0.5f
-                : static_cast<int>(parameters.state.getProperty(offlineLocationStateKey, 0)) == 1;
+            const auto monitor = parameters.getParameter(offlineMonitorParameterId)->getValue() >= 0.5f;
             offlineAutomaticRefresh.store(static_cast<bool>(parameters.state.getProperty(
                 offlineAutomaticRefreshStateKey, true)), std::memory_order_release);
-            const auto keepTake = savedState.getChildWithProperty("id", offlineKeepTakeParameterId).isValid()
-                ? parameters.getParameter(offlineKeepTakeParameterId)->getValue() >= 0.5f
-                : static_cast<bool>(parameters.state.getProperty(offlineKeepSecondTakeStateKey, false));
+            const auto keepTake = parameters.getParameter(offlineKeepTakeParameterId)->getValue() >= 0.5f;
             offlineKeepSecondTake.store(keepTake, std::memory_order_release);
             {
                 const juce::ScopedLock scopedLock(offlineSelectionLock);
@@ -476,7 +348,6 @@ void PluginProcessor::setStateInformation(const void* data, const int sizeInByte
             }
             offlineMonitorLocation.store(monitor, std::memory_order_release);
             monitorHostBridge.setEnabled(monitor);
-            // Root properties preserve compatibility with older host states.
             parameters.getParameter(offlineMonitorParameterId)->setValueNotifyingHost(monitor ? 1.0f : 0.0f);
             parameters.getParameter(offlineKeepTakeParameterId)->setValueNotifyingHost(isOfflineKeepSecondTake() ? 1.0f : 0.0f);
             parameters.getParameter(offlineRefreshParameterId)->setValueNotifyingHost(0.0f);

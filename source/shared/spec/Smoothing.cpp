@@ -1,5 +1,5 @@
 #include "Smoothing.h"
-#include "SpectrumProcessing.h"
+#include "AveragingAndSmoothing.h"
 
 #include <algorithm>
 #include <cmath>

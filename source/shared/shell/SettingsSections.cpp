@@ -3,7 +3,7 @@
 #include "Processor.h"
 #include "shared/shell/StereoFftStream.h"
 #include "shared/spec/FrequencyScale.h"
-#include "shared/scop/TimeScale.h"
+#include "shared/scop/NoteLengths.h"
 #include "shared/shell/GraphColours.h"
 #include "shared/spec/Settings.h"
 #include "shared/spec/MonitorMode.h"

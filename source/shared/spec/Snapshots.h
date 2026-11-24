@@ -25,7 +25,6 @@ class SnapshotStore
 public:
     explicit SnapshotStore(juce::ValueTree* state = nullptr);
     bool synchroniseState();
-    static bool isValidState(const juce::var&);
     void persistState();
     size_t size() const noexcept { return snapshots.size(); }
     juce::String getName(size_t index) const;
