@@ -136,20 +136,33 @@ void ControlButton::paintButton(juce::Graphics& graphics,
     if(squareStyle)
     {
         ana::ui::square::paintBody(graphics,bounds);
-        if(isMarked && isMarked()) { graphics.setColour(ana::ui::white); graphics.drawRect(bounds,1); }
+        const auto marked = isMarked && isMarked();
+        if(marked) { graphics.setColour(ana::ui::white); graphics.drawRect(bounds,1); }
         const auto hasRail=getClickingTogglesState() || squareRailVisible;
-        if(hasRail) ana::ui::square::paintRail(graphics,bounds,
-            (clickHeld ? !getToggleState() : getToggleState()) ? 1.0 : 0.0,(isEnabled() && interactionEnabled),clickHeld,
-            ana::ui::square::pointerOver(*this,ana::ui::square::marker(bounds,getToggleState()?1.0:0.0)));
-        if(hasRail && isMarked && isMarked())
+        if(hasRail)
         {
-            const auto track=ana::ui::square::rail(bounds);
-            graphics.setColour(ana::ui::white);
-            graphics.fillRect(track.getX(),track.getCentreY()-1,track.getWidth(),2);
-            const auto marker=ana::ui::square::marker(bounds,getToggleState()?1.0:0.0);
-            graphics.fillRect(marker);
-            if((isEnabled() && interactionEnabled) && !clickHeld && ana::ui::square::pointerOver(*this,marker))
-            { graphics.setColour(ana::ui::square::panelBackground); graphics.fillRect(marker); graphics.setColour(ana::ui::white); graphics.drawRect(marker,1); }
+            const auto position = (clickHeld ? !getToggleState() : getToggleState()) ? 1.0 : 0.0;
+            const auto marker = ana::ui::square::marker(bounds, position);
+            const auto markerHovered = ana::ui::square::pointerOver(*this, marker);
+            const auto enabled = isEnabled() && interactionEnabled;
+            if (marked)
+            {
+                const auto track = ana::ui::square::rail(bounds);
+                const auto highlightMarker = enabled && !clickHeld && markerHovered;
+                graphics.setColour(ana::ui::white);
+                graphics.fillRect(track.getX(), track.getCentreY() - 1, track.getWidth(), 2);
+                if (highlightMarker) graphics.setColour(ana::ui::square::panelBackground);
+                graphics.fillRect(marker);
+                if (highlightMarker)
+                {
+                    graphics.setColour(ana::ui::white);
+                    graphics.drawRect(marker, 1);
+                }
+            }
+            else
+            {
+                ana::ui::square::paintRail(graphics, bounds, position, enabled, clickHeld, markerHovered);
+            }
         }
         auto textArea=ana::ui::square::textBounds(bounds,hasRail);
         if(bottomSlotVisible) textArea.removeFromBottom(14);

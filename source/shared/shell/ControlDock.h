@@ -6,7 +6,8 @@
 class AnaDockToggle final : public juce::Button
 {
 public:
-    AnaDockToggle() : juce::Button("dock-toggle") { setClickingTogglesState(true); setWantsKeyboardFocus(false); }
+    explicit AnaDockToggle(const juce::String& name = "dock-toggle") : juce::Button(name)
+    { setClickingTogglesState(true); setWantsKeyboardFocus(false); }
     void paintButton(juce::Graphics& g,bool hovered,bool held) override
     { g.fillAll(held?ana::ui::white:hovered?ana::ui::dark:getToggleState()?ana::ui::white:ana::ui::light); }
 };

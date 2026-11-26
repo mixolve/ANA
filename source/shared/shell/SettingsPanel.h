@@ -25,6 +25,11 @@ public:
 
     bool setAnalyzerContext(ana::AnalyzerPage page, const juce::String& viewMode);
     PluginProcessor& getProcessor() const { return processor; }
+    juce::Rectangle<int> getScrollBarColumn() const
+    {
+        auto bounds = settingsViewport.getBounds();
+        return bounds.removeFromRight(settingsViewport.getScrollBarThickness());
+    }
     void refreshExternalState();
     void setTrackInfo(int trackNumber, const juce::String& trackName);
     void attachMainControl(ControlButton& control, int index, bool allowDock = true);

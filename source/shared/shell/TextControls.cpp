@@ -36,6 +36,9 @@ void CopyPasteTextEditor::paint(juce::Graphics& g)
         for(const auto& bounds:getTextBounds(selection)) g.fillRect(bounds);
         return;
     }
+    if (!findColour(juce::TextEditor::highlightColourId).isTransparent())
+        return; // JUCE already paints the configured selection.
+
     const auto selection=getHighlightedRegion();
     if(selection.isEmpty()) return;
     g.setColour(ana::ui::light.withMultipliedAlpha(hasKeyboardFocus(true)?1.0f:0.5f));
@@ -230,9 +233,6 @@ void EllipsisLabel::editorShown(juce::TextEditor* editor)
     editor->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
     editor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
     editor->setColour(juce::TextEditor::shadowColourId, juce::Colours::transparentBlack);
-    editor->setColour(juce::TextEditor::highlightColourId, juce::Colours::transparentBlack);
-    editor->setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
-    editor->setColour(juce::CaretComponent::caretColourId, ana::ui::white);
 
     // Auxiliary windows pass shortcuts to the host except while inline text editing is active.
     if (onEditorVisibilityChanged)

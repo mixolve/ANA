@@ -10,9 +10,11 @@
 {
     NSWindow* auxiliaryWindow;
     NSInteger hostLevel;
+    BOOL pinned;
 }
 - (instancetype)initWithWindow:(NSWindow*)window;
 - (void)setHostLevel:(NSInteger)level;
+- (void)setPinned:(BOOL)shouldPin;
 - (void)activationChanged:(NSNotification*)notification;
 @end
 
@@ -34,13 +36,21 @@
 }
 - (void)setHostLevel:(NSInteger)level
 {
+    pinned = NO;
     hostLevel = level;
     auxiliaryWindow.level = NSApp.active ? hostLevel : NSNormalWindowLevel;
 }
+- (void)setPinned:(BOOL)shouldPin
+{
+    pinned = shouldPin;
+    auxiliaryWindow.level = pinned ? NSFloatingWindowLevel
+                                   : (NSApp.active ? hostLevel : NSNormalWindowLevel);
+}
 - (void)activationChanged:(NSNotification*)notification
 {
-    auxiliaryWindow.level = [notification.name isEqualToString:NSApplicationDidBecomeActiveNotification]
-        ? hostLevel : NSNormalWindowLevel;
+    if (!pinned)
+        auxiliaryWindow.level = [notification.name isEqualToString:NSApplicationDidBecomeActiveNotification]
+            ? hostLevel : NSNormalWindowLevel;
 }
 - (void)dealloc
 {
@@ -100,9 +110,24 @@ void matchAuxiliaryWindowLevel(juce::Component& component, juce::Component& owne
 void attachAuxiliaryWindowToOwner(juce::Component& component, juce::Component& owner)
 {
     auto* window = nativeWindowFor(component);
-    auto* ownerWindow = nativeWindowFor(owner);
-    if (window == nil || ownerWindow == nil || window == ownerWindow)
+    if (window == nil)
         return;
+
+    if (component.isAlwaysOnTop())
+    {
+        detachAuxiliaryWindowFromOwner(component);
+        [activationFor(window) setPinned:YES];
+        window.hidesOnDeactivate = NO;
+        [window orderFrontRegardless];
+        return;
+    }
+
+    auto* ownerWindow = nativeWindowFor(owner);
+    if (ownerWindow == nil || window == ownerWindow)
+    {
+        [activationFor(window) setPinned:NO];
+        return;
+    }
 
     if (window.parentWindow != ownerWindow)
     {

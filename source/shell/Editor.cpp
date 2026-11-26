@@ -36,6 +36,8 @@ namespace
 constexpr int defaultEditorHeight = minimumEditorHeight;
 constexpr int settingsWindowWidth = ana::ui::square::windowWidth;
 constexpr int maximumSettingsWindowHeight = 1200;
+constexpr auto settingsVisibilityKey = "ana.settings.dock.visible";
+constexpr auto settingsAlwaysOnTopKey = "ana.settings.alwaysOnTop";
 constexpr int snapshotFileMagic = 0x414e4153; // "ANAS"
 constexpr int snapshotFileVersion = 3;
 constexpr int maximumSnapshotNameLength = 256;
@@ -104,10 +106,12 @@ public:
 
 class SettingsWindowContent final : public juce::Component
 {
+    static constexpr int frameThickness = 2;
+
 public:
     void paint(juce::Graphics& g) override { g.fillAll(ana::ui::square::panelBackground); }
     void paintOverChildren(juce::Graphics& g) override
-    { NumericValueBox::paintRangeIndicators(g,*this); g.setColour(ana::ui::background); g.drawRect(getLocalBounds(),2); }
+    { NumericValueBox::paintRangeIndicators(g,*this); g.setColour(ana::ui::background); g.drawRect(getLocalBounds(),frameThickness); }
     explicit SettingsWindowContent(SettingsPanel& panelIn)
         : dock(panelIn.getProcessor(),panelIn), panel(panelIn)
     {
@@ -115,6 +119,9 @@ public:
         panel.getProperties().set("externalSettingsFrame",true);
         addAndMakeVisible(panel);
         addAndMakeVisible(dock);
+        addAndMakeVisible(keepOnTop);
+        keepOnTop.setMouseCursor(juce::MouseCursor::NormalCursor);
+        addMouseListener(this, true);
     }
 
     void showPopup(const juce::Rectangle<int> anchorBounds,
@@ -211,6 +218,16 @@ public:
         panel.setVisible(!dock.dockOnly());
         if(dock.dockOnly()) { panel.setBounds({}); dock.setBounds(area); }
         else { dock.setBounds(area.removeFromBottom(96)); area.removeFromBottom(8); panel.setBounds(area); }
+        keepOnTop.setVisible(!dock.dockOnly());
+        if (keepOnTop.isVisible())
+        {
+            const auto column = getLocalArea(&panel, panel.getScrollBarColumn());
+            constexpr int width = 12, height = 6;
+            const auto gapTop = getLocalBounds().getY() + frameThickness;
+            const auto gap = column.getY() - gapTop;
+            keepOnTop.setBounds(column.getCentreX() - width / 2,
+                               gapTop + (gap - height) / 2, width, height);
+        }
         if (about != nullptr) { about->setBounds(getLocalBounds()); about->toFront(true); }
         if (choicePrompt != nullptr)
         {
@@ -226,7 +243,26 @@ public:
 
 public:
     ControlDock dock;
+    AnaDockToggle keepOnTop { "Keep settings on top" };
 private:
+    void mouseEnter(const juce::MouseEvent& event) override { refreshTopGapCursor(event); }
+    void mouseMove(const juce::MouseEvent& event) override { refreshTopGapCursor(event); }
+
+    void refreshTopGapCursor(const juce::MouseEvent& event)
+    {
+        if (dock.dockOnly() || event.mods.isAnyMouseButtonDown())
+            return;
+
+        const auto position = event.getEventRelativeTo(this).getPosition();
+        const auto column = getLocalArea(&panel, panel.getScrollBarColumn());
+        if (getLocalBounds().withBottom(column.getY()).contains(position))
+        {
+            // The host can change the system cursor independently of JUCE's cached cursor.
+            auto mouse = event.source;
+            mouse.forceMouseCursorUpdate();
+        }
+    }
+
     SettingsPanel& panel;
     juce::Component::SafePointer<AboutPopup> about;
     std::unique_ptr<ChoicePopup> choicePrompt;
@@ -478,9 +514,10 @@ public:
         getProperties().set("emptyEditorBackground", true);
         label.setFont(ana::ui::makeFont());
         label.setJustificationType(juce::Justification::centredLeft);
-        label.setColour(juce::Label::textWhenEditingColourId, ana::ui::white);
-        label.setColour(juce::TextEditor::highlightColourId, ana::ui::light);
-        label.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::black);
+        label.setColour(juce::Label::textWhenEditingColourId, ana::ui::background);
+        label.setColour(juce::TextEditor::highlightColourId, ana::ui::background);
+        label.setColour(juce::TextEditor::highlightedTextColourId, ana::ui::white);
+        label.setColour(juce::CaretComponent::caretColourId, ana::ui::background);
         label.setBorderSize(juce::BorderSize<int>(0, ana::ui::gap.pixels(), 0, ana::ui::gap.pixels()));
         label.setDrawBackground(true);
         label.setHoverEnabled(false);
@@ -938,8 +975,24 @@ public:
             setTextInputActive(isEditing);
         };
         content.dock.onModeChanged=[this] { applyDockMode(); };
+        content.keepOnTop.onClick = [this]
+        {
+            const auto pinned = content.keepOnTop.getToggleState();
+            panelRef.getProcessor().getParameters().state.setProperty(settingsAlwaysOnTopKey, pinned, nullptr);
+            setAuxiliaryAlwaysOnTop(pinned);
+        };
         applyDockMode(true);
+        restoreAlwaysOnTop();
         initialiseDesktopPeer();
+    }
+
+    void restoreAlwaysOnTop()
+    {
+        const auto& state = panelRef.getProcessor().getParameters().state;
+        const bool pinned = bool(state.getProperty(settingsAlwaysOnTopKey, false));
+        content.keepOnTop.setToggleState(pinned, juce::dontSendNotification);
+        if (pinned != isAlwaysOnTop())
+            setAuxiliaryAlwaysOnTop(pinned);
     }
 
     void applyDockMode(bool initial = false)
@@ -1377,10 +1430,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorRef)
                          savedSize.y > 0 ? savedSize.y : defaultEditorHeight));
     dockScreensetInitializationComplete = true;
     registerDockScreenset();
-    // Fallback for hosts without REAPER's screenset API: restore the dock when
-    // this editor is opened again, retaining its last position.
-    if (bool(audioProcessor.getParameters().state.getProperty("ana.dock.only", false))
-        && bool(audioProcessor.getParameters().state.getProperty("ana.settings.dock.visible", false)))
+    if (bool(audioProcessor.getParameters().state.getProperty(settingsVisibilityKey, false)))
         showAnalyzerSettings(true);
 }
 
@@ -1511,10 +1561,7 @@ std::intptr_t PluginEditor::handleDockScreenset(int action, void* data, int size
 void PluginEditor::loadDockScreensetState(juce::String serialized)
 {
     if (serialized.isEmpty())
-    {
-        showAnalyzerSettings(false);
         return;
-    }
     const auto fields = juce::StringArray::fromTokens(serialized, "|", "");
     if (fields.size() != 8 || fields[0] != "1")
         return;
@@ -1545,10 +1592,8 @@ void PluginEditor::showAnalyzerSettings(const bool shouldShowSettings)
 {
     if (!shouldShowSettings) dismissAboutPopup();
     auto& state = audioProcessor.getParameters().state;
-    const bool dockOnly = bool(state.getProperty("ana.dock.only", false));
-    const bool rememberDockVisible = shouldShowSettings && dockOnly;
-    if (bool(state.getProperty("ana.settings.dock.visible", false)) != rememberDockVisible)
-        state.setProperty("ana.settings.dock.visible", rememberDockVisible, nullptr);
+    if (bool(state.getProperty(settingsVisibilityKey, false)) != shouldShowSettings)
+        state.setProperty(settingsVisibilityKey, shouldShowSettings, nullptr);
     if (shouldShowSettings && settingsWindow == nullptr)
     {
         settingsWindow = std::make_unique<SettingsWindow>(
@@ -1797,7 +1842,17 @@ void PluginEditor::timerCallback()
     if (dockScreensetInitializationComplete)
         registerDockScreenset();
     const auto stateChanged = displayedStateRevision != audioProcessor.getStateRevision();
-    if (stateChanged) restoreProcessorState();
+    if (stateChanged)
+    {
+        restoreProcessorState();
+        const bool settingsVisible = bool(audioProcessor.getParameters().state.getProperty(settingsVisibilityKey, false));
+        if (settingsVisible && settingsWindow != nullptr)
+            settingsWindow->applyDockMode(true);
+        if (settingsVisible != showingAnalyzerSettings)
+            showAnalyzerSettings(settingsVisible);
+        if (settingsWindow != nullptr)
+            settingsWindow->restoreAlwaysOnTop();
+    }
     else syncDisplayedEditorSize();
     loadAnimationSettings(*animationSettings, audioProcessor.getParameters());
     const auto animationActive = audioProcessor.isScreensaverEnabled();

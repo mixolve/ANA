@@ -105,6 +105,7 @@ protected:
         setBounds(bounds);
         setVisible(true);
        #if JUCE_MAC
+        auxiliaryOwner = &owner;
         enableAuxiliaryMouseMoveEvents(*this);
         // The host can have transparent native views/windows above its editor
         // (including after a REAPER screenset restore). Equal window levels
@@ -116,6 +117,15 @@ protected:
         juce::ignoreUnused(owner);
        #endif
         toFront(false);
+    }
+
+    void setAuxiliaryAlwaysOnTop(bool on)
+    {
+        setAlwaysOnTop(on);
+       #if JUCE_MAC
+        if (isVisible() && auxiliaryOwner != nullptr)
+            attachAuxiliaryWindowToOwner(*this, *auxiliaryOwner);
+       #endif
     }
 
     void hideAuxiliaryWindow()
@@ -206,6 +216,7 @@ private:
     bool passShortcutsToHost = true;
    #if JUCE_MAC
     void* previousKeyWindow = nullptr;
+    juce::Component::SafePointer<juce::Component> auxiliaryOwner;
    #endif
     bool hasBeenShown = false;
 };
